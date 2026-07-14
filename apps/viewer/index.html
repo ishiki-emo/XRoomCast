@@ -4,28 +4,43 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎭</text></svg>" />
-    <title>VRM Sync Viewer</title>
+    <title>癒色えも Live 3D Viewer</title>
     <style>
       html,
       body {
         margin: 0;
         padding: 0;
+        background: #141414;
+        color: #eee;
+        font-family: system-ui, sans-serif;
+      }
+      /* ---- 開発モード(既定): ステージ全画面+フルUI ---- */
+      body {
         overflow: hidden;
+      }
+      #stage {
+        position: fixed;
+        inset: 0;
         background: #212121;
       }
-      canvas {
+      #stage canvas {
         display: block;
       }
+      #page-header,
+      #page-desc,
+      #stats {
+        display: none;
+      }
       #ui {
-        position: fixed;
+        position: absolute;
         top: 12px;
         left: 12px;
         display: flex;
         flex-direction: column;
         gap: 8px;
-        font-family: system-ui, sans-serif;
         font-size: 14px;
-        max-width: min(480px, calc(100vw - 24px));
+        max-width: min(480px, calc(100% - 24px));
+        z-index: 10;
       }
       #ui .row {
         display: flex;
@@ -94,27 +109,110 @@
       #status.error {
         color: #ff6b6b;
       }
+
+      /* ---- 視聴モード(?watch=1): ページレイアウト+16:9ステージ ---- */
+      body.watch {
+        overflow: auto;
+      }
+      body.watch #page {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 28px 16px 56px;
+      }
+      body.watch #page-header {
+        display: block;
+        margin-bottom: 16px;
+      }
+      body.watch #page-header h1 {
+        margin: 0 0 6px;
+        font-size: 26px;
+        font-weight: 700;
+      }
+      body.watch #page-header .sub {
+        margin: 0;
+        color: #aaa;
+        font-size: 14px;
+      }
+      body.watch #stage {
+        position: relative;
+        inset: auto;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        border-radius: 12px;
+        overflow: hidden;
+        border: 1px solid #333;
+        background: #191919;
+      }
+      body.watch #ui .row {
+        display: none; /* 視聴モードでは操作UIを出さない(状態表示のみ) */
+      }
+      body.watch #ui {
+        pointer-events: none;
+      }
+      body.watch #stats {
+        display: block;
+        margin-top: 10px;
+        color: #8fa;
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+      body.watch #page-desc {
+        display: block;
+        margin-top: 20px;
+        color: #bbb;
+        font-size: 14px;
+        line-height: 1.9;
+      }
+      body.watch #page-desc h2 {
+        font-size: 16px;
+        color: #ddd;
+        margin: 20px 0 6px;
+      }
+      body.watch #page-desc p {
+        margin: 6px 0;
+      }
     </style>
   </head>
   <body>
-    <div id="ui">
-      <div class="row">
-        <input id="vrm-url" type="text" placeholder="VRMのURLを入力(例: https://.../model.vrm)" spellcheck="false" />
-        <button id="load-button">ロード</button>
+    <div id="page">
+      <header id="page-header">
+        <h1>癒色えも Live 3D Viewer</h1>
+        <p class="sub">モーションを約3KB/sのポーズデータで配信し、ブラウザ上でリアルタイムに3D再構成する実験ページ</p>
+      </header>
+      <div id="stage">
+        <div id="ui">
+          <div class="row">
+            <input id="vrm-url" type="text" placeholder="VRMのURLを入力(例: https://.../model.vrm)" spellcheck="false" />
+            <button id="load-button">ロード</button>
+          </div>
+          <div class="row">
+            <select id="transport-select">
+              <option value="ws">WebSocket</option>
+              <option value="sfu">SFU</option>
+            </select>
+            <input id="ws-url" type="text" value="ws://localhost:8080" spellcheck="false" />
+            <button id="ws-button">接続</button>
+          </div>
+          <div class="row">
+            <button id="demo-button">デモ再生</button>
+            <label><input type="checkbox" id="drop-checkbox" /> パケット10%ドロップ</label>
+          </div>
+          <div id="status">VRM 読み込み中...</div>
+        </div>
       </div>
-      <div class="row">
-        <select id="transport-select">
-          <option value="ws">WebSocket</option>
-          <option value="sfu">SFU</option>
-        </select>
-        <input id="ws-url" type="text" value="ws://localhost:8080" spellcheck="false" />
-        <button id="ws-button">接続</button>
-      </div>
-      <div class="row">
-        <button id="demo-button">デモ再生</button>
-        <label><input type="checkbox" id="drop-checkbox" /> パケット10%ドロップ</label>
-      </div>
-      <div id="status">VRM 読み込み中...</div>
+      <div id="stats">受信待機中...</div>
+      <section id="page-desc">
+        <h2>操作</h2>
+        <p>ドラッグで回転、ホイール/ピンチでズーム、右ドラッグ(2本指ドラッグ)で移動できます。</p>
+        <h2>これはなに?</h2>
+        <p>
+          Webカメラのトラッキング(VSeeFace)をポーズデータとしてCloudflare Realtime
+          SFU経由でストリーミングし、お使いのブラウザの中でVRMアバターを再構成しています。
+          動画ではないので転送量は動画配信の約1/1000。髪や服の揺れはあなたのブラウザが
+          その場で物理演算しています。
+        </p>
+        <p>配信がオフのときはTポーズのまま待機し、配信が始まると自動で動き出します。</p>
+      </section>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

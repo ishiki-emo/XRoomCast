@@ -137,7 +137,7 @@ export default {
       }
       const vrmKey = env.DEFAULT_VRM_KEY ?? 'Emo.vrm';
       const vrmParam = encodeURIComponent(`/vrm/${vrmKey}?k=${env.VRM_TOKEN ?? ''}`);
-      return Response.redirect(`${url.origin}/?vrm=${vrmParam}&transport=sfu`, 302);
+      return Response.redirect(`${url.origin}/?vrm=${vrmParam}&transport=sfu&watch=1`, 302);
     }
 
     if (url.pathname.startsWith('/api/sfu/')) {

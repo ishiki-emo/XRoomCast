@@ -12,9 +12,16 @@ import { SfuTransport } from './sfuTransport';
 
 const DEFAULT_VRM_PATH = '/Emo.vrm';
 
+const stage = document.getElementById('stage') as HTMLDivElement;
+const statsEl = document.getElementById('stats') as HTMLDivElement;
 const statusEl = document.getElementById('status') as HTMLDivElement;
 const urlInput = document.getElementById('vrm-url') as HTMLInputElement;
 const loadButton = document.getElementById('load-button') as HTMLButtonElement;
+
+// 視聴モード(?watch=1): 操作UIを隠してページレイアウトに切り替える。
+// レンダラのサイズ計算より先にクラスを付けておく必要がある
+const watchMode = new URLSearchParams(location.search).get('watch') === '1';
+if (watchMode) document.body.classList.add('watch');
 const demoButton = document.getElementById('demo-button') as HTMLButtonElement;
 const dropCheckbox = document.getElementById('drop-checkbox') as HTMLInputElement;
 const wsUrlInput = document.getElementById('ws-url') as HTMLInputElement;
@@ -36,9 +43,9 @@ function setStatus(text: string, isError = false): void {
 // 将来のWebXR対応(renderer.xr)を見据えて初期化を分離しておく(仕様書 §9)
 function createRenderer(): THREE.WebGLRenderer {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  document.body.appendChild(renderer.domElement);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(stage.clientWidth, stage.clientHeight);
+  stage.appendChild(renderer.domElement);
   return renderer;
 }
 
@@ -49,7 +56,7 @@ scene.background = new THREE.Color(0x212121);
 
 const camera = new THREE.PerspectiveCamera(
   30,
-  window.innerWidth / window.innerHeight,
+  stage.clientWidth / Math.max(1, stage.clientHeight),
   0.1,
   50,
 );
@@ -78,6 +85,17 @@ const demo = new DemoController();
 let liveTransport: Transport | null = null;
 let livePlayer: PoseStreamPlayer | null = null;
 
+// 転送量・描画の統計(視聴モードでステージ下に表示)
+const netStats = { bytes: 0, packets: 0, totalBytes: 0, frames: 0 };
+window.setInterval(() => {
+  const kbps = (netStats.bytes / 1024).toFixed(1);
+  const total = (netStats.totalBytes / 1024 / 1024).toFixed(2);
+  statsEl.textContent = `受信 ${kbps} KB/s ・ ${netStats.packets} pkt/s ・ 累計 ${total} MB ・ 描画 ${netStats.frames} fps`;
+  netStats.bytes = 0;
+  netStats.packets = 0;
+  netStats.frames = 0;
+}, 1000);
+
 function stopDemo(): void {
   if (!demo.active) return;
   demo.stop();
@@ -104,6 +122,9 @@ function connectTransport(kind: string, url: string): void {
   liveTransport = kind === 'sfu' ? new SfuTransport(url) : new WebSocketTransport(url);
   liveTransport.onStatus = (text, isError) => setStatus(text, isError);
   liveTransport.onPacket = (bytes) => {
+    netStats.bytes += bytes.byteLength;
+    netStats.totalBytes += bytes.byteLength;
+    netStats.packets += 1;
     try {
       livePlayer?.push(decodePacket(bytes), performance.now());
     } catch (error) {
@@ -236,15 +257,21 @@ wsUrlInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !liveTransport) wsButton.click();
 });
 
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+// ステージ(開発モード=全画面、視聴モード=16:9ボックス)のサイズに追従する
+function resizeToStage(): void {
+  const width = stage.clientWidth;
+  const height = stage.clientHeight;
+  if (width === 0 || height === 0) return;
+  camera.aspect = width / height;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+  renderer.setSize(width, height);
+}
+new ResizeObserver(resizeToStage).observe(stage);
 
 const clock = new THREE.Clock();
 
 renderer.setAnimationLoop(() => {
+  netStats.frames += 1;
   const delta = clock.getDelta();
   const player = livePlayer ?? (demo.active ? demo.player : null);
   if (player && currentApplier) {
