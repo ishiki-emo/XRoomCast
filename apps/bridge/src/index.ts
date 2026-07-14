@@ -5,6 +5,8 @@
  * 送信レート: ポーズ30Hz、表情・手指15Hz(受信レートが高くても間引く)。
  */
 import http from 'node:http';
+import { createReadStream, existsSync, statSync } from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
@@ -31,6 +33,8 @@ try {
 const VMC_PORT = Number(process.env.VMC_PORT ?? 39539);
 const WS_PORT = Number(process.env.WS_PORT ?? 8080);
 const POSE_INTERVAL_MS = 1000 / 30;
+/** /vrm/ ルートで配信するVRMの置き場所(ビューアのpublicと共用) */
+const VRM_DIR = fileURLToPath(new URL('../../viewer/public', import.meta.url));
 
 // ---- 受信状態 ----
 const skeleton = new VmcSkeleton();
@@ -206,6 +210,27 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
         return;
       }
       sendJson(res, 200, { id: channelId, name: DATA_CHANNEL_NAME });
+      return;
+    }
+    // VRM配信: apps/viewer/public/ の .vrm をCORS付きで配る。
+    // 公開ビューア(HTTPS)からトンネル経由で読み込むための簡易ホスティング
+    if (req.method === 'GET' && req.url?.startsWith('/vrm/')) {
+      const name = path.basename(decodeURIComponent(req.url.slice('/vrm/'.length)));
+      if (!name.toLowerCase().endsWith('.vrm')) {
+        sendJson(res, 404, { error: 'not found' });
+        return;
+      }
+      const filePath = path.join(VRM_DIR, name);
+      if (!existsSync(filePath)) {
+        sendJson(res, 404, { error: `${name} がありません(${VRM_DIR} に置いてください)` });
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': statSync(filePath).size,
+        'Cache-Control': 'no-store',
+      });
+      createReadStream(filePath).pipe(res);
       return;
     }
     sendJson(res, 404, { error: 'not found' });

@@ -261,7 +261,8 @@ Object.assign(window, {
 
 wsUrlInput.value = TRANSPORT_DEFAULT_URLS[transportSelect.value] ?? '';
 
-const initialUrl = new URLSearchParams(location.search).get('vrm') ?? DEFAULT_VRM_PATH;
+const params = new URLSearchParams(location.search);
+const initialUrl = params.get('vrm') ?? DEFAULT_VRM_PATH;
 urlInput.value = initialUrl;
 void loadVRM(initialUrl).then(() => {
   // デプロイ環境には既定VRMを置かないため、初回ロード失敗時は使い方を案内する
@@ -272,3 +273,13 @@ void loadVRM(initialUrl).then(() => {
     );
   }
 });
+
+// ?server=(+任意で ?transport=ws|sfu)が付いていたら自動接続する。
+// 「?vrm=...&server=...&transport=sfu」のリンク1つで視聴を開始できる
+const serverParam = params.get('server');
+if (serverParam) {
+  const kind = params.get('transport') ?? (serverParam.startsWith('ws') ? 'ws' : 'sfu');
+  transportSelect.value = kind === 'ws' ? 'ws' : 'sfu';
+  wsUrlInput.value = serverParam;
+  connectTransport(transportSelect.value, serverParam);
+}
