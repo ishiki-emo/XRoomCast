@@ -22,6 +22,11 @@ const loadButton = document.getElementById('load-button') as HTMLButtonElement;
 // レンダラのサイズ計算より先にクラスを付けておく必要がある
 const watchMode = new URLSearchParams(location.search).get('watch') === '1';
 if (watchMode) document.body.classList.add('watch');
+
+if (watchMode && location.protocol === 'https:') {
+  // 同接カウントはWorker配信の視聴ページのみ(ローカル開発では接続先がない)
+  window.addEventListener('DOMContentLoaded', () => connectPresence());
+}
 const demoButton = document.getElementById('demo-button') as HTMLButtonElement;
 const dropCheckbox = document.getElementById('drop-checkbox') as HTMLInputElement;
 const wsUrlInput = document.getElementById('ws-url') as HTMLInputElement;
@@ -87,14 +92,39 @@ let livePlayer: PoseStreamPlayer | null = null;
 
 // 転送量・描画の統計(視聴モードでステージ下に表示)
 const netStats = { bytes: 0, packets: 0, totalBytes: 0, frames: 0 };
+let presenceCount: number | null = null;
 window.setInterval(() => {
   const kbps = (netStats.bytes / 1024).toFixed(1);
   const total = (netStats.totalBytes / 1024 / 1024).toFixed(2);
-  statsEl.textContent = `受信 ${kbps} KB/s ・ ${netStats.packets} pkt/s ・ 累計 ${total} MB ・ 描画 ${netStats.frames} fps`;
+  const presence = presenceCount !== null ? `👀 同接 ${presenceCount}人 ・ ` : '';
+  statsEl.textContent = `${presence}受信 ${kbps} KB/s ・ ${netStats.packets} pkt/s ・ 累計 ${total} MB ・ 描画 ${netStats.frames} fps`;
   netStats.bytes = 0;
   netStats.packets = 0;
   netStats.frames = 0;
 }, 1000);
+
+// 同接カウント: Worker上のDurable ObjectへWebSocketで接続する(視聴モードのみ)。
+// 切断時は少し間を置いて張り直す
+function connectPresence(): void {
+  const ws = new WebSocket(`wss://${location.host}/api/presence`);
+  let pingTimer: number | null = null;
+  ws.onopen = () => {
+    pingTimer = window.setInterval(() => ws.send('ping'), 30000);
+  };
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(String(event.data)) as { count?: number };
+      if (typeof data.count === 'number') presenceCount = data.count;
+    } catch {
+      // pong等は無視
+    }
+  };
+  ws.onclose = () => {
+    if (pingTimer !== null) window.clearInterval(pingTimer);
+    presenceCount = null;
+    window.setTimeout(connectPresence, 5000 + Math.random() * 3000);
+  };
+}
 
 function stopDemo(): void {
   if (!demo.active) return;

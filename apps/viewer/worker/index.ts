@@ -8,10 +8,13 @@
  *      登録はBRIDGE_TOKENによるBearer認証必須(配信の乗っ取り防止)
  *    - これによりブリッジのトンネル公開が不要になる(共有リンクが固定化)
  */
+import { DurableObject } from 'cloudflare:workers';
+
 interface Env {
   ASSETS: Fetcher;
   VRM_BUCKET: R2Bucket;
   SFU_STATE: KVNamespace;
+  PRESENCE: DurableObjectNamespace;
   VRM_TOKEN?: string;
   CF_REALTIME_APP_ID?: string;
   CF_REALTIME_APP_SECRET?: string;
@@ -124,9 +127,58 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
   return json(404, { error: 'not found' });
 }
 
+/**
+ * 同接カウント用のDurable Object。
+ * 視聴ページがWebSocketで接続し、開いているソケット数(=同時視聴者数)を
+ * 増減のたびに全員へブロードキャストする。ハイバネーションAPIを使うので
+ * 接続が張りっぱなしでも課金対象時間はほぼゼロ。
+ */
+export class Presence extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // クライアントの生存確認ping/pongはDOを起こさずランタイムが自動応答する
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+  }
+
+  override async fetch(request: Request): Promise<Response> {
+    if (request.headers.get('Upgrade') !== 'websocket') {
+      return new Response('expected websocket', { status: 426 });
+    }
+    const pair = new WebSocketPair();
+    this.ctx.acceptWebSocket(pair[1]);
+    this.broadcast();
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  override webSocketClose(ws: WebSocket): void {
+    this.broadcast(ws);
+  }
+
+  override webSocketError(ws: WebSocket): void {
+    this.broadcast(ws);
+  }
+
+  private broadcast(closing?: WebSocket): void {
+    const sockets = this.ctx.getWebSockets().filter((s) => s !== closing);
+    const message = JSON.stringify({ count: sockets.length });
+    for (const socket of sockets) {
+      try {
+        socket.send(message);
+      } catch {
+        // 送信失敗はclose側のハンドラに任せる
+      }
+    }
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // 同接カウント(WebSocket)。単一ルーム'main'のDurable Objectへ委譲
+    if (url.pathname === '/api/presence') {
+      return env.PRESENCE.get(env.PRESENCE.idFromName('main')).fetch(request);
+    }
 
     // 視聴用の短縮URL: /watch/<キー> を開くだけで、VRMトークン入りの
     // 視聴パラメータ付きURLへリダイレクトする(秘密はすべてWorker側に置く)
