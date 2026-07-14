@@ -16,6 +16,10 @@ interface Env {
   CF_REALTIME_APP_ID?: string;
   CF_REALTIME_APP_SECRET?: string;
   BRIDGE_TOKEN?: string;
+  /** 視聴用の短縮パス /watch/<キー> の照合キー(secret) */
+  WATCH_KEY?: string;
+  /** /watch で使う既定VRMのR2キー(wrangler.jsoncのvars) */
+  DEFAULT_VRM_KEY?: string;
 }
 
 const API_BASE = 'https://rtc.live.cloudflare.com/v1/apps';
@@ -123,6 +127,18 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // 視聴用の短縮URL: /watch/<キー> を開くだけで、VRMトークン入りの
+    // 視聴パラメータ付きURLへリダイレクトする(秘密はすべてWorker側に置く)
+    if (url.pathname.startsWith('/watch/')) {
+      const key = decodeURIComponent(url.pathname.slice('/watch/'.length));
+      if (!env.WATCH_KEY || key !== env.WATCH_KEY) {
+        return new Response('not found', { status: 404 });
+      }
+      const vrmKey = env.DEFAULT_VRM_KEY ?? 'Emo.vrm';
+      const vrmParam = encodeURIComponent(`/vrm/${vrmKey}?k=${env.VRM_TOKEN ?? ''}`);
+      return Response.redirect(`${url.origin}/?vrm=${vrmParam}&transport=sfu`, 302);
+    }
 
     if (url.pathname.startsWith('/api/sfu/')) {
       if (request.method === 'OPTIONS') {

@@ -20,5 +20,8 @@
       "binding": "SFU_STATE",
       "id": "71a38014ca8746d4a9e6dc60d7fca97e"
     }
-  ]
+  ],
+  "vars": {
+    "DEFAULT_VRM_KEY": "Emo.vrm"
+  }
 }

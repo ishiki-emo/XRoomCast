@@ -229,6 +229,20 @@ https://vrmsync-viewer.ishiki-emo.workers.dev/?vrm=<urlencode(/vrm/Emo.vrm?k=ト
 SFUプロキシが同一オリジンにあるため `server=` は不要。配信の手順は
 「VSeeFace起動 → `npm run bridge`」だけで、リンクは毎回同じものが使える。
 
+### 視聴用の短縮URL(/watch/<キー>)
+
+長いパラメータ付きURLの代わりに、`/watch/<WATCH_KEY>` を開くだけで
+視聴パラメータ(既定VRM+トークン+SFU自動接続)へリダイレクトされる。
+組み立てはWorkerが行うため、共有するのは短いURL1つでよい。
+
+```sh
+npx wrangler secret put WATCH_KEY   # 視聴キー(ランダム文字列)
+```
+
+- 既定VRMは `wrangler.jsonc` の `vars.DEFAULT_VRM_KEY`(R2のキー名)で変更
+- キー不一致は404。WATCH_KEYをローテートすれば出回った視聴URLだけを
+  無効化できる(VRM_TOKENとは独立)
+
 - これは「カジュアルなDL防止」であって完全防止ではない(視聴できる人は
   原理的に取得もできる)。本気の抑制は署名付き期限トークン+メモリ上復号
   (Phase 3以降)で強化する
