@@ -21,6 +21,7 @@ export interface TwoBoneChain {
 
 const _aimParentQuat = new THREE.Quaternion();
 const _aimDirLocal = new THREE.Vector3();
+const _worldScale = new THREE.Vector3();
 const _rootPos = new THREE.Vector3();
 const _toTarget = new THREE.Vector3();
 const _poleDir = new THREE.Vector3();
@@ -72,17 +73,23 @@ export function solveTwoBoneIK(
   _toTarget.copy(targetPos).sub(_rootPos);
   if (_toTarget.lengthSq() < 1e-10) return;
 
+  // 配置フレームの均一スケール(卓上モード等)をボーン長に反映する
+  chain.upper.getWorldScale(_worldScale);
+  const scale = _worldScale.x || 1;
+  const upperLen = chain.upperLen * scale;
+  const lowerLen = chain.lowerLen * scale;
+
   // 到達可能距離にクランプ(伸び切り・折り畳み切りの特異点を避ける)
   const d = THREE.MathUtils.clamp(
     _toTarget.length(),
-    Math.abs(chain.upperLen - chain.lowerLen) + 1e-4,
-    chain.upperLen + chain.lowerLen - 1e-4,
+    Math.abs(upperLen - lowerLen) + 1e-4 * scale,
+    upperLen + lowerLen - 1e-4 * scale,
   );
   _toTarget.normalize();
 
   // 余弦定理: 目標方向軸上の肘の足の位置 x と、軸からの高さ h
-  const x = (d * d + chain.upperLen * chain.upperLen - chain.lowerLen * chain.lowerLen) / (2 * d);
-  const h = Math.sqrt(Math.max(chain.upperLen * chain.upperLen - x * x, 0));
+  const x = (d * d + upperLen * upperLen - lowerLen * lowerLen) / (2 * d);
+  const h = Math.sqrt(Math.max(upperLen * upperLen - x * x, 0));
 
   // ポール方向(目標方向軸に直交する成分)へ肘を出す
   _poleDir.copy(polePos).sub(_rootPos);

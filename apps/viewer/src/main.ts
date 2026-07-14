@@ -79,10 +79,16 @@ controls.update();
 // パステル背景・ライティング・浮遊プリミティブ
 const scenery = setupScenery(scene);
 
+// アバターの配置フレーム。AR設置・つかみ移動・卓上スケールはこのグループの
+// 変換として行う(PoseApplierがフレーム対応なのでIK等は壊れない)
+const avatarRoot = new THREE.Group();
+scene.add(avatarRoot);
+
 // パススルーAR(対応端末でのみボタンが出る)
 const arController = new ArController(
   renderer,
   scene,
+  avatarRoot,
   {
     button: document.getElementById('ar-button') as HTMLButtonElement,
     overlayRoot: document.getElementById('ar-overlay') as HTMLElement,
@@ -95,6 +101,7 @@ const arController = new ArController(
 let currentVrm: VRM | null = null;
 let currentApplier: PoseApplier | null = null;
 let loading = false;
+const _boundsInverse = new THREE.Matrix4();
 
 const demo = new DemoController();
 let liveTransport: Transport | null = null;
@@ -338,15 +345,21 @@ async function loadVRM(source: string | ArrayBuffer): Promise<void> {
 
     // 新モデルのロードに成功してから旧モデルを破棄する(失敗時は表示を維持)
     if (currentVrm) {
-      scene.remove(currentVrm.scene);
+      avatarRoot.remove(currentVrm.scene);
       VRMUtils.deepDispose(currentVrm.scene);
     }
     currentVrm = vrm;
-    currentApplier = new PoseApplier(vrm);
     vrm.scene.traverse((obj) => {
       if ((obj as THREE.Mesh).isMesh) obj.castShadow = true;
     });
-    scene.add(vrm.scene);
+    avatarRoot.add(vrm.scene);
+    currentApplier = new PoseApplier(vrm, avatarRoot);
+
+    // つかみ時の可視化用バウンディングボックス(フレームローカルで計測)
+    const bounds = new THREE.Box3().setFromObject(vrm.scene);
+    avatarRoot.updateWorldMatrix(true, false);
+    bounds.applyMatrix4(_boundsInverse.copy(avatarRoot.matrixWorld).invert());
+    arController.setAvatarBounds(bounds);
 
     setStatus(`VRM ${vrm.meta.metaVersion === '0' ? '0.x' : '1.0'} を表示中`);
     console.log('VRM loaded:', vrm);
@@ -436,7 +449,7 @@ renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
 
 // 受け入れ確認(メモリリーク・デモ再生の滑らかさ検証)用に公開
 Object.assign(window, {
-  __viewerDebug: { renderer, loadVRM, demo, getVrm: () => currentVrm, liveAudio },
+  __viewerDebug: { renderer, loadVRM, demo, getVrm: () => currentVrm, liveAudio, avatarRoot },
 });
 
 wsUrlInput.value = TRANSPORT_DEFAULT_URLS[transportSelect.value] ?? '';

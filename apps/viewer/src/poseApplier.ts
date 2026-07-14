@@ -29,6 +29,13 @@ const _headTarget = new THREE.Vector3();
 const _handTarget = new THREE.Vector3();
 const _handQuat = new THREE.Quaternion();
 const _pole = new THREE.Vector3();
+const _poleOffset = new THREE.Vector3();
+const _anchorWorld = new THREE.Vector3();
+const _footQuat = new THREE.Quaternion();
+const _framePos = new THREE.Vector3();
+const _frameQuat = new THREE.Quaternion();
+const _frameQuatInv = new THREE.Quaternion();
+const _frameScale = new THREE.Vector3();
 const _spreadQuat = new THREE.Quaternion();
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const X_AXIS = new THREE.Vector3(1, 0, 0);
@@ -46,6 +53,8 @@ export class PoseApplier {
    */
   private readonly rootQuat = new THREE.Quaternion();
   private readonly rootQuatInv = new THREE.Quaternion();
+  /** 配置フレーム。ワイヤ座標はこのフレームのローカル系として解釈する */
+  private readonly frame: THREE.Object3D;
   private readonly armChains: Record<Side, TwoBoneChain | null>;
   private readonly legChains: Record<Side, TwoBoneChain | null>;
   /** レスト時の足首ワールド位置。ここに足を固定して接地させる */
@@ -53,8 +62,13 @@ export class PoseApplier {
   private readonly fingerJoints: Record<Side, (THREE.Object3D | null)[][]>;
   private readonly touchedExpressions = new Set<string>();
 
-  constructor(vrm: VRM) {
+  /**
+   * @param frame 配置フレーム(AR設置・卓上スケール用)。ワイヤ座標はこの
+   *   フレームのローカル系として解釈される。省略時はワールド=フレーム
+   */
+  constructor(vrm: VRM, frame?: THREE.Object3D) {
     this.vrm = vrm;
+    this.frame = frame ?? vrm.scene.parent ?? vrm.scene;
     const humanoid = vrm.humanoid;
     const bone = (name: VRMHumanBoneName) => humanoid.getNormalizedBoneNode(name);
 
@@ -62,7 +76,10 @@ export class PoseApplier {
     this.head = bone('head');
     if (this.hips) {
       this.restHipsPos.copy(this.hips.position);
+      // rootQuat はフレームを除いたリグ固有の回転(VRM0.xのπ回転)だけを持つ
       this.hips.parent?.getWorldQuaternion(this.rootQuat);
+      this.frame.getWorldQuaternion(_frameQuat);
+      this.rootQuat.premultiply(_frameQuat.invert());
     }
     this.rootQuatInv.copy(this.rootQuat).invert();
 
@@ -74,9 +91,13 @@ export class PoseApplier {
       left: createTwoBoneChain(bone('leftUpperLeg'), bone('leftLowerLeg'), bone('leftFoot')),
       right: createTwoBoneChain(bone('rightUpperLeg'), bone('rightLowerLeg'), bone('rightFoot')),
     };
+    // 足首のレスト位置はフレームローカルで保持する(フレームの移動・スケールに追従)
+    this.frame.updateWorldMatrix(true, false);
+    const anchorLocal = (chain: TwoBoneChain | null): THREE.Vector3 | null =>
+      chain ? this.frame.worldToLocal(chain.end.getWorldPosition(new THREE.Vector3())) : null;
     this.footAnchors = {
-      left: this.legChains.left?.end.getWorldPosition(new THREE.Vector3()) ?? null,
-      right: this.legChains.right?.end.getWorldPosition(new THREE.Vector3()) ?? null,
+      left: anchorLocal(this.legChains.left),
+      right: anchorLocal(this.legChains.right),
     };
 
     const jointsFor = (side: Side) =>
@@ -102,30 +123,43 @@ export class PoseApplier {
   }
 
   private applyPose(pose: PoseSection): void {
-    // 頭: ワイヤ回転はワールド系での「レストからの差分」。
-    // リグのワールド回転を挟んでローカル回転へ変換する(首より上は無回転なので親=ルート系)
+    // 配置フレーム(AR設置・卓上スケール)を分解しておく。
+    // ワイヤ座標は「フレームのローカル系(等身大)」として解釈し、都度ワールドへ変換する
+    this.frame.updateWorldMatrix(true, false);
+    this.frame.matrixWorld.decompose(_framePos, _frameQuat, _frameScale);
+    const scale = _frameScale.x || 1;
+    _frameQuatInv.copy(_frameQuat).invert();
+
+    // 頭: ワイヤ回転は「レストからの差分」。リグ固有回転の共役変換はフレーム非依存
     if (this.head) {
       this.toRigLocal(this.head.quaternion.fromArray(pose.head.rotation));
     }
 
-    // ルートモーション: 受信した頭位置と現在の頭位置のワールド差分でhipsを平行移動。
-    // 差分はhipsの親のローカル系に変換してから加算する
+    // ルートモーション: 頭位置のワールド差分でhipsを平行移動。
+    // 差分は「フレーム→リグ」の順で回転を戻し、スケールで割ってリグ単位系へ
     if (this.hips && this.head) {
       this.head.getWorldPosition(_headWorld);
-      _headTarget.fromArray(pose.head.position);
-      this.hips.position.add(_headTarget.sub(_headWorld).applyQuaternion(this.rootQuatInv));
+      _headTarget.fromArray(pose.head.position).applyMatrix4(this.frame.matrixWorld);
+      this.hips.position.add(
+        _headTarget
+          .sub(_headWorld)
+          .applyQuaternion(_frameQuatInv)
+          .applyQuaternion(this.rootQuatInv)
+          .divideScalar(scale),
+      );
     }
 
-    // 足: 接地固定IK。hipsのルートモーションに合わせて膝で吸収し、
-    // 足首をレスト時のワールド位置・向きに留める(足滑り防止)
+    // 足: 接地固定IK。アンカー(フレームローカル)をワールドへ変換して固定する
     for (const side of ['left', 'right'] as const) {
       const chain = this.legChains[side];
       const anchor = this.footAnchors[side];
       if (!chain || !anchor) continue;
+      _anchorWorld.copy(anchor).applyMatrix4(this.frame.matrixWorld);
+      _footQuat.copy(_frameQuat).multiply(this.rootQuat);
       chain.upper.getWorldPosition(_pole);
-      _pole.y -= 0.4;
-      _pole.z += 0.6; // 膝は前方(+Z)へ曲げる
-      solveTwoBoneIK(chain, anchor, this.rootQuat, _pole);
+      _poleOffset.set(0, -0.4, 0.6).applyQuaternion(_frameQuat).multiplyScalar(scale);
+      _pole.add(_poleOffset); // 膝は前方(フレームの+Z)へ曲げる
+      solveTwoBoneIK(chain, _anchorWorld, _footQuat, _pole);
     }
 
     // 手: 2ボーンIK。肘のポールは肩から見て「体側やや後方・下方」の固定ヒューリスティック
@@ -133,13 +167,15 @@ export class PoseApplier {
       const chain = this.armChains[side];
       if (!chain) continue;
       const node = side === 'left' ? pose.leftHand : pose.rightHand;
-      _handTarget.fromArray(node.position);
-      // ワイヤ回転(レストからのワールド系差分)× レスト時のワールド回転 = 目標ワールド回転
-      _handQuat.fromArray(node.rotation).multiply(this.rootQuat);
+      _handTarget.fromArray(node.position).applyMatrix4(this.frame.matrixWorld);
+      // フレーム回転 × ワイヤ回転(レスト差分)× リグ固有回転 = 目標ワールド回転
+      _handQuat.fromArray(node.rotation).premultiply(_frameQuat).multiply(this.rootQuat);
       chain.upper.getWorldPosition(_pole);
-      _pole.x += side === 'left' ? 0.15 : -0.15;
-      _pole.y -= 0.6;
-      _pole.z -= 0.35;
+      _poleOffset
+        .set(side === 'left' ? 0.15 : -0.15, -0.6, -0.35)
+        .applyQuaternion(_frameQuat)
+        .multiplyScalar(scale);
+      _pole.add(_poleOffset);
       solveTwoBoneIK(chain, _handTarget, _handQuat, _pole);
     }
   }
