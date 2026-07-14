@@ -8,3 +8,6 @@ dist/
 
 # 生成物
 fixtures/dummy-motion.bin
+
+# VRM配信トークン(wrangler secretに登録済みの控え)
+.vrm-token.txt

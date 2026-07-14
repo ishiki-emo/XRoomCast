@@ -1,10 +1,18 @@
-// Cloudflare Workers(静的アセット)でビューアを配信するための設定
-// デプロイ: npm run build → npx wrangler deploy(apps/viewer で実行)
-// 注: dist/ に *.vrm を含めないこと(deployスクリプトが除去する)
+// Cloudflare Workers(静的アセット+R2配信)でビューアを公開するための設定
+// デプロイ: npm run deploy(ビルド → distからVRM除去 → wrangler deploy)
+// VRM_TOKEN は `npx wrangler secret put VRM_TOKEN` で設定する(コミットしない)
 {
   "name": "vrmsync-viewer",
+  "main": "worker/index.ts",
   "compatibility_date": "2026-01-01",
   "assets": {
-    "directory": "./dist"
-  }
+    "directory": "./dist",
+    "binding": "ASSETS"
+  },
+  "r2_buckets": [
+    {
+      "binding": "VRM_BUCKET",
+      "bucket_name": "vrmsync-assets"
+    }
+  ]
 }

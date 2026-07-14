@@ -198,3 +198,27 @@ cloudflared tunnel --url http://localhost:8080
 Cloudflareへ移管したうえで `apps/viewer/wrangler.jsonc` に
 `"routes": [{ "pattern": "stream.ishiki-emo.com", "custom_domain": true }]`
 を追加して再デプロイする。
+
+### VRMのR2ホスティング(トークン付き同一オリジン配信)
+
+公開ページで使うVRMは**R2の非公開バケット**に置き、ビューアWorker自身が
+`/vrm/<キー>?k=<トークン>` で配信する(`apps/viewer/worker/index.ts`)。
+バケットは非公開のまま・同一オリジンなのでCORS不要・URLは恒久。
+
+```sh
+npx wrangler r2 bucket create vrmsync-assets                     # 初回のみ
+npx wrangler r2 object put vrmsync-assets/Emo.vrm --file <path> --remote
+npx wrangler secret put VRM_TOKEN                                # 配信トークン(照合用)
+```
+
+- トークン不一致・未指定は403。トークンをローテートすれば出回ったリンクは無効化できる
+- ワンリンク共有の組み立て(`<>`を実値に置換):
+
+```
+https://vrmsync-viewer.ishiki-emo.workers.dev/?vrm=<urlencode(/vrm/Emo.vrm?k=トークン)>&server=<urlencode(トンネルURL)>&transport=sfu
+```
+
+- これは「カジュアルなDL防止」であって完全防止ではない(視聴できる人は
+  原理的に取得もできる)。本気の抑制は署名付き期限トークン+メモリ上復号
+  (Phase 3以降)で強化する
+- ブリッジの `/vrm/` ルート(トンネル経由配信)はLAN・開発用として残してある

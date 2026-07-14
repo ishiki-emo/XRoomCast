@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "deploy": "npm run build && node scripts/stripVrmFromDist.mjs && wrangler deploy"
+    "deploy": "npm run build && tsc --noEmit -p worker && node scripts/stripVrmFromDist.mjs && wrangler deploy"
   },
   "dependencies": {
     "@pixiv/three-vrm": "^3.4.0",
@@ -16,6 +16,7 @@
     "three": "^0.172.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260714.1",
     "@types/three": "^0.172.0",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
