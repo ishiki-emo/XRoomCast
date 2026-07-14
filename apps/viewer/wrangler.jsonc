@@ -1,0 +1,10 @@
+// Cloudflare Workers(静的アセット)でビューアを配信するための設定
+// デプロイ: npm run build → npx wrangler deploy(apps/viewer で実行)
+// 注: dist/ に *.vrm を含めないこと(deployスクリプトが除去する)
+{
+  "name": "vrmsync-viewer",
+  "compatibility_date": "2026-01-01",
+  "assets": {
+    "directory": "./dist"
+  }
+}

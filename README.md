@@ -170,3 +170,31 @@ npm run dev -- -- --host   # ビューアをLANに公開
 - ブリッジ側のWebRTCは `node-datachannel` のWebRTCポリフィルを使用
 - 辞書と表情全量は5秒間隔で定期再送する(§6.5。SFUは一方向で
   途中参加者に接続時送信ができないため)
+
+## ビューアの公開(Cloudflare Workers 静的アセット)
+
+```sh
+npx wrangler login        # 初回のみ(+ workers.devサブドメインの登録が必要)
+npm run deploy:viewer     # ビルド → distからVRM除去 → デプロイ
+```
+
+公開URL: https://vrmsync-viewer.ishiki-emo.workers.dev
+
+- **VRMファイルはデプロイに含めない**(ライセンス・DL抑制の方針+25MB上限)。
+  公開ページでは `?vrm=<CORS許可済みURL>` か入力欄でVRMを指定する
+- 公開ページはHTTPSのため、`http://` のローカルブリッジには接続できない
+  (混在コンテンツ制限)。ブリッジをインターネットへ出すには
+  `cloudflared` のクイックトンネルを使う:
+
+```sh
+cloudflared tunnel --url http://localhost:8080
+```
+
+表示された `https://～.trycloudflare.com` を公開ページのSFU接続先に入れる。
+**トンネルURLを知っている人は誰でも視聴・セッション作成できる**点に注意
+(視聴者認証・部屋管理はPhase 3以降のスコープ)。トンネルを止めればURLは無効になる。
+
+カスタムドメイン(例: stream.ishiki-emo.com)を使う場合は、ドメインのDNSを
+Cloudflareへ移管したうえで `apps/viewer/wrangler.jsonc` に
+`"routes": [{ "pattern": "stream.ishiki-emo.com", "custom_domain": true }]`
+を追加して再デプロイする。

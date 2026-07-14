@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "deploy": "npm run build && node scripts/stripVrmFromDist.mjs && wrangler deploy"
   },
   "dependencies": {
     "@pixiv/three-vrm": "^3.4.0",

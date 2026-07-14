@@ -263,4 +263,12 @@ wsUrlInput.value = TRANSPORT_DEFAULT_URLS[transportSelect.value] ?? '';
 
 const initialUrl = new URLSearchParams(location.search).get('vrm') ?? DEFAULT_VRM_PATH;
 urlInput.value = initialUrl;
-void loadVRM(initialUrl);
+void loadVRM(initialUrl).then(() => {
+  // デプロイ環境には既定VRMを置かないため、初回ロード失敗時は使い方を案内する
+  if (!currentVrm && initialUrl === DEFAULT_VRM_PATH) {
+    setStatus(
+      '既定のVRMがありません。上のURL欄にVRMのURL(CORS許可済み)を入れてロードするか、?vrm= で指定してください',
+      true,
+    );
+  }
+});
