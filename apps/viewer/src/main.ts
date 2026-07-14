@@ -5,6 +5,7 @@ import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import { decodePacket } from '@vrmsync/protocol';
 import { DemoController } from './demo';
 import { PoseApplier } from './poseApplier';
+import { setupScenery } from './scenery';
 import { PoseStreamPlayer } from './poseStream';
 import type { Transport } from './transport';
 import { WebSocketTransport } from './wsTransport';
@@ -50,6 +51,8 @@ function createRenderer(): THREE.WebGLRenderer {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(stage.clientWidth, stage.clientHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   stage.appendChild(renderer.domElement);
   return renderer;
 }
@@ -57,7 +60,6 @@ function createRenderer(): THREE.WebGLRenderer {
 const renderer = createRenderer();
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x212121);
 
 const camera = new THREE.PerspectiveCamera(
   30,
@@ -72,15 +74,8 @@ controls.target.set(0, 1.0, 0);
 controls.enableDamping = true;
 controls.update();
 
-const directionalLight = new THREE.DirectionalLight(0xffffff, 2.0);
-directionalLight.position.set(1, 2, 1).normalize();
-scene.add(directionalLight);
-
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-scene.add(ambientLight);
-
-const gridHelper = new THREE.GridHelper(10, 10, 0x555555, 0x333333);
-scene.add(gridHelper);
+// パステル背景・ライティング・浮遊プリミティブ
+const scenery = setupScenery(scene);
 
 let currentVrm: VRM | null = null;
 let currentApplier: PoseApplier | null = null;
@@ -333,6 +328,9 @@ async function loadVRM(source: string | ArrayBuffer): Promise<void> {
     }
     currentVrm = vrm;
     currentApplier = new PoseApplier(vrm);
+    vrm.scene.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) obj.castShadow = true;
+    });
     scene.add(vrm.scene);
 
     setStatus(`VRM ${vrm.meta.metaVersion === '0' ? '0.x' : '1.0'} を表示中`);
@@ -410,6 +408,7 @@ const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   netStats.frames += 1;
   const delta = clock.getDelta();
+  scenery.update(clock.elapsedTime);
   const player = livePlayer ?? (demo.active ? demo.player : null);
   if (player && currentApplier) {
     currentApplier.apply(player.sample(performance.now()));

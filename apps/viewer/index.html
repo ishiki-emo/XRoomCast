@@ -146,6 +146,9 @@
         display: none;
       }
       /* 配信停止中オーバーレイ(ステージ中央) */
+      #offline-overlay[hidden] {
+        display: none !important; /* hidden属性がdisplay:flexに負けないように */
+      }
       #offline-overlay {
         position: absolute;
         inset: 0;
