@@ -103,25 +103,78 @@ window.setInterval(() => {
   netStats.frames = 0;
 }, 1000);
 
-// 同接カウント: Worker上のDurable ObjectへWebSocketで接続する(視聴モードのみ)。
-// 切断時は少し間を置いて張り直す
+// ---- 同接カウント+匿名コメント(Worker上のDurable Object) ----
+const chatLog = document.getElementById('chat-log') as HTMLDivElement;
+const chatInput = document.getElementById('chat-input') as HTMLInputElement;
+const chatSendButton = document.getElementById('chat-send') as HTMLButtonElement;
+const CHAT_VISIBLE_MAX = 10;
+
+let presenceWs: WebSocket | null = null;
+
+function appendChat(text: string): void {
+  const item = document.createElement('div');
+  item.className = 'chat-item';
+  item.textContent = text; // textContentで挿入するのでHTMLは無害化される
+  chatLog.appendChild(item);
+  while (chatLog.children.length > CHAT_VISIBLE_MAX) {
+    chatLog.firstChild?.remove();
+  }
+}
+
+function sendChat(): void {
+  const text = chatInput.value.trim();
+  if (!text || presenceWs?.readyState !== WebSocket.OPEN) return;
+  presenceWs.send(JSON.stringify({ type: 'chat', text }));
+  chatInput.value = '';
+}
+
+chatSendButton.addEventListener('click', sendChat);
+chatInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.isComposing) sendChat();
+});
+
+function setChatEnabled(enabled: boolean): void {
+  chatInput.disabled = !enabled;
+  chatSendButton.disabled = !enabled;
+}
+
+interface PresenceMessage {
+  type?: string;
+  count?: number;
+  text?: string;
+  items?: { text: string }[];
+}
+
+// 同接・コメント用WebSocket。切断時は少し間を置いて張り直す
 function connectPresence(): void {
+  setChatEnabled(false);
   const ws = new WebSocket(`wss://${location.host}/api/presence`);
   let pingTimer: number | null = null;
   ws.onopen = () => {
+    presenceWs = ws;
+    setChatEnabled(true);
     pingTimer = window.setInterval(() => ws.send('ping'), 30000);
   };
   ws.onmessage = (event) => {
     try {
-      const data = JSON.parse(String(event.data)) as { count?: number };
-      if (typeof data.count === 'number') presenceCount = data.count;
+      const data = JSON.parse(String(event.data)) as PresenceMessage;
+      if (data.type === 'count' && typeof data.count === 'number') {
+        presenceCount = data.count;
+      } else if (data.type === 'chat' && typeof data.text === 'string') {
+        appendChat(data.text);
+      } else if (data.type === 'history' && Array.isArray(data.items)) {
+        chatLog.replaceChildren();
+        for (const item of data.items.slice(-CHAT_VISIBLE_MAX)) appendChat(item.text);
+      }
     } catch {
       // pong等は無視
     }
   };
   ws.onclose = () => {
     if (pingTimer !== null) window.clearInterval(pingTimer);
+    presenceWs = null;
     presenceCount = null;
+    setChatEnabled(false);
     window.setTimeout(connectPresence, 5000 + Math.random() * 3000);
   };
 }

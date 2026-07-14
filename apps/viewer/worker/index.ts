@@ -127,11 +127,23 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
   return json(404, { error: 'not found' });
 }
 
+interface ChatItem {
+  text: string;
+  ts: number;
+}
+
+const CHAT_HISTORY_KEY = 'chat-history';
+const CHAT_HISTORY_MAX = 50;
+const CHAT_TEXT_MAX = 200;
+const CHAT_MIN_INTERVAL_MS = 1000;
+
 /**
- * 同接カウント用のDurable Object。
- * 視聴ページがWebSocketで接続し、開いているソケット数(=同時視聴者数)を
- * 増減のたびに全員へブロードキャストする。ハイバネーションAPIを使うので
- * 接続が張りっぱなしでも課金対象時間はほぼゼロ。
+ * 同接カウント+匿名コメント用のDurable Object。
+ * 視聴ページがWebSocketで接続し、
+ * - 同接: 開いているソケット数を増減のたびに全員へ配信
+ * - コメント: 受信を検証(長さ・1秒レート制限)して全員へ配信。
+ *   直近50件はストレージに保存し、接続時に履歴として送る
+ * ハイバネーションAPIを使うので接続が張りっぱなしでもアイドルコストはほぼゼロ。
  */
 export class Presence extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -146,22 +158,59 @@ export class Presence extends DurableObject<Env> {
     }
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
-    this.broadcast();
+    this.broadcastCount();
+    const history = (await this.ctx.storage.get<ChatItem[]>(CHAT_HISTORY_KEY)) ?? [];
+    pair[1].send(JSON.stringify({ type: 'history', items: history }));
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (typeof message !== 'string') return;
+    let data: { type?: string; text?: string };
+    try {
+      data = JSON.parse(message) as { type?: string; text?: string };
+    } catch {
+      return;
+    }
+    if (data.type !== 'chat' || typeof data.text !== 'string') return;
+
+    const text = data.text.trim().slice(0, CHAT_TEXT_MAX);
+    if (text.length === 0) return;
+
+    // ソケット単位のレート制限(ハイバネーション耐性のためattachmentに記録)
+    const attachment = (ws.deserializeAttachment() ?? {}) as { lastChatAt?: number };
+    const now = Date.now();
+    if (attachment.lastChatAt !== undefined && now - attachment.lastChatAt < CHAT_MIN_INTERVAL_MS) {
+      return;
+    }
+    ws.serializeAttachment({ ...attachment, lastChatAt: now });
+
+    const item: ChatItem = { text, ts: now };
+    const history = (await this.ctx.storage.get<ChatItem[]>(CHAT_HISTORY_KEY)) ?? [];
+    history.push(item);
+    await this.ctx.storage.put(CHAT_HISTORY_KEY, history.slice(-CHAT_HISTORY_MAX));
+
+    this.broadcastJson({ type: 'chat', ...item });
+  }
+
   override webSocketClose(ws: WebSocket): void {
-    this.broadcast(ws);
+    this.broadcastCount(ws);
   }
 
   override webSocketError(ws: WebSocket): void {
-    this.broadcast(ws);
+    this.broadcastCount(ws);
   }
 
-  private broadcast(closing?: WebSocket): void {
-    const sockets = this.ctx.getWebSockets().filter((s) => s !== closing);
-    const message = JSON.stringify({ count: sockets.length });
-    for (const socket of sockets) {
+  private broadcastCount(closing?: WebSocket): void {
+    const count = this.ctx.getWebSockets().filter((s) => s !== closing).length;
+    // 旧クライアント互換のため count フィールドはトップレベルに残す
+    this.broadcastJson({ type: 'count', count }, closing);
+  }
+
+  private broadcastJson(payload: unknown, closing?: WebSocket): void {
+    const message = JSON.stringify(payload);
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket === closing) continue;
       try {
         socket.send(message);
       } catch {

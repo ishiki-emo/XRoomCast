@@ -109,6 +109,42 @@
       #status.error {
         color: #ff6b6b;
       }
+      /* コメントオーバーレイ(ステージ左下に積み上がる) */
+      #chat-log {
+        position: absolute;
+        left: 12px;
+        bottom: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-width: min(420px, 65%);
+        pointer-events: none;
+        z-index: 5;
+      }
+      .chat-item {
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        padding: 5px 10px;
+        border-radius: 8px;
+        font-size: 13px;
+        line-height: 1.5;
+        word-break: break-word;
+        width: fit-content;
+        animation: chat-in 0.18s ease-out;
+      }
+      @keyframes chat-in {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      #chat-row {
+        display: none;
+      }
 
       /* ---- 視聴モード(?watch=1): ページレイアウト+16:9ステージ ---- */
       body.watch {
@@ -156,6 +192,38 @@
         font-size: 13px;
         font-variant-numeric: tabular-nums;
       }
+      body.watch #chat-row {
+        display: flex;
+        gap: 6px;
+        margin-top: 12px;
+      }
+      #chat-input {
+        flex: 1;
+        padding: 8px 10px;
+        border: 1px solid #444;
+        border-radius: 8px;
+        background: #1e1e1e;
+        color: #eee;
+        font-size: 14px;
+      }
+      #chat-input:disabled {
+        opacity: 0.5;
+      }
+      #chat-send {
+        padding: 8px 18px;
+        border: 1px solid #444;
+        border-radius: 8px;
+        background: #2d4a2d;
+        color: #eee;
+        cursor: pointer;
+      }
+      #chat-send:hover:not(:disabled) {
+        background: #3a5f3a;
+      }
+      #chat-send:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
       body.watch #page-desc {
         display: block;
         margin-top: 20px;
@@ -199,6 +267,11 @@
           </div>
           <div id="status">VRM 読み込み中...</div>
         </div>
+        <div id="chat-log"></div>
+      </div>
+      <div id="chat-row">
+        <input id="chat-input" type="text" maxlength="200" placeholder="コメントを送る(匿名)" autocomplete="off" />
+        <button id="chat-send">送信</button>
       </div>
       <div id="stats">受信待機中...</div>
       <section id="page-desc">
