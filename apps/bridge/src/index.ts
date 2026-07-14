@@ -58,6 +58,10 @@ const stats = { received: 0, sent: 0, bytes: 0, suppressed: 0 };
  */
 const pendingBones = new Map<string, { pos: Vec3; rot: Quat }>();
 let lastFrameMarkerAt = -Infinity;
+/** 最後にボーンデータを受信した時刻。途絶えたら送信も止める(視聴側の停止中表示のため) */
+let lastBoneReceivedAt = -Infinity;
+const SOURCE_STALE_MS = 2000;
+let sourceWasLive = false;
 
 /** VMC送信元(addr:port)→最終受信時刻。複数送信元の混線検出用 */
 const senders = new Map<string, number>();
@@ -115,7 +119,8 @@ function dictionaryId(name: string): number {
 
 startVmcReceiver(VMC_PORT, {
   onBone: (name, pos, rot) => {
-    if (performance.now() - lastFrameMarkerAt < 1000) {
+    lastBoneReceivedAt = performance.now();
+    if (lastBoneReceivedAt - lastFrameMarkerAt < 1000) {
       pendingBones.set(name, { pos, rot });
     } else {
       skeleton.setBone(name, pos, rot); // フレーム区切りが来ない送信元向け
@@ -373,6 +378,15 @@ setInterval(() => {
   if (now - nextSendAt > 1000) nextSendAt = now; // 長時間の停止後は追い付き送信しない
 
   if (!skeleton.isReady()) return; // VMCが届くまで送らない
+
+  // トラッキング元(VSeeFace等)が止まったら送信も止める。
+  // 最後のポーズを送り続けると視聴側で「配信停止中」を検知できない
+  const sourceLive = performance.now() - lastBoneReceivedAt < SOURCE_STALE_MS;
+  if (sourceLive !== sourceWasLive) {
+    sourceWasLive = sourceLive;
+    console.log(sourceLive ? '[bridge] トラッキング再開。送信を開始します' : '[bridge] トラッキング途絶。送信を停止します');
+  }
+  if (!sourceLive) return;
 
   const packet: Packet = {
     sequence: nextSequence(),

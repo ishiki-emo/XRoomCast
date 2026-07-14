@@ -93,6 +93,17 @@ let livePlayer: PoseStreamPlayer | null = null;
 // 転送量・描画の統計(視聴モードでステージ下に表示)
 const netStats = { bytes: 0, packets: 0, totalBytes: 0, frames: 0 };
 let presenceCount: number | null = null;
+
+// 配信停止中オーバーレイ: 最後のポーズパケットから5秒空いたら表示する
+const offlineOverlay = document.getElementById('offline-overlay') as HTMLDivElement;
+const OFFLINE_AFTER_MS = 5000;
+let lastLivePacketAt = 0;
+if (watchMode) {
+  window.setInterval(() => {
+    offlineOverlay.hidden = performance.now() - lastLivePacketAt < OFFLINE_AFTER_MS;
+  }, 1000);
+}
+
 window.setInterval(() => {
   const kbps = (netStats.bytes / 1024).toFixed(1);
   const total = (netStats.totalBytes / 1024 / 1024).toFixed(2);
@@ -250,6 +261,7 @@ function connectTransport(kind: string, url: string): void {
     netStats.bytes += bytes.byteLength;
     netStats.totalBytes += bytes.byteLength;
     netStats.packets += 1;
+    lastLivePacketAt = performance.now();
     try {
       livePlayer?.push(decodePacket(bytes), performance.now());
     } catch (error) {

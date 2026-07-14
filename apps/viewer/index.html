@@ -145,6 +145,31 @@
       #chat-row {
         display: none;
       }
+      /* 配信停止中オーバーレイ(ステージ中央) */
+      #offline-overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        background: rgba(0, 0, 0, 0.45);
+        z-index: 4;
+        pointer-events: none;
+      }
+      #offline-overlay .badge {
+        background: rgba(0, 0, 0, 0.7);
+        border: 1px solid #444;
+        border-radius: 24px;
+        padding: 10px 22px;
+        font-size: 16px;
+        color: #ddd;
+      }
+      #offline-overlay .hint {
+        font-size: 13px;
+        color: #999;
+      }
       /* 音声ミュート解除ボタン(ステージ右上) */
       #audio-button {
         position: absolute;
@@ -290,6 +315,10 @@
         </div>
         <div id="chat-log"></div>
         <button id="audio-button" hidden>🔇 タップで音声ON</button>
+        <div id="offline-overlay" hidden>
+          <div class="badge">⏸ 配信は停止中です</div>
+          <div class="hint">配信が始まると自動で動き出します</div>
+        </div>
       </div>
       <div id="chat-row">
         <input id="chat-input" type="text" maxlength="200" placeholder="コメントを送る(匿名)" autocomplete="off" />
