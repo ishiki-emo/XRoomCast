@@ -11,3 +11,6 @@ fixtures/dummy-motion.bin
 
 # VRM配信トークン(wrangler secretに登録済みの控え)
 .vrm-token.txt
+
+# 視聴URLのQR(秘密キー入りURLを含む)
+qr-watch.png
