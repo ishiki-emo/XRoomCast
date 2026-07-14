@@ -21,10 +21,11 @@ const wsUrlInput = document.getElementById('ws-url') as HTMLInputElement;
 const wsButton = document.getElementById('ws-button') as HTMLButtonElement;
 const transportSelect = document.getElementById('transport-select') as HTMLSelectElement;
 
-// ビューアを開いたホスト(スマホからならPCのLAN IP)をブリッジの既定接続先にする
+// 既定の接続先。SFUはHTTPS(=Worker配信)なら同一オリジンのプロキシAPIを使い、
+// ローカル開発(http)ではブリッジ直結。WSはビューアを開いたホストのブリッジへ
 const TRANSPORT_DEFAULT_URLS: Record<string, string> = {
   ws: `ws://${location.hostname}:8080`,
-  sfu: `http://${location.hostname}:8080`,
+  sfu: location.protocol === 'https:' ? location.origin : `http://${location.hostname}:8080`,
 };
 
 function setStatus(text: string, isError = false): void {
@@ -274,12 +275,15 @@ void loadVRM(initialUrl).then(() => {
   }
 });
 
-// ?server=(+任意で ?transport=ws|sfu)が付いていたら自動接続する。
-// 「?vrm=...&server=...&transport=sfu」のリンク1つで視聴を開始できる
+// ?transport=ws|sfu(+任意で ?server=)が付いていたら自動接続する。
+// Worker配信ページなら「?vrm=...&transport=sfu」だけで視聴を開始できる
+// (SFUプロキシが同一オリジンにあるため server の指定は不要)
 const serverParam = params.get('server');
-if (serverParam) {
-  const kind = params.get('transport') ?? (serverParam.startsWith('ws') ? 'ws' : 'sfu');
+const transportParam = params.get('transport');
+if (serverParam || transportParam) {
+  const kind = transportParam ?? (serverParam?.startsWith('ws') ? 'ws' : 'sfu');
   transportSelect.value = kind === 'ws' ? 'ws' : 'sfu';
-  wsUrlInput.value = serverParam;
-  connectTransport(transportSelect.value, serverParam);
+  const serverUrl = serverParam ?? TRANSPORT_DEFAULT_URLS[transportSelect.value] ?? '';
+  wsUrlInput.value = serverUrl;
+  if (serverUrl) connectTransport(transportSelect.value, serverUrl);
 }

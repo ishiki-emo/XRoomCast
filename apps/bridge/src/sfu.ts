@@ -59,6 +59,8 @@ export class SfuApi {
 
 export class SfuPublisher {
   sessionId: string | null = null;
+  /** 接続(再接続含む)が完了しsessionIdが確定するたびに呼ばれる */
+  onConnected: (() => void) | null = null;
   private pc: InstanceType<typeof RTCPeerConnection> | null = null;
   private channel: ReturnType<InstanceType<typeof RTCPeerConnection>['createDataChannel']> | null =
     null;
@@ -77,6 +79,7 @@ export class SfuPublisher {
       try {
         await this.connect();
         console.log(`[sfu] パブリッシャー接続完了: sessionId=${this.sessionId}`);
+        this.onConnected?.();
         return;
       } catch (error) {
         const delay = Math.min(30000, 2000 * 2 ** attempt);

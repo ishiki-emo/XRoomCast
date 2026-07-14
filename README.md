@@ -182,17 +182,25 @@ npm run deploy:viewer     # ビルド → distからVRM除去 → デプロイ
 
 - **VRMファイルはデプロイに含めない**(ライセンス・DL抑制の方針+25MB上限)。
   公開ページでは `?vrm=<CORS許可済みURL>` か入力欄でVRMを指定する
-- 公開ページはHTTPSのため、`http://` のローカルブリッジには接続できない
-  (混在コンテンツ制限)。ブリッジをインターネットへ出すには
-  `cloudflared` のクイックトンネルを使う:
+- **SFUプロキシはWorker自身が持つ**(`/api/sfu/*`)ため、公開視聴に
+  トンネルは不要。ブリッジはSFU接続時に自分のセッションIDをWorkerへ登録し
+  (`BRIDGE_TOKEN` によるBearer認証+5分ハートビート)、WorkerがKV経由で
+  サブスクライバーへ案内する。必要なWorker secret:
 
 ```sh
-cloudflared tunnel --url http://localhost:8080
+npx wrangler secret put CF_REALTIME_APP_ID     # Realtime App ID
+npx wrangler secret put CF_REALTIME_APP_SECRET # Realtime App Secret
+npx wrangler secret put BRIDGE_TOKEN           # ブリッジ登録用(ランダム文字列)
 ```
 
-表示された `https://～.trycloudflare.com` を公開ページのSFU接続先に入れる。
-**トンネルURLを知っている人は誰でも視聴・セッション作成できる**点に注意
-(視聴者認証・部屋管理はPhase 3以降のスコープ)。トンネルを止めればURLは無効になる。
+ブリッジ側の `.env` にも `BRIDGE_TOKEN=<同じ値>` と
+`VIEWER_ORIGIN=https://vrmsync-viewer.ishiki-emo.workers.dev` を書く。
+KVネームスペース(`SFU_STATE`)は `wrangler kv namespace create SFU_STATE` で
+作成し、IDを `wrangler.jsonc` に設定する。
+
+`cloudflared tunnel --url http://localhost:8080` によるブリッジの直接公開は
+Worker登録を使わない場合の代替手段として残る(WS視聴をインターネットへ
+出したい場合もこちら)。
 
 カスタムドメイン(例: stream.ishiki-emo.com)を使う場合は、ドメインのDNSを
 Cloudflareへ移管したうえで `apps/viewer/wrangler.jsonc` に
@@ -212,11 +220,14 @@ npx wrangler secret put VRM_TOKEN                                # 配信トー�
 ```
 
 - トークン不一致・未指定は403。トークンをローテートすれば出回ったリンクは無効化できる
-- ワンリンク共有の組み立て(`<>`を実値に置換):
+- ワンリンク共有の組み立て(**固定リンク**。`<>`を実値に置換):
 
 ```
-https://vrmsync-viewer.ishiki-emo.workers.dev/?vrm=<urlencode(/vrm/Emo.vrm?k=トークン)>&server=<urlencode(トンネルURL)>&transport=sfu
+https://vrmsync-viewer.ishiki-emo.workers.dev/?vrm=<urlencode(/vrm/Emo.vrm?k=トークン)>&transport=sfu
 ```
+
+SFUプロキシが同一オリジンにあるため `server=` は不要。配信の手順は
+「VSeeFace起動 → `npm run bridge`」だけで、リンクは毎回同じものが使える。
 
 - これは「カジュアルなDL防止」であって完全防止ではない(視聴できる人は
   原理的に取得もできる)。本気の抑制は署名付き期限トークン+メモリ上復号

@@ -150,8 +150,38 @@ const sfuConfig =
     : null;
 const sfuApi = sfuConfig ? new SfuApi(sfuConfig) : null;
 const publisher = sfuApi ? new SfuPublisher(sfuApi) : null;
+
+// ビューアWorkerへのパブリッシャーセッションID登録(トンネル不要化)。
+// VIEWER_ORIGIN / BRIDGE_TOKEN が.envにあるときだけ有効
+const VIEWER_ORIGIN = process.env.VIEWER_ORIGIN;
+const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN;
+
+async function registerPublisher(): Promise<void> {
+  if (!VIEWER_ORIGIN || !BRIDGE_TOKEN || !publisher?.sessionId) return;
+  try {
+    const res = await fetch(`${VIEWER_ORIGIN}/api/sfu/publisher`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${BRIDGE_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ sessionId: publisher.sessionId }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    console.log(`[sfu] ビューアWorkerへ登録完了: ${VIEWER_ORIGIN}`);
+  } catch (error) {
+    console.warn('[sfu] ビューアWorkerへの登録に失敗:', error);
+  }
+}
+
 if (publisher) {
+  publisher.onConnected = () => void registerPublisher();
   void publisher.connectWithRetry();
+  // ハートビート(Worker側は15分無登録でパブリッシャー不在とみなす)
+  setInterval(() => void registerPublisher(), 5 * 60 * 1000);
+  if (!VIEWER_ORIGIN || !BRIDGE_TOKEN) {
+    console.log('[sfu] VIEWER_ORIGIN / BRIDGE_TOKEN 未設定のためWorker登録はスキップ(トンネル/ローカルAPIのみ)');
+  }
 } else {
   console.log('[sfu] CF_REALTIME_APP_ID / CF_REALTIME_APP_SECRET 未設定のためSFUは無効(WS配信のみ)');
 }
