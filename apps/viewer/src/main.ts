@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import { decodePacket } from '@vrmsync/protocol';
+import { ArController } from './ar';
 import { DemoController } from './demo';
 import { PoseApplier } from './poseApplier';
 import { setupScenery } from './scenery';
@@ -53,6 +54,7 @@ function createRenderer(): THREE.WebGLRenderer {
   renderer.setSize(stage.clientWidth, stage.clientHeight);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.xr.enabled = true;
   stage.appendChild(renderer.domElement);
   return renderer;
 }
@@ -76,6 +78,19 @@ controls.update();
 
 // パステル背景・ライティング・浮遊プリミティブ
 const scenery = setupScenery(scene);
+
+// パススルーAR(対応端末でのみボタンが出る)
+const arController = new ArController(
+  renderer,
+  scene,
+  {
+    button: document.getElementById('ar-button') as HTMLButtonElement,
+    overlayRoot: document.getElementById('ar-overlay') as HTMLElement,
+    hint: document.getElementById('ar-hint') as HTMLElement,
+    exitButton: document.getElementById('ar-exit') as HTMLButtonElement,
+  },
+  (arActive) => scenery.setARMode(arActive),
+);
 
 let currentVrm: VRM | null = null;
 let currentApplier: PoseApplier | null = null;
@@ -405,10 +420,11 @@ new ResizeObserver(resizeToStage).observe(stage);
 
 const clock = new THREE.Clock();
 
-renderer.setAnimationLoop(() => {
+renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
   netStats.frames += 1;
   const delta = clock.getDelta();
   scenery.update(clock.elapsedTime);
+  arController.onFrame(frame);
   const player = livePlayer ?? (demo.active ? demo.player : null);
   if (player && currentApplier) {
     currentApplier.apply(player.sample(performance.now()));

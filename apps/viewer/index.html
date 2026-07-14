@@ -194,6 +194,55 @@
         border-color: #3a5f3a;
         color: #8fa;
       }
+      /* ARボタン(ステージ右下)とARオーバーレイ */
+      #ar-button {
+        position: absolute;
+        bottom: 12px;
+        right: 12px;
+        z-index: 6;
+        padding: 8px 14px;
+        border: 1px solid #555;
+        border-radius: 20px;
+        background: rgba(0, 0, 0, 0.6);
+        color: #fff;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      #ar-overlay[hidden] {
+        display: none !important;
+      }
+      #ar-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        pointer-events: none;
+        font-family: system-ui, sans-serif;
+      }
+      #ar-hint {
+        position: absolute;
+        top: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(0, 0, 0, 0.6);
+        color: #fff;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-size: 14px;
+        white-space: nowrap;
+      }
+      #ar-exit {
+        position: absolute;
+        bottom: 32px;
+        left: 50%;
+        transform: translateX(-50%);
+        pointer-events: auto;
+        padding: 12px 28px;
+        border: 1px solid #666;
+        border-radius: 24px;
+        background: rgba(0, 0, 0, 0.7);
+        color: #fff;
+        font-size: 15px;
+      }
 
       /* ---- 視聴モード(?watch=1): ページレイアウト+16:9ステージ ---- */
       body.watch {
@@ -318,6 +367,7 @@
         </div>
         <div id="chat-log"></div>
         <button id="audio-button" hidden>🔇 タップで音声ON</button>
+        <button id="ar-button" hidden>📱 ARで見る</button>
         <div id="offline-overlay" hidden>
           <div class="badge">⏸ 配信は停止中です</div>
           <div class="hint">配信が始まると自動で動き出します</div>
@@ -340,6 +390,10 @@
         </p>
         <p>配信がオフのときはTポーズのまま待機し、配信が始まると自動で動き出します。</p>
       </section>
+    </div>
+    <div id="ar-overlay" hidden>
+      <div id="ar-hint">床にかざして、タップで設置</div>
+      <button id="ar-exit">AR終了</button>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

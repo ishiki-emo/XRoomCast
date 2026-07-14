@@ -7,6 +7,8 @@ import * as THREE from 'three';
 export interface Scenery {
   /** 経過秒を渡すと浮遊オブジェクトをアニメーションさせる */
   update(elapsedSeconds: number): void;
+  /** ARモード: 装飾(床・プリミティブ・背景・フォグ)を隠してアバターだけにする */
+  setARMode(on: boolean): void;
 }
 
 const BACKGROUND = 0xf3edff; // ラベンダーがかった白
@@ -33,8 +35,15 @@ function pastelMaterial(color: number): THREE.MeshStandardMaterial {
 }
 
 export function setupScenery(scene: THREE.Scene): Scenery {
-  scene.background = new THREE.Color(BACKGROUND);
-  scene.fog = new THREE.Fog(BACKGROUND, 9, 20);
+  const background = new THREE.Color(BACKGROUND);
+  const fog = new THREE.Fog(BACKGROUND, 9, 20);
+  scene.background = background;
+  scene.fog = fog;
+
+  // 装飾(床・プリミティブ)はARモードでまとめて隠せるようグループに入れる。
+  // ライトはARでもアバターに必要なのでグループ外
+  const decorations = new THREE.Group();
+  scene.add(decorations);
 
   // ライティング: パステルに合わせて柔らかく明るく
   const hemisphere = new THREE.HemisphereLight(0xffffff, 0xe6d9ee, 1.1);
@@ -60,7 +69,7 @@ export function setupScenery(scene: THREE.Scene): Scenery {
   );
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
-  scene.add(ground);
+  decorations.add(ground);
 
   // プリミティブの配置(アバターの後方・左右。カメラは+Z側から見る)
   const floaters: Floater[] = [];
@@ -77,7 +86,7 @@ export function setupScenery(scene: THREE.Scene): Scenery {
     mesh.position.set(x, y, z);
     if (options.rotate) mesh.rotation.set(...options.rotate);
     mesh.castShadow = true;
-    scene.add(mesh);
+    decorations.add(mesh);
     if (options.float) {
       floaters.push({
         mesh,
@@ -133,6 +142,11 @@ export function setupScenery(scene: THREE.Scene): Scenery {
         f.mesh.position.y = f.baseY + Math.sin(elapsedSeconds * f.speed + f.phase) * f.amplitude;
         f.mesh.rotation.y += f.spin * 0.016;
       }
+    },
+    setARMode(on: boolean): void {
+      decorations.visible = !on;
+      scene.background = on ? null : background;
+      scene.fog = on ? null : fog;
     },
   };
 }
