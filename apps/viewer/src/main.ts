@@ -5,8 +5,9 @@ import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import { decodePacket } from '@vrmsync/protocol';
 import { ArController } from './ar';
 import { AvatarScaleAdapter } from './avatarScale';
-import { ContactShadow } from './contactShadow';
+import { ContactShadow, type ShadowMode } from './contactShadow';
 import { DemoController } from './demo';
+import { SpatialPanel } from './spatialUI';
 import { PoseApplier } from './poseApplier';
 import { setupScenery } from './scenery';
 import { PoseStreamPlayer } from './poseStream';
@@ -89,11 +90,24 @@ scene.add(avatarRoot);
 // AR用の接地影(装飾床が消えるARでのみ有効化する)
 const contactShadow = new ContactShadow(avatarRoot);
 
+// 空間設定パネル(AR中に掴んで置ける)。今は影モードの切り替え
+const settingsPanel = new SpatialPanel({
+  title: '影',
+  options: [
+    { label: 'リアル', value: 'full' },
+    { label: 'かんたん(軽量)', value: 'blob' },
+    { label: 'なし', value: 'off' },
+  ],
+  initial: contactShadow.getMode(),
+  onSelect: (value) => contactShadow.setMode(value as ShadowMode),
+});
+
 // パススルーAR(対応端末でのみボタンが出る)
 const arController = new ArController(
   renderer,
   scene,
   avatarRoot,
+  settingsPanel,
   {
     button: document.getElementById('ar-button') as HTMLButtonElement,
     overlayRoot: document.getElementById('ar-overlay') as HTMLElement,
@@ -102,7 +116,7 @@ const arController = new ArController(
   },
   (arActive) => {
     scenery.setARMode(arActive);
-    contactShadow.setEnabled(arActive);
+    contactShadow.setARActive(arActive);
   },
 );
 arController.onScaleChanged = (scale) => currentScaleAdapter?.apply(scale);
@@ -476,7 +490,9 @@ Object.assign(window, {
       avatarRoot.scale.setScalar(scale);
       currentScaleAdapter?.apply(scale);
     },
-    setContactShadow: (on: boolean) => contactShadow.setEnabled(on),
+    setContactShadow: (on: boolean) => contactShadow.setARActive(on),
+    setShadowMode: (mode: ShadowMode) => contactShadow.setMode(mode),
+    settingsPanel,
   },
 });
 

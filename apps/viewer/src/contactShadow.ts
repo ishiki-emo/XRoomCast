@@ -1,25 +1,46 @@
 /**
- * アバターに追従する接地影(AR用)。
- * ARでは装飾の床が消えるため実在感が薄い。そこで avatarRoot の足元に
- * 「影のときだけ濃くなる透明な板(ShadowMaterial)」を敷き、真上やや斜めの
- * 影専用ライト(強度0でも影は落ちる)でアバターの影だけを落とす。
- *
- * すべて avatarRoot の子にするので、設置・つかみ移動・卓上スケールに追従する。
+ * アバターに追従する接地影(AR用)。3モード切り替え可能:
+ * - 'full': ShadowMaterial+影専用ライトによる「形のある影」(シャドウマップ使用)
+ * - 'blob': ぼかし楕円テクスチャの疑似影(追加描画パスなし=最軽量)
+ * - 'off' : なし
+ * すべて avatarRoot の子なので設置・つかみ・卓上スケールに追従する。
  */
 import * as THREE from 'three';
+
+export type ShadowMode = 'off' | 'blob' | 'full';
+
+function makeBlobTexture(): THREE.Texture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  gradient.addColorStop(0, 'rgba(0,0,0,0.55)');
+  gradient.addColorStop(0.6, 'rgba(0,0,0,0.28)');
+  gradient.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
 
 export class ContactShadow {
   private readonly light: THREE.DirectionalLight;
   private readonly target = new THREE.Object3D();
-  private readonly plane: THREE.Mesh;
+  private readonly fullPlane: THREE.Mesh;
+  private readonly blobPlane: THREE.Mesh;
+
+  private mode: ShadowMode = 'full';
+  private arActive = false;
+  private frame = 0;
 
   constructor(avatarRoot: THREE.Object3D) {
-    // 影専用ライト: 強度0でも castShadow=true なら ShadowMaterial に影を落とす。
-    // ほぼ真上に置くことで「接地コンタクトシャドウ」らしい足元の影になる
+    // 「形のある影」用: 強度0でも castShadow=true なら影は落ちる
     this.light = new THREE.DirectionalLight(0xffffff, 0);
     this.light.position.set(0.4, 3, 0.7);
     this.light.castShadow = true;
-    // 足元のぼかし影には512で十分(1024比でシャドウマップ描画を1/4に)
     this.light.shadow.mapSize.set(512, 512);
     const cam = this.light.shadow.camera;
     cam.left = -1.3;
@@ -30,32 +51,58 @@ export class ContactShadow {
     cam.far = 6;
     this.light.shadow.bias = -0.0005;
     this.light.target = this.target;
-    // シャドウマップは自前で間引き更新する(足はIK接地でほぼ動かないので
-    // 毎フレーム描き直す必要がない)
-    this.light.shadow.autoUpdate = false;
+    this.light.shadow.autoUpdate = false; // 更新は間引く(update()参照)
 
-    this.plane = new THREE.Mesh(
+    this.fullPlane = new THREE.Mesh(
       new THREE.PlaneGeometry(4, 4).rotateX(-Math.PI / 2),
       new THREE.ShadowMaterial({ opacity: 0.32 }),
     );
-    this.plane.position.y = 0.001; // 実床(y=0)との z-fight 回避
-    this.plane.receiveShadow = true;
+    this.fullPlane.position.y = 0.001;
+    this.fullPlane.receiveShadow = true;
 
-    avatarRoot.add(this.target, this.light, this.plane);
-    this.setEnabled(false);
+    // 疑似影: ぼかし楕円テクスチャ(足の前後に少し長い)。追加描画パスなし
+    this.blobPlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.62, 0.82).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({
+        map: makeBlobTexture(),
+        transparent: true,
+        depthWrite: false,
+        opacity: 1,
+      }),
+    );
+    this.blobPlane.position.y = 0.002;
+    this.blobPlane.renderOrder = 1;
+
+    avatarRoot.add(this.target, this.light, this.fullPlane, this.blobPlane);
+    this.apply();
   }
 
-  setEnabled(on: boolean): void {
-    this.plane.visible = on;
-    this.light.castShadow = on;
+  setARActive(on: boolean): void {
+    this.arActive = on;
     this.frame = 0;
+    this.apply();
   }
 
-  private frame = 0;
+  setMode(mode: ShadowMode): void {
+    this.mode = mode;
+    this.apply();
+  }
 
-  /** 毎フレーム呼ぶ。有効時はシャドウマップを2フレームに1回だけ更新する */
+  getMode(): ShadowMode {
+    return this.mode;
+  }
+
+  private apply(): void {
+    const full = this.arActive && this.mode === 'full';
+    const blob = this.arActive && this.mode === 'blob';
+    this.fullPlane.visible = full;
+    this.light.castShadow = full;
+    this.blobPlane.visible = blob;
+  }
+
+  /** 毎フレーム呼ぶ。fullモード時のみシャドウマップを2フレームに1回更新する */
   update(): void {
-    if (!this.plane.visible) return;
+    if (!this.fullPlane.visible) return;
     this.light.shadow.needsUpdate = this.frame % 2 === 0;
     this.frame += 1;
   }
