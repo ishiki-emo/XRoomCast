@@ -27,6 +27,9 @@ const _v2 = new THREE.Vector3();
 const _q1 = new THREE.Quaternion();
 
 export class ArController {
+  /** スケールが変わったときに呼ばれる(スプリングボーン等の追従用) */
+  onScaleChanged: ((scale: number) => void) | null = null;
+
   private session: XRSession | null = null;
   private hitTestSource: XRHitTestSource | null = null;
   private refSpace: XRReferenceSpace | null = null;
@@ -252,6 +255,7 @@ export class ArController {
 
       const midpoint = a.add(b).multiplyScalar(0.5); // _v1を流用
       this.avatarRoot.scale.setScalar(scale);
+      this.onScaleChanged?.(scale);
       this.avatarRoot.quaternion.copy(_q1).multiply(snap.rootQuat);
       this.avatarRoot.position
         .copy(snap.rootPos)
@@ -292,6 +296,7 @@ export class ArController {
     this.avatarRoot.position.set(0, 0, 0);
     this.avatarRoot.quaternion.identity();
     this.avatarRoot.scale.setScalar(1);
+    this.onScaleChanged?.(1);
     this.elements.overlayRoot.hidden = true;
     this.onModeChange(false);
   }

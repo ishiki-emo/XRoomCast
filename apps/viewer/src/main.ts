@@ -4,6 +4,7 @@ import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import { decodePacket } from '@vrmsync/protocol';
 import { ArController } from './ar';
+import { AvatarScaleAdapter } from './avatarScale';
 import { DemoController } from './demo';
 import { PoseApplier } from './poseApplier';
 import { setupScenery } from './scenery';
@@ -97,9 +98,11 @@ const arController = new ArController(
   },
   (arActive) => scenery.setARMode(arActive),
 );
+arController.onScaleChanged = (scale) => currentScaleAdapter?.apply(scale);
 
 let currentVrm: VRM | null = null;
 let currentApplier: PoseApplier | null = null;
+let currentScaleAdapter: AvatarScaleAdapter | null = null;
 let loading = false;
 const _boundsInverse = new THREE.Matrix4();
 
@@ -354,6 +357,8 @@ async function loadVRM(source: string | ArrayBuffer): Promise<void> {
     });
     avatarRoot.add(vrm.scene);
     currentApplier = new PoseApplier(vrm, avatarRoot);
+    currentScaleAdapter = new AvatarScaleAdapter(vrm);
+    currentScaleAdapter.apply(avatarRoot.scale.x); // AR中の差し替えでもスケールに追従
 
     // つかみ時の可視化用バウンディングボックス(フレームローカルで計測)
     const bounds = new THREE.Box3().setFromObject(vrm.scene);
@@ -449,7 +454,18 @@ renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
 
 // 受け入れ確認(メモリリーク・デモ再生の滑らかさ検証)用に公開
 Object.assign(window, {
-  __viewerDebug: { renderer, loadVRM, demo, getVrm: () => currentVrm, liveAudio, avatarRoot },
+  __viewerDebug: {
+    renderer,
+    loadVRM,
+    demo,
+    getVrm: () => currentVrm,
+    liveAudio,
+    avatarRoot,
+    setAvatarScale: (scale: number) => {
+      avatarRoot.scale.setScalar(scale);
+      currentScaleAdapter?.apply(scale);
+    },
+  },
 });
 
 wsUrlInput.value = TRANSPORT_DEFAULT_URLS[transportSelect.value] ?? '';
