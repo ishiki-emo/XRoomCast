@@ -60,6 +60,16 @@ export class ArController {
   private probePending = false;
   private probeBoard: THREE.Mesh | null = null;
 
+  /**
+   * 平面ベースのオクルージョン: plane-detectionで検出した現実の面
+   * (壁・机の天板等)を「色を描かず深度だけ書くメッシュ」として描画し、
+   * その裏に居るアバターを隠す。床は(アバターが上に立つため)除外する
+   */
+  private readonly planeOccluders = new Map<
+    object,
+    { mesh: THREE.Mesh; lastChanged: number; skip: boolean }
+  >();
+
   constructor(
     private readonly renderer: THREE.WebGLRenderer,
     private readonly scene: THREE.Scene,
@@ -247,7 +257,74 @@ export class ArController {
       }
     }
 
+    this.updatePlaneOccluders(frame);
     this.updateGrab();
+  }
+
+  private updatePlaneOccluders(frame: XRFrame): void {
+    interface PlaneLike {
+      planeSpace: XRSpace;
+      polygon: { x: number; z: number }[];
+      orientation?: string;
+      lastChangedTime: number;
+    }
+    const detected = (frame as unknown as { detectedPlanes?: Set<PlaneLike> }).detectedPlanes;
+    const refSpace = this.renderer.xr.getReferenceSpace();
+    if (!detected || !refSpace) return;
+
+    // 消えた平面のオクルーダーを破棄
+    for (const [plane, entry] of this.planeOccluders) {
+      if (!detected.has(plane as PlaneLike)) {
+        this.disposeOccluder(entry.mesh);
+        this.planeOccluders.delete(plane);
+      }
+    }
+
+    for (const plane of detected) {
+      let entry = this.planeOccluders.get(plane);
+      if (!entry || entry.lastChanged < plane.lastChangedTime) {
+        if (entry) this.disposeOccluder(entry.mesh);
+        const mesh = this.buildOccluderMesh(plane.polygon);
+        entry = { mesh, lastChanged: plane.lastChangedTime, skip: false };
+        this.planeOccluders.set(plane, entry);
+        this.scene.add(mesh);
+      }
+      if (entry.skip) continue;
+      const pose = frame.getPose(plane.planeSpace, refSpace);
+      if (!pose) {
+        entry.mesh.visible = false;
+        continue;
+      }
+      entry.mesh.matrix.fromArray(pose.transform.matrix);
+      // 床(低い位置の水平面)はアバターが上に立つため除外(足がちらつく)
+      if (plane.orientation?.toLowerCase() === 'horizontal' && pose.transform.position.y < 0.3) {
+        entry.skip = true;
+        entry.mesh.visible = false;
+        continue;
+      }
+      entry.mesh.visible = true;
+    }
+  }
+
+  private buildOccluderMesh(polygon: { x: number; z: number }[]): THREE.Mesh {
+    const shape = new THREE.Shape();
+    polygon.forEach((p, i) => (i === 0 ? shape.moveTo(p.x, p.z) : shape.lineTo(p.x, p.z)));
+    const geometry = new THREE.ShapeGeometry(shape);
+    geometry.rotateX(Math.PI / 2); // (x, y)平面 → 平面ローカルの(x, z)平面へ
+    const mesh = new THREE.Mesh(
+      geometry,
+      new THREE.MeshBasicMaterial({ colorWrite: false }), // 深度のみ書き込む
+    );
+    mesh.renderOrder = -1; // アバターより先に描いて深度を確定させる
+    mesh.matrixAutoUpdate = false;
+    mesh.visible = false;
+    return mesh;
+  }
+
+  private disposeOccluder(mesh: THREE.Mesh): void {
+    this.scene.remove(mesh);
+    mesh.geometry.dispose();
+    (mesh.material as THREE.Material).dispose();
   }
 
   private isHolding(): boolean {
@@ -345,6 +422,8 @@ export class ArController {
   private cleanup(): void {
     this.removeProbeBoard();
     this.probePending = false;
+    for (const entry of this.planeOccluders.values()) this.disposeOccluder(entry.mesh);
+    this.planeOccluders.clear();
     this.session = null;
     this.hitTestSource = null;
     this.refSpace = null;
