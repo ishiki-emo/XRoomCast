@@ -69,8 +69,14 @@ export class AvatarScaleAdapter {
       o.material.outlineWidthFactor = o.factor * scale;
     }
     // 静止長・軸を現在のワールドスケールで再キャプチャ(これをしないと
-    // 「等身大の静止長を維持しようとして」揺れものが暴れる)
-    this.vrm.scene.updateWorldMatrix(true, true);
-    this.vrm.springBoneManager?.setInitState();
+    // 「等身大の静止長を維持しようとして」揺れものが暴れる)。
+    // 必ず先にreset()でオーサリング時の姿勢へ戻すこと: シミュレーション中の
+    // 乱れた形のままキャプチャすると、それが新しい静止形状として蓄積してしまう
+    const manager = this.vrm.springBoneManager;
+    if (manager) {
+      manager.reset();
+      this.vrm.scene.updateWorldMatrix(true, true);
+      manager.setInitState();
+    }
   }
 }
