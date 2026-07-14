@@ -147,6 +147,9 @@ export function setupScenery(scene: THREE.Scene): Scenery {
       decorations.visible = !on;
       scene.background = on ? null : background;
       scene.fog = on ? null : fog;
+      // ARでは装飾床が消えるので太陽の影は不要。切ることで接地影プレーンへの
+      // 二重影を防ぐ(太陽自体はアバターのライティングとして残す)
+      sun.castShadow = !on;
     },
   };
 }

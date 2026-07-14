@@ -5,6 +5,7 @@ import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import { decodePacket } from '@vrmsync/protocol';
 import { ArController } from './ar';
 import { AvatarScaleAdapter } from './avatarScale';
+import { ContactShadow } from './contactShadow';
 import { DemoController } from './demo';
 import { PoseApplier } from './poseApplier';
 import { setupScenery } from './scenery';
@@ -85,6 +86,9 @@ const scenery = setupScenery(scene);
 const avatarRoot = new THREE.Group();
 scene.add(avatarRoot);
 
+// AR用の接地影(装飾床が消えるARでのみ有効化する)
+const contactShadow = new ContactShadow(avatarRoot);
+
 // パススルーAR(対応端末でのみボタンが出る)
 const arController = new ArController(
   renderer,
@@ -96,7 +100,10 @@ const arController = new ArController(
     hint: document.getElementById('ar-hint') as HTMLElement,
     exitButton: document.getElementById('ar-exit') as HTMLButtonElement,
   },
-  (arActive) => scenery.setARMode(arActive),
+  (arActive) => {
+    scenery.setARMode(arActive);
+    contactShadow.setEnabled(arActive);
+  },
 );
 arController.onScaleChanged = (scale) => currentScaleAdapter?.apply(scale);
 
@@ -461,10 +468,14 @@ Object.assign(window, {
     getVrm: () => currentVrm,
     liveAudio,
     avatarRoot,
+    scene,
+    scenery,
+    THREE,
     setAvatarScale: (scale: number) => {
       avatarRoot.scale.setScalar(scale);
       currentScaleAdapter?.apply(scale);
     },
+    setContactShadow: (on: boolean) => contactShadow.setEnabled(on),
   },
 });
 
