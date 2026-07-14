@@ -449,6 +449,7 @@ renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
   netStats.frames += 1;
   const delta = clock.getDelta();
   scenery.update(clock.elapsedTime);
+  contactShadow.update();
   arController.onFrame(frame);
   const player = livePlayer ?? (demo.active ? demo.player : null);
   if (player && currentApplier) {
