@@ -7,6 +7,7 @@ import { ArController } from './ar';
 import { AvatarScaleAdapter } from './avatarScale';
 import { ContactShadow, type ShadowMode } from './contactShadow';
 import { DemoController } from './demo';
+import { SpatialChat } from './spatialChat';
 import { SpatialPanel } from './spatialUI';
 import { PoseApplier } from './poseApplier';
 import { setupScenery } from './scenery';
@@ -102,12 +103,15 @@ const settingsPanel = new SpatialPanel({
   onSelect: (value) => contactShadow.setMode(value as ShadowMode),
 });
 
+// AR空間のコメントフィード(視聴ページのコメントをAR内にも表示)
+const spatialChat = new SpatialChat();
+
 // パススルーAR(対応端末でのみボタンが出る)
 const arController = new ArController(
   renderer,
   scene,
   avatarRoot,
-  settingsPanel,
+  [settingsPanel, spatialChat],
   {
     button: document.getElementById('ar-button') as HTMLButtonElement,
     overlayRoot: document.getElementById('ar-overlay') as HTMLElement,
@@ -253,9 +257,11 @@ function connectPresence(): void {
         presenceCount = data.count;
       } else if (data.type === 'chat' && typeof data.text === 'string') {
         appendChat(data.text);
+        spatialChat.push(data.text); // AR空間のフィードにも積む
       } else if (data.type === 'history' && Array.isArray(data.items)) {
         chatLog.replaceChildren();
         for (const item of data.items.slice(-CHAT_VISIBLE_MAX)) appendChat(item.text);
+        spatialChat.setHistory(data.items.map((it) => it.text));
       }
     } catch {
       // pong等は無視
@@ -493,6 +499,7 @@ Object.assign(window, {
     setContactShadow: (on: boolean) => contactShadow.setARActive(on),
     setShadowMode: (mode: ShadowMode) => contactShadow.setMode(mode),
     settingsPanel,
+    spatialChat,
   },
 });
 

@@ -5,6 +5,20 @@
  */
 import * as THREE from 'three';
 
+/** AR空間に置けるパネルの共通インターフェース(掴み移動・レイ操作の対象) */
+export interface ArPanel {
+  readonly object: THREE.Object3D;
+  readonly visible: boolean;
+  /** AR開始時の初期配置 */
+  arPlacement: { position: THREE.Vector3; yaw: number };
+  /** レイとの交差。index: >=0 ボタン / -2 面(ボタン外) / なければ null */
+  raycast(raycaster: THREE.Raycaster): { index: number; distance: number } | null;
+  setHover(index: number): void;
+  activate(index: number): void;
+  show(position: THREE.Vector3, quaternion: THREE.Quaternion): void;
+  hide(): void;
+}
+
 export interface PanelOption {
   label: string;
   value: string;
@@ -30,8 +44,9 @@ interface ButtonRect {
   option: PanelOption;
 }
 
-export class SpatialPanel {
+export class SpatialPanel implements ArPanel {
   readonly object: THREE.Group;
+  arPlacement = { position: new THREE.Vector3(0.45, 1.15, -0.7), yaw: -0.5 };
   private readonly mesh: THREE.Mesh;
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;

@@ -10,7 +10,7 @@
  * 結果を返さないため、rAFフレームで結果をキャッシュして設置時に使う。
  */
 import * as THREE from 'three';
-import type { SpatialPanel } from './spatialUI';
+import type { ArPanel } from './spatialUI';
 
 export interface ArElements {
   button: HTMLButtonElement;
@@ -31,7 +31,7 @@ const _raycaster = new THREE.Raycaster();
 
 type GrabTarget = null | 'avatar' | 'panel';
 interface RayHit {
-  onPanel: boolean;
+  panel: ArPanel | null;
   index: number; // >=0 ボタン, -2 パネル面(ボタン外), -1 なし
   distance: number;
 }
@@ -55,17 +55,17 @@ export class ArController {
   private readonly lasers: THREE.Line[];
   /** 各手が今つかんでいる対象 */
   private readonly heldTarget: GrabTarget[] = [null, null];
-  /** 各手のレイがパネルに当たっているか(select/squeezeの分岐に使う) */
+  /** 各手のレイが指しているパネル/ボタン(select/squeezeの分岐に使う) */
   private readonly rayHit: RayHit[] = [
-    { onPanel: false, index: -1, distance: 0 },
-    { onPanel: false, index: -1, distance: 0 },
+    { panel: null, index: -1, distance: 0 },
+    { panel: null, index: -1, distance: 0 },
   ];
   /** アバター片手つかみ: グリップ座標系でのavatarRootのオフセット */
   private readonly grabOffset = new THREE.Matrix4();
   private grabHand = -1;
-  /** パネルつかみ: グリップ座標系でのpanelのオフセット */
-  private readonly panelGrabOffset = new THREE.Matrix4();
-  private panelGrabHand = -1;
+  /** パネルつかみ: 各手が掴んでいるパネルとグリップ座標系でのオフセット */
+  private readonly grabbedPanel: (ArPanel | null)[] = [null, null];
+  private readonly panelGrabOffset = [new THREE.Matrix4(), new THREE.Matrix4()];
   /** 両手つかみ開始時のスナップショット */
   private twoHand: {
     distance: number;
@@ -95,7 +95,7 @@ export class ArController {
     private readonly renderer: THREE.WebGLRenderer,
     private readonly scene: THREE.Scene,
     private readonly avatarRoot: THREE.Group,
-    private readonly panel: SpatialPanel,
+    private readonly panels: ArPanel[],
     private readonly elements: ArElements,
     private readonly onModeChange: (arActive: boolean) => void,
   ) {
@@ -106,7 +106,7 @@ export class ArController {
     this.reticle.matrixAutoUpdate = false;
     this.reticle.visible = false;
     scene.add(this.reticle);
-    scene.add(panel.object);
+    for (const panel of panels) scene.add(panel.object);
 
     // コントローラ: grip(つかみ姿勢)と controller(ポインタ姿勢)は別物
     this.grips = [renderer.xr.getControllerGrip(0), renderer.xr.getControllerGrip(1)];
@@ -164,9 +164,11 @@ export class ArController {
       this.elements.overlayRoot.hidden = false;
       this.elements.hint.textContent = '床にかざしてトリガーで設置 / グリップでつかむ';
       for (const laser of this.lasers) laser.visible = true;
-      // 設定パネルを開始時の右前方に、視点(原点)へ向けて出す
-      _q1.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -0.5);
-      this.panel.show(new THREE.Vector3(0.45, 1.15, -0.7), _q1);
+      // 各パネルを初期配置(視点=原点の前方)に、視点へ向けて出す
+      for (const panel of this.panels) {
+        _q1.setFromAxisAngle(new THREE.Vector3(0, 1, 0), panel.arPlacement.yaw);
+        panel.show(panel.arPlacement.position.clone(), _q1);
+      }
 
       this.renderer.xr.setReferenceSpaceType('local');
       await this.renderer.xr.setSession(session);
@@ -302,9 +304,10 @@ export class ArController {
     this.updateGrab();
   }
 
-  /** 各コントローラのレイをパネルに当ててホバー判定+レーザー長を更新する */
+  /** 各コントローラのレイを全パネルに当て、最も近い交差でホバー+レーザー長を更新 */
   private updateRays(): void {
-    let hoverIndex = -1;
+    // パネルごとのホバーindex(-1=なし)。両手ぶんを集計してから一括反映する
+    const hover = new Map<ArPanel, number>();
     for (const i of [0, 1] as const) {
       const controller = this.controllers[i]!;
       const laser = this.lasers[i]!;
@@ -312,17 +315,18 @@ export class ArController {
       _raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
       _raycaster.ray.direction.set(0, 0, -1).applyMatrix4(_m1);
 
-      const hit = this.panel.raycast(_raycaster);
-      if (hit) {
-        this.rayHit[i] = { onPanel: true, index: hit.index, distance: hit.distance };
-        laser.scale.z = hit.distance;
-        if (hit.index >= 0) hoverIndex = hit.index;
-      } else {
-        this.rayHit[i] = { onPanel: false, index: -1, distance: 0 };
-        laser.scale.z = LASER_DEFAULT_LEN;
+      let best: RayHit = { panel: null, index: -1, distance: Infinity };
+      for (const panel of this.panels) {
+        const hit = panel.raycast(_raycaster);
+        if (hit && hit.distance < best.distance) {
+          best = { panel, index: hit.index, distance: hit.distance };
+        }
       }
+      this.rayHit[i] = best.panel ? best : { panel: null, index: -1, distance: 0 };
+      laser.scale.z = best.panel ? best.distance : LASER_DEFAULT_LEN;
+      if (best.panel && best.index >= 0) hover.set(best.panel, best.index);
     }
-    this.panel.setHover(hoverIndex);
+    for (const panel of this.panels) panel.setHover(hover.get(panel) ?? -1);
   }
 
   private updatePlaneOccluders(frame: XRFrame): void {
@@ -398,8 +402,9 @@ export class ArController {
   /** トリガー: パネルのボタン上なら選択、そうでなければアバターを設置 */
   private onSelectStart(index: number): void {
     if (!this.session) return;
-    if (this.panel.visible && this.rayHit[index].onPanel) {
-      if (this.rayHit[index].index >= 0) this.panel.activate(this.rayHit[index].index);
+    const hit = this.rayHit[index];
+    if (hit.panel) {
+      if (hit.index >= 0) hit.panel.activate(hit.index);
       return; // パネル操作はアバター設置に波及させない
     }
     this.place();
@@ -408,14 +413,15 @@ export class ArController {
   private onSqueezeStart(index: number): void {
     if (!this.session) return;
 
-    // パネルを指しながらグリップ → パネルをつかむ
-    if (this.panel.visible && this.rayHit[index].onPanel) {
+    // パネルを指しながらグリップ → そのパネルをつかむ
+    const hit = this.rayHit[index];
+    if (hit.panel) {
       this.heldTarget[index] = 'panel';
+      this.grabbedPanel[index] = hit.panel;
       const grip = this.grips[index]!;
       grip.updateWorldMatrix(true, false);
-      this.panel.object.updateWorldMatrix(true, false);
-      this.panelGrabOffset.copy(grip.matrixWorld).invert().multiply(this.panel.object.matrixWorld);
-      this.panelGrabHand = index;
+      hit.panel.object.updateWorldMatrix(true, false);
+      this.panelGrabOffset[index]!.copy(grip.matrixWorld).invert().multiply(hit.panel.object.matrixWorld);
       this.elements.hint.textContent = 'パネルを移動';
       return;
     }
@@ -445,7 +451,7 @@ export class ArController {
     const was = this.heldTarget[index];
     this.heldTarget[index] = null;
     if (was === 'panel') {
-      if (this.panelGrabHand === index) this.panelGrabHand = -1;
+      this.grabbedPanel[index] = null;
       return;
     }
     // アバター側
@@ -469,11 +475,13 @@ export class ArController {
   }
 
   private updateGrab(): void {
-    // パネルつかみ(片手・スケールなし)
-    if (this.panelGrabHand >= 0 && this.heldTarget[this.panelGrabHand] === 'panel') {
-      const grip = this.grips[this.panelGrabHand]!;
-      _m1.multiplyMatrices(grip.matrixWorld, this.panelGrabOffset);
-      _m1.decompose(this.panel.object.position, this.panel.object.quaternion, _v1);
+    // パネルつかみ(片手・スケールなし)。各手が別々のパネルを掴める
+    for (const i of [0, 1] as const) {
+      const panel = this.grabbedPanel[i];
+      if (panel && this.heldTarget[i] === 'panel') {
+        _m1.multiplyMatrices(this.grips[i]!.matrixWorld, this.panelGrabOffset[i]!);
+        _m1.decompose(panel.object.position, panel.object.quaternion, _v1);
+      }
     }
 
     // アバター両手つかみ(伸縮+回転)
@@ -533,9 +541,10 @@ export class ArController {
     this.heldTarget[1] = null;
     this.twoHand = null;
     this.grabHand = -1;
-    this.panelGrabHand = -1;
+    this.grabbedPanel[0] = null;
+    this.grabbedPanel[1] = null;
     if (this.boundsBox) this.boundsBox.visible = false;
-    this.panel.hide();
+    for (const panel of this.panels) panel.hide();
     for (const laser of this.lasers) laser.visible = false;
     // 通常表示に戻るときは配置をリセット(デスクトップ表示は原点前提)
     this.avatarRoot.position.set(0, 0, 0);
