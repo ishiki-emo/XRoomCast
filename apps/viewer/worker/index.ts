@@ -21,6 +21,8 @@ interface Env {
   BRIDGE_TOKEN?: string;
   /** 視聴用の短縮パス /watch/<キー> の照合キー(secret) */
   WATCH_KEY?: string;
+  /** 配信者コンソール /broadcast/<キー> と音声パブリッシュの照合キー(secret) */
+  BROADCAST_KEY?: string;
   /** /watch で使う既定VRMのR2キー(wrangler.jsoncのvars) */
   DEFAULT_VRM_KEY?: string;
 }
@@ -44,14 +46,20 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-async function cfApi(env: Env, path: string, body: unknown): Promise<Record<string, unknown>> {
+async function cfApi(
+  env: Env,
+  path: string,
+  body: unknown,
+  method: 'POST' | 'PUT' = 'POST',
+): Promise<Record<string, unknown>> {
   const res = await fetch(`${API_BASE}/${env.CF_REALTIME_APP_ID}${path}`, {
-    method: 'POST',
+    method,
     headers: {
       Authorization: `Bearer ${env.CF_REALTIME_APP_SECRET}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(body),
+    // 空セッション作成はボディ自体を省略する必要がある(空JSONは400になる)
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) {
     throw new Error(`Cloudflare API ${path} が失敗: ${res.status} ${await res.text()}`);
@@ -64,20 +72,68 @@ interface PublisherRecord {
   updatedAt: number;
 }
 
+const AUDIO_PUBLISHER_KEY = 'audio-publisher';
+
+interface AudioPublisherRecord {
+  sessionId: string;
+  trackName: string;
+  updatedAt: number;
+}
+
 async function readPublisher(env: Env): Promise<PublisherRecord | null> {
   const record = await env.SFU_STATE.get<PublisherRecord>(PUBLISHER_KEY, 'json');
   if (!record || Date.now() - record.updatedAt > PUBLISHER_FRESH_MS) return null;
   return record;
 }
 
+async function readAudioPublisher(env: Env): Promise<AudioPublisherRecord | null> {
+  const record = await env.SFU_STATE.get<AudioPublisherRecord>(AUDIO_PUBLISHER_KEY, 'json');
+  if (!record || Date.now() - record.updatedAt > PUBLISHER_FRESH_MS) return null;
+  return record;
+}
+
+function isBroadcaster(env: Env, request: Request, url: URL): boolean {
+  if (!env.BROADCAST_KEY) return false;
+  if (request.headers.get('Authorization') === `Bearer ${env.BROADCAST_KEY}`) return true;
+  // sendBeacon用(ヘッダを付けられないためクエリで受ける)
+  return url.searchParams.get('key') === env.BROADCAST_KEY;
+}
+
+/** 音声パブリッシャーの登録/解除(bodyのsessionIdがnullなら解除) */
+async function handleAudioPublisherUpdate(request: Request, env: Env): Promise<Response> {
+  const body = (await request.json()) as { sessionId?: string | null; trackName?: string };
+  if (!body.sessionId) {
+    await env.SFU_STATE.delete(AUDIO_PUBLISHER_KEY);
+    return json(200, { ok: true, cleared: true });
+  }
+  const record: AudioPublisherRecord = {
+    sessionId: String(body.sessionId),
+    trackName: String(body.trackName ?? 'mic'),
+    updatedAt: Date.now(),
+  };
+  await env.SFU_STATE.put(AUDIO_PUBLISHER_KEY, JSON.stringify(record));
+  return json(200, { ok: true });
+}
+
 async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Response> {
   const sfuConfigured = Boolean(env.CF_REALTIME_APP_ID && env.CF_REALTIME_APP_SECRET);
 
   if (request.method === 'GET' && url.pathname === '/api/sfu/status') {
+    const audio = await readAudioPublisher(env);
     return json(200, {
       enabled: sfuConfigured,
       publisherReady: (await readPublisher(env)) !== null,
+      audio: audio ? { sessionId: audio.sessionId, trackName: audio.trackName } : null,
     });
+  }
+
+  // 音声パブリッシャーの登録/解除(配信者コンソールから。要BROADCAST_KEY)
+  if (
+    request.method === 'POST' &&
+    (url.pathname === '/api/sfu/audio-publisher' || url.pathname === '/api/sfu/audio-publisher-beacon')
+  ) {
+    if (!isBroadcaster(env, request, url)) return json(403, { error: 'forbidden' });
+    return handleAudioPublisherUpdate(request, env);
   }
 
   // ブリッジからのパブリッシャーセッションID登録(Bearer認証必須)
@@ -97,12 +153,48 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
   }
 
   if (request.method === 'POST' && url.pathname === '/api/sfu/sessions/new') {
+    // sdpなし(空セッション作成→後からtracks/newでSDP交換)にも対応する
     const body = (await request.json()) as { sdp?: string };
-    const session = await cfApi(env, '/sessions/new', {
-      sessionDescription: { type: 'offer', sdp: String(body.sdp) },
-    });
-    const desc = session.sessionDescription as { sdp: string };
-    return json(200, { sessionId: session.sessionId, sdp: desc.sdp });
+    const session = await cfApi(
+      env,
+      '/sessions/new',
+      body.sdp ? { sessionDescription: { type: 'offer', sdp: String(body.sdp) } } : undefined,
+    );
+    const desc = session.sessionDescription as { sdp: string } | undefined;
+    return json(200, { sessionId: session.sessionId, sdp: desc?.sdp ?? null });
+  }
+
+  // トラックの公開(local)/購読(remote)。localの公開はBROADCAST_KEY必須
+  if (request.method === 'POST' && url.pathname === '/api/sfu/tracks/new') {
+    const body = (await request.json()) as {
+      sessionId?: string;
+      sessionDescription?: { type: string; sdp: string };
+      tracks?: { location?: string }[];
+    };
+    if (!body.sessionId || !Array.isArray(body.tracks)) {
+      return json(400, { error: 'sessionId / tracks がありません' });
+    }
+    const publishesLocal = body.tracks.some((t) => t.location === 'local');
+    if (publishesLocal && !isBroadcaster(env, request, url)) {
+      return json(403, { error: 'forbidden(トラック公開にはBROADCAST_KEYが必要です)' });
+    }
+    const payload: Record<string, unknown> = { tracks: body.tracks };
+    if (body.sessionDescription) payload.sessionDescription = body.sessionDescription;
+    const result = await cfApi(env, `/sessions/${String(body.sessionId)}/tracks/new`, payload);
+    return json(200, result);
+  }
+
+  // 再ネゴシエーション(リモートトラック購読時にサーバーからのofferへ答える)
+  if (request.method === 'POST' && url.pathname === '/api/sfu/renegotiate') {
+    const body = (await request.json()) as { sessionId?: string; sdp?: string };
+    if (!body.sessionId || !body.sdp) return json(400, { error: 'sessionId / sdp がありません' });
+    const result = await cfApi(
+      env,
+      `/sessions/${String(body.sessionId)}/renegotiate`,
+      { sessionDescription: { type: 'answer', sdp: String(body.sdp) } },
+      'PUT',
+    );
+    return json(200, result);
   }
 
   if (request.method === 'POST' && url.pathname === '/api/sfu/subscribe') {
@@ -239,6 +331,15 @@ export default {
       const vrmKey = env.DEFAULT_VRM_KEY ?? 'Emo.vrm';
       const vrmParam = encodeURIComponent(`/vrm/${vrmKey}?k=${env.VRM_TOKEN ?? ''}`);
       return Response.redirect(`${url.origin}/?vrm=${vrmParam}&transport=sfu&watch=1`, 302);
+    }
+
+    // 配信者コンソール(音声)の短縮URL
+    if (url.pathname.startsWith('/broadcast/')) {
+      const key = decodeURIComponent(url.pathname.slice('/broadcast/'.length));
+      if (!env.BROADCAST_KEY || key !== env.BROADCAST_KEY) {
+        return new Response('not found', { status: 404 });
+      }
+      return Response.redirect(`${url.origin}/broadcast.html?key=${encodeURIComponent(key)}`, 302);
     }
 
     if (url.pathname.startsWith('/api/sfu/')) {

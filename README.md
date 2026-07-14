@@ -254,6 +254,26 @@ npx wrangler secret put WATCH_KEY   # 視聴キー(ランダム文字列)
 全員へブロードキャストする(ハイバネーションAPI使用でアイドルコストほぼゼロ。
 単一ルーム。部屋分けはPhase 3の部屋管理で拡張する)。
 
+### 音声配信(配信者コンソール)
+
+`/broadcast/<BROADCAST_KEY>` を開き「マイク配信を開始」を押すと、マイクが
+Opus音声トラックとしてSFUへパブリッシュされ、視聴ページで再生できる
+(ページを開いている間だけ配信)。
+
+```sh
+npx wrangler secret put BROADCAST_KEY   # 配信者キー(ランダム文字列)
+```
+
+- 手順は cloudflare/calls-examples の echo に準拠(空セッション作成 →
+  `tracks/new` でSDP交換・トラック公開。購読側は同じPeerConnectionへ
+  `tracks/new`(remote)+ renegotiate で追加)
+- 音声セッションIDはKVで共有(ポーズのパブリッシャー登録と同じ方式。
+  4分ハートビート+ページ閉鎖時はsendBeaconで解除)
+- トラックの公開(location: local)はBROADCAST_KEY必須。視聴(remote)は不要
+- 視聴ページは音声トラックを受信するとステージ右上に「🔇 タップで音声ON」を
+  表示する(ブラウザの自動再生制限のため、ミュート解除には操作が必要)
+- 帯域は音声約6〜8KB/s/人(Opus)。ポーズと合わせても動画の1/100以下
+
 ### 匿名コメント
 
 同じWebSocket(Presence DO)でコメントも送受信する。

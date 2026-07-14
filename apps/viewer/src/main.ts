@@ -103,6 +103,45 @@ window.setInterval(() => {
   netStats.frames = 0;
 }, 1000);
 
+// ---- 配信者の音声再生 ----
+// 音声付き自動再生はブラウザにブロックされるため、ミュートで再生を始めて
+// ボタン(ユーザー操作)でミュート解除する
+const audioButton = document.getElementById('audio-button') as HTMLButtonElement;
+const liveAudio = new Audio();
+liveAudio.autoplay = true;
+liveAudio.muted = true;
+
+function handleAudioTrack(track: MediaStreamTrack | null): void {
+  if (!track) {
+    liveAudio.srcObject = null;
+    audioButton.hidden = true;
+    return;
+  }
+  liveAudio.srcObject = new MediaStream([track]);
+  void liveAudio.play().catch(() => {});
+  audioButton.hidden = false;
+  // 配信者側が停止するとリモートトラックはmuteになる(endedは飛んでこない)
+  const hideIfCurrent = (): void => {
+    if (liveAudio.srcObject instanceof MediaStream && liveAudio.srcObject.getTracks()[0] === track) {
+      audioButton.hidden = true;
+    }
+  };
+  track.onmute = hideIfCurrent;
+  track.onended = hideIfCurrent;
+  track.onunmute = () => {
+    if (liveAudio.srcObject instanceof MediaStream && liveAudio.srcObject.getTracks()[0] === track) {
+      audioButton.hidden = false;
+    }
+  };
+}
+
+audioButton.addEventListener('click', () => {
+  liveAudio.muted = !liveAudio.muted;
+  if (!liveAudio.muted) void liveAudio.play().catch(() => {});
+  audioButton.textContent = liveAudio.muted ? '🔇 タップで音声ON' : '🔊 音声ON';
+  audioButton.classList.toggle('on', !liveAudio.muted);
+});
+
 // ---- 同接カウント+匿名コメント(Worker上のDurable Object) ----
 const chatLog = document.getElementById('chat-log') as HTMLDivElement;
 const chatInput = document.getElementById('chat-input') as HTMLInputElement;
@@ -203,6 +242,9 @@ function connectTransport(kind: string, url: string): void {
   disconnectTransport();
   livePlayer = new PoseStreamPlayer();
   liveTransport = kind === 'sfu' ? new SfuTransport(url) : new WebSocketTransport(url);
+  if (liveTransport instanceof SfuTransport) {
+    liveTransport.onAudioTrack = handleAudioTrack;
+  }
   liveTransport.onStatus = (text, isError) => setStatus(text, isError);
   liveTransport.onPacket = (bytes) => {
     netStats.bytes += bytes.byteLength;
@@ -367,7 +409,7 @@ renderer.setAnimationLoop(() => {
 
 // 受け入れ確認(メモリリーク・デモ再生の滑らかさ検証)用に公開
 Object.assign(window, {
-  __viewerDebug: { renderer, loadVRM, demo, getVrm: () => currentVrm },
+  __viewerDebug: { renderer, loadVRM, demo, getVrm: () => currentVrm, liveAudio },
 });
 
 wsUrlInput.value = TRANSPORT_DEFAULT_URLS[transportSelect.value] ?? '';

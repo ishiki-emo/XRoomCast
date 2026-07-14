@@ -145,6 +145,27 @@
       #chat-row {
         display: none;
       }
+      /* 音声ミュート解除ボタン(ステージ右上) */
+      #audio-button {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        z-index: 6;
+        padding: 8px 14px;
+        border: 1px solid #555;
+        border-radius: 20px;
+        background: rgba(0, 0, 0, 0.6);
+        color: #fff;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      #audio-button:hover {
+        background: rgba(0, 0, 0, 0.8);
+      }
+      #audio-button.on {
+        border-color: #3a5f3a;
+        color: #8fa;
+      }
 
       /* ---- 視聴モード(?watch=1): ページレイアウト+16:9ステージ ---- */
       body.watch {
@@ -268,6 +289,7 @@
           <div id="status">VRM 読み込み中...</div>
         </div>
         <div id="chat-log"></div>
+        <button id="audio-button" hidden>🔇 タップで音声ON</button>
       </div>
       <div id="chat-row">
         <input id="chat-input" type="text" maxlength="200" placeholder="コメントを送る(匿名)" autocomplete="off" />

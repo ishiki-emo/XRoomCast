@@ -17,9 +17,14 @@ const BACKOFF_MAX_MS = 16000;
  */
 const STALE_TIMEOUT_MS = 10000;
 
+/** 音声トラック購読の確認間隔(配信者が後から音声を開始しても拾えるように) */
+const AUDIO_CHECK_INTERVAL_MS = 30000;
+
 export class SfuTransport implements Transport {
   onPacket: ((bytes: Uint8Array) => void) | null = null;
   onStatus: ((text: string, isError?: boolean) => void) | null = null;
+  /** 配信者の音声トラックを購読できたとき(track)と配信終了時(null)に呼ばれる */
+  onAudioTrack: ((track: MediaStreamTrack | null) => void) | null = null;
 
   private pc: RTCPeerConnection | null = null;
   private closedByUser = false;
@@ -27,6 +32,9 @@ export class SfuTransport implements Transport {
   private retryTimer: number | null = null;
   private watchdogTimer: number | null = null;
   private lastPacketAt = 0;
+  private audioTimer: number | null = null;
+  private audioSubscribedSession: string | null = null;
+  private mySessionId: string | null = null;
   /** 世代カウンタ。古い接続試行のコールバックを無効化する */
   private generation = 0;
 
@@ -69,7 +77,15 @@ export class SfuTransport implements Transport {
       await pc.setLocalDescription(offer);
 
       const session = await this.apiPost('/api/sfu/sessions/new', { sdp: offer.sdp });
+      this.mySessionId = String(session.sessionId);
+      this.audioSubscribedSession = null;
       await pc.setRemoteDescription({ type: 'answer', sdp: String(session.sdp) });
+
+      // 配信者の音声トラックが届いたら通知する
+      pc.ontrack = (event) => {
+        if (generation !== this.generation) return;
+        if (event.track.kind === 'audio') this.onAudioTrack?.(event.track);
+      };
 
       const sub = await this.apiPost('/api/sfu/subscribe', { sessionId: session.sessionId });
       const channel = pc.createDataChannel(String(sub.name), {
@@ -83,6 +99,7 @@ export class SfuTransport implements Transport {
         this.retryCount = 0;
         this.lastPacketAt = performance.now();
         this.startWatchdog(generation);
+        this.startAudioCheck(generation);
         this.onStatus?.('SFU接続完了(DataChannel購読中)');
       };
       channel.onmessage = (event) => {
@@ -104,6 +121,59 @@ export class SfuTransport implements Transport {
     } catch (error) {
       if (generation !== this.generation) return;
       this.scheduleReconnect(String(error));
+    }
+  }
+
+  /**
+   * 音声トラックの購読。ステータスAPIで音声パブリッシャーの有無を確認し、
+   * 居れば同じPeerConnectionにトラックを追加購読する(サーバー主導の再ネゴシエーション)。
+   * 配信者が途中から音声を始めるケースに備えて定期的に確認する
+   */
+  private startAudioCheck(generation: number): void {
+    this.stopAudioCheck();
+    const check = async (): Promise<void> => {
+      if (generation !== this.generation || !this.pc || !this.mySessionId) return;
+      try {
+        const res = await fetch(`${this.baseUrl}/api/sfu/status`);
+        const status = (await res.json()) as {
+          audio: { sessionId: string; trackName: string } | null;
+        };
+        const audio = status.audio;
+        if (!audio) {
+          // 配信者が音声を止めた(登録解除された)
+          if (this.audioSubscribedSession !== null) {
+            this.audioSubscribedSession = null;
+            this.onAudioTrack?.(null);
+          }
+          return;
+        }
+        if (audio.sessionId === this.audioSubscribedSession) return;
+        if (generation !== this.generation || !this.pc) return;
+
+        const result = await this.apiPost('/api/sfu/tracks/new', {
+          sessionId: this.mySessionId,
+          tracks: [{ location: 'remote', sessionId: audio.sessionId, trackName: audio.trackName }],
+        });
+        const desc = result.sessionDescription as { type: string; sdp: string } | undefined;
+        if (result.requiresImmediateRenegotiation && desc) {
+          await this.pc.setRemoteDescription({ type: 'offer', sdp: desc.sdp });
+          const answer = await this.pc.createAnswer();
+          await this.pc.setLocalDescription(answer);
+          await this.apiPost('/api/sfu/renegotiate', { sessionId: this.mySessionId, sdp: answer.sdp });
+        }
+        this.audioSubscribedSession = audio.sessionId;
+      } catch (error) {
+        console.warn('[sfu] 音声トラックの購読確認に失敗:', error);
+      }
+    };
+    void check();
+    this.audioTimer = window.setInterval(() => void check(), AUDIO_CHECK_INTERVAL_MS);
+  }
+
+  private stopAudioCheck(): void {
+    if (this.audioTimer !== null) {
+      window.clearInterval(this.audioTimer);
+      this.audioTimer = null;
     }
   }
 
@@ -131,6 +201,7 @@ export class SfuTransport implements Transport {
   private scheduleReconnect(reason: string): void {
     if (this.closedByUser) return;
     this.stopWatchdog();
+    this.stopAudioCheck();
     this.pc?.close();
     this.pc = null;
     const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** this.retryCount);
@@ -149,6 +220,7 @@ export class SfuTransport implements Transport {
     this.closedByUser = true;
     this.generation += 1;
     this.stopWatchdog();
+    this.stopAudioCheck();
     if (this.retryTimer !== null) {
       window.clearTimeout(this.retryTimer);
       this.retryTimer = null;
