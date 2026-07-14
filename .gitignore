@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.local
+
+# テスト用VRMはコミットしない(fixtures/README.md 参照)
+*.vrm
+
+# 生成物
+fixtures/dummy-motion.bin
