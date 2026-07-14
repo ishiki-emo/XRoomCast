@@ -56,10 +56,13 @@ export class ArController {
   } | null = null;
 
   private boundsBox: THREE.Object3D | null = null;
+  /** AR機能の探りボード(初回フレームで判定して表示) */
+  private probePending = false;
+  private probeBoard: THREE.Mesh | null = null;
 
   constructor(
     private readonly renderer: THREE.WebGLRenderer,
-    scene: THREE.Scene,
+    private readonly scene: THREE.Scene,
     private readonly avatarRoot: THREE.Group,
     private readonly elements: ArElements,
     private readonly onModeChange: (arActive: boolean) => void,
@@ -101,9 +104,15 @@ export class ArController {
     try {
       const session = await navigator.xr!.requestSession('immersive-ar', {
         requiredFeatures: ['hit-test'],
-        optionalFeatures: ['dom-overlay'],
+        // depth-sensing等は「あれば使う」で要求し、実際に許可されたかを探る
+        optionalFeatures: ['dom-overlay', 'depth-sensing', 'mesh-detection', 'plane-detection', 'anchors'],
         domOverlay: { root: this.elements.overlayRoot },
-      });
+        depthSensing: {
+          usagePreference: ['gpu-optimized', 'cpu-optimized'],
+          dataFormatPreference: ['luminance-alpha', 'float32'],
+        },
+      } as XRSessionInit);
+      this.probePending = true;
       this.session = session;
       this.onModeChange(true);
       this.elements.overlayRoot.hidden = false;
@@ -157,9 +166,61 @@ export class ArController {
     this.avatarRoot.add(group);
   }
 
+  /** 実際に許可されたAR機能を初回フレームで判定し、空間内ボードとコンソールへ出す */
+  private probeFeatures(frame: XRFrame): void {
+    this.probePending = false;
+    const session = this.session!;
+    const enabled = (session as unknown as { enabledFeatures?: string[] }).enabledFeatures;
+    const has = (feature: string, fallback: boolean): string => {
+      const granted = enabled ? enabled.includes(feature) : fallback;
+      return granted ? '✅' : '❌';
+    };
+    let depthByApi = false;
+    try {
+      depthByApi = (session as unknown as { depthUsage?: string }).depthUsage !== undefined;
+    } catch {
+      depthByApi = false;
+    }
+    const lines = [
+      'AR機能の対応状況:',
+      `depth-sensing(オクルージョン): ${has('depth-sensing', depthByApi)}`,
+      `mesh-detection: ${has('mesh-detection', 'detectedMeshes' in frame)}`,
+      `plane-detection: ${has('plane-detection', 'detectedPlanes' in frame)}`,
+      `anchors: ${has('anchors', 'createAnchor' in frame)}`,
+      `dom-overlay: ${has('dom-overlay', false)}`,
+    ];
+    console.log('[ar probe]', lines.join(' / '), 'enabledFeatures=', enabled);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 320;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '30px sans-serif';
+    lines.forEach((line, i) => ctx.fillText(line, 24, 52 + i * 44));
+    const board = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.8, 0.4),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true }),
+    );
+    board.position.set(0, 1.5, -1.2); // 開始時の正面・目の高さ
+    this.probeBoard = board;
+    this.scene.add(board);
+    window.setTimeout(() => this.removeProbeBoard(), 20000);
+  }
+
+  private removeProbeBoard(): void {
+    if (this.probeBoard) {
+      this.scene.remove(this.probeBoard);
+      this.probeBoard = null;
+    }
+  }
+
   /** 毎フレーム呼ぶ。レティクル更新・ヒットキャッシュ・つかみ追従 */
   onFrame(frame: XRFrame | undefined): void {
     if (!frame || !this.session) return;
+    if (this.probePending) this.probeFeatures(frame);
 
     if (this.hitTestSource && this.refSpace) {
       const hit = frame.getHitTestResults(this.hitTestSource)[0];
@@ -282,6 +343,8 @@ export class ArController {
   }
 
   private cleanup(): void {
+    this.removeProbeBoard();
+    this.probePending = false;
     this.session = null;
     this.hitTestSource = null;
     this.refSpace = null;
