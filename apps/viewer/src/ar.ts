@@ -20,6 +20,13 @@ export class ArController {
   private hitTestSource: XRHitTestSource | null = null;
   private baseRefSpace: XRReferenceSpace | null = null;
   private readonly reticle: THREE.Mesh;
+  /**
+   * 直近のrAFフレームで取れたヒット位置・視点位置(ベース空間)。
+   * 一部ブラウザ(PICO等)はselectイベントのフレームでヒットテスト結果を
+   * 返さないため、毎フレームキャッシュしておき設置時はこれを使う
+   */
+  private latestHit: { x: number; y: number; z: number } | null = null;
+  private latestViewer: { x: number; z: number } | null = null;
 
   constructor(
     private readonly renderer: THREE.WebGLRenderer,
@@ -71,7 +78,7 @@ export class ArController {
         this.elements.hint.textContent = 'この端末はヒットテスト(床検知)に未対応です';
       }
 
-      session.addEventListener('select', (event) => this.place(event));
+      session.addEventListener('select', () => this.place());
       session.addEventListener('end', () => this.cleanup());
     } catch (error) {
       console.error('[ar] セッション開始に失敗:', error);
@@ -79,35 +86,47 @@ export class ArController {
     }
   }
 
-  /** 毎フレーム呼ぶ。ヒットテスト結果でレティクルを動かす */
+  /** 毎フレーム呼ぶ。ヒットテスト結果でレティクルを動かし、設置用にキャッシュする */
   onFrame(frame: XRFrame | undefined): void {
     if (!frame || !this.session || !this.hitTestSource) return;
     const refSpace = this.renderer.xr.getReferenceSpace();
+    const base = this.baseRefSpace;
     const hit = frame.getHitTestResults(this.hitTestSource)[0];
-    const pose = refSpace && hit ? hit.getPose(refSpace) : null;
-    if (pose) {
+
+    const renderPose = refSpace && hit ? hit.getPose(refSpace) : null;
+    if (renderPose) {
       this.reticle.visible = true;
-      this.reticle.matrix.fromArray(pose.transform.matrix);
+      this.reticle.matrix.fromArray(renderPose.transform.matrix);
     } else {
       this.reticle.visible = false;
+    }
+
+    // 設置用キャッシュ(常にベース空間で保持する)
+    if (base) {
+      const basePose = hit?.getPose(base);
+      this.latestHit = basePose
+        ? {
+            x: basePose.transform.position.x,
+            y: basePose.transform.position.y,
+            z: basePose.transform.position.z,
+          }
+        : null;
+      const viewer = frame.getViewerPose(base);
+      if (viewer) {
+        this.latestViewer = { x: viewer.transform.position.x, z: viewer.transform.position.z };
+      }
     }
   }
 
   /** タップ位置にシーン原点を移す(アバターが視聴者の方を向くようヨーも合わせる) */
-  private place(event: XRInputSourceEvent): void {
-    const frame = event.frame;
+  private place(): void {
     const base = this.baseRefSpace;
-    if (!frame || !base || !this.hitTestSource) return;
-    const hit = frame.getHitTestResults(this.hitTestSource)[0];
-    const pose = hit?.getPose(base);
-    if (!pose) return;
+    const p = this.latestHit;
+    if (!base || !p) return;
 
-    const p = pose.transform.position;
-    const viewer = frame.getViewerPose(base);
     let yaw = 0;
-    if (viewer) {
-      const v = viewer.transform.position;
-      yaw = Math.atan2(v.x - p.x, v.z - p.z); // アバターの正面(+Z)を視聴者へ向ける
+    if (this.latestViewer) {
+      yaw = Math.atan2(this.latestViewer.x - p.x, this.latestViewer.z - p.z); // 正面(+Z)を視聴者へ
     }
     const offset = new XRRigidTransform(
       { x: p.x, y: p.y, z: p.z },
