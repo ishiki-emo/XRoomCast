@@ -21,9 +21,10 @@ const wsUrlInput = document.getElementById('ws-url') as HTMLInputElement;
 const wsButton = document.getElementById('ws-button') as HTMLButtonElement;
 const transportSelect = document.getElementById('transport-select') as HTMLSelectElement;
 
+// ビューアを開いたホスト(スマホからならPCのLAN IP)をブリッジの既定接続先にする
 const TRANSPORT_DEFAULT_URLS: Record<string, string> = {
-  ws: 'ws://localhost:8080',
-  sfu: 'http://localhost:8080',
+  ws: `ws://${location.hostname}:8080`,
+  sfu: `http://${location.hostname}:8080`,
 };
 
 function setStatus(text: string, isError = false): void {
@@ -257,6 +258,8 @@ renderer.setAnimationLoop(() => {
 Object.assign(window, {
   __viewerDebug: { renderer, loadVRM, demo, getVrm: () => currentVrm },
 });
+
+wsUrlInput.value = TRANSPORT_DEFAULT_URLS[transportSelect.value] ?? '';
 
 const initialUrl = new URLSearchParams(location.search).get('vrm') ?? DEFAULT_VRM_PATH;
 urlInput.value = initialUrl;
