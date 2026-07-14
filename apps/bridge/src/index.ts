@@ -4,6 +4,8 @@
  * シリアライズ → 同居のWebSocketサーバーへブロードキャストする。
  * 送信レート: ポーズ30Hz、表情・手指15Hz(受信レートが高くても間引く)。
  */
+import http from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
   encodePacket,
@@ -17,6 +19,14 @@ import type { Quat, Vec3 } from '@vrmsync/protocol';
 import { VmcSkeleton } from './skeleton.js';
 import { normalizeBlendName } from './blendNames.js';
 import { startVmcReceiver } from './vmcReceiver.js';
+import { DATA_CHANNEL_NAME, SfuApi, SfuPublisher } from './sfu.js';
+
+// リポジトリルートの .env を読む(App Secretをコード・ブラウザに出さないため)
+try {
+  process.loadEnvFile(fileURLToPath(new URL('../../../.env', import.meta.url)));
+} catch {
+  // .envが無ければ環境変数のみで動く
+}
 
 const VMC_PORT = Number(process.env.VMC_PORT ?? 39539);
 const WS_PORT = Number(process.env.WS_PORT ?? 8080);
@@ -129,9 +139,87 @@ startVmcReceiver(VMC_PORT, {
   },
 });
 
-// ---- WebSocket配信 ----
-const wss = new WebSocketServer({ port: WS_PORT }, () => {
-  console.log(`[ws] 配信待機: ws://localhost:${WS_PORT}`);
+// ---- Cloudflare Realtime SFU(Phase 2c) ----
+const sfuConfig =
+  process.env.CF_REALTIME_APP_ID && process.env.CF_REALTIME_APP_SECRET
+    ? { appId: process.env.CF_REALTIME_APP_ID, appSecret: process.env.CF_REALTIME_APP_SECRET }
+    : null;
+const sfuApi = sfuConfig ? new SfuApi(sfuConfig) : null;
+const publisher = sfuApi ? new SfuPublisher(sfuApi) : null;
+if (publisher) {
+  void publisher.connectWithRetry();
+} else {
+  console.log('[sfu] CF_REALTIME_APP_ID / CF_REALTIME_APP_SECRET 未設定のためSFUは無効(WS配信のみ)');
+}
+
+// ---- HTTP API(ビューア向けSFUプロキシ。App Secretをブラウザに出さない)+ WebSocket配信 ----
+function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk as Buffer);
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+}
+
+async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+  try {
+    if (req.method === 'GET' && req.url === '/api/sfu/status') {
+      sendJson(res, 200, {
+        enabled: sfuApi !== null,
+        publisherReady: publisher?.ready ?? false,
+      });
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/api/sfu/sessions/new') {
+      if (!sfuApi) {
+        sendJson(res, 503, { error: 'SFU未設定(.envにCF_REALTIME_APP_ID/SECRETを設定)' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const session = await sfuApi.newSession(String(body.sdp));
+      sendJson(res, 200, { sessionId: session.sessionId, sdp: session.sessionDescription.sdp });
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/api/sfu/subscribe') {
+      if (!sfuApi || !publisher?.sessionId) {
+        sendJson(res, 503, { error: 'パブリッシャーが未接続です(ブリッジのログを確認)' });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const result = await sfuApi.newDataChannels(String(body.sessionId), [
+        { location: 'remote', sessionId: publisher.sessionId, dataChannelName: DATA_CHANNEL_NAME },
+      ]);
+      const channelId = result.dataChannels[0]?.id;
+      if (channelId === undefined) {
+        sendJson(res, 502, { error: 'DataChannel IDが取得できませんでした' });
+        return;
+      }
+      sendJson(res, 200, { id: channelId, name: DATA_CHANNEL_NAME });
+      return;
+    }
+    sendJson(res, 404, { error: 'not found' });
+  } catch (error) {
+    sendJson(res, 500, { error: String(error) });
+  }
+}
+
+const server = http.createServer((req, res) => {
+  void handleHttp(req, res);
+});
+const wss = new WebSocketServer({ server });
+server.listen(WS_PORT, () => {
+  console.log(`[ws] 配信待機: ws://localhost:${WS_PORT}(SFUプロキシAPI同居)`);
 });
 
 let sequence = 0;
@@ -188,8 +276,20 @@ function broadcast(bytes: Uint8Array): void {
       stats.bytes += bytes.byteLength;
     }
   }
+  if (publisher?.ready) {
+    publisher.send(bytes);
+    stats.bytes += bytes.byteLength;
+  }
   stats.sent += 1;
 }
+
+// 辞書の定期再送(§6.5: 2cでは5秒間隔。SFUは一方向で途中参加者に接続時送信ができない)。
+// 合わせて表情の送信済み記録もクリアし、次のtickで全表情値が再送されるようにする
+setInterval(() => {
+  if (dictionary.size === 0) return;
+  dictionaryDirty = true;
+  lastSentExpression.clear();
+}, 5000);
 
 wss.on('connection', (client, request) => {
   console.log(`[ws] クライアント接続: ${request.socket.remoteAddress}(計${wss.clients.size}件)`);
@@ -252,8 +352,9 @@ setInterval(() => {
 setInterval(() => {
   const kb = (stats.bytes / 1024).toFixed(1);
   const suppressed = stats.suppressed > 0 ? ` | スパイク抑制 ${stats.suppressed}件` : '';
+  const sfuState = publisher ? ` | SFU ${publisher.ready ? '配信中' : '接続中...'}` : '';
   console.log(
-    `[stats] 受信 ${stats.received} msg/s | 送信 ${stats.sent} pkt/s | ${kb} KB/s | クライアント ${wss.clients.size}件${suppressed}`,
+    `[stats] 受信 ${stats.received} msg/s | 送信 ${stats.sent} pkt/s | ${kb} KB/s | WS ${wss.clients.size}件${sfuState}${suppressed}`,
   );
   stats.received = 0;
   stats.sent = 0;

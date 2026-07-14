@@ -6,7 +6,9 @@ import { decodePacket } from '@vrmsync/protocol';
 import { DemoController } from './demo';
 import { PoseApplier } from './poseApplier';
 import { PoseStreamPlayer } from './poseStream';
+import type { Transport } from './transport';
 import { WebSocketTransport } from './wsTransport';
+import { SfuTransport } from './sfuTransport';
 
 const DEFAULT_VRM_PATH = '/Emo.vrm';
 
@@ -17,6 +19,12 @@ const demoButton = document.getElementById('demo-button') as HTMLButtonElement;
 const dropCheckbox = document.getElementById('drop-checkbox') as HTMLInputElement;
 const wsUrlInput = document.getElementById('ws-url') as HTMLInputElement;
 const wsButton = document.getElementById('ws-button') as HTMLButtonElement;
+const transportSelect = document.getElementById('transport-select') as HTMLSelectElement;
+
+const TRANSPORT_DEFAULT_URLS: Record<string, string> = {
+  ws: 'ws://localhost:8080',
+  sfu: 'http://localhost:8080',
+};
 
 function setStatus(text: string, isError = false): void {
   statusEl.textContent = text;
@@ -65,8 +73,8 @@ let currentApplier: PoseApplier | null = null;
 let loading = false;
 
 const demo = new DemoController();
-let wsTransport: WebSocketTransport | null = null;
-let wsPlayer: PoseStreamPlayer | null = null;
+let liveTransport: Transport | null = null;
+let livePlayer: PoseStreamPlayer | null = null;
 
 function stopDemo(): void {
   if (!demo.active) return;
@@ -76,30 +84,33 @@ function stopDemo(): void {
   demoButton.classList.remove('active');
 }
 
-function disconnectWs(): void {
-  if (!wsTransport) return;
-  wsTransport.close();
-  wsTransport = null;
-  wsPlayer = null;
+function disconnectTransport(): void {
+  if (!liveTransport) return;
+  liveTransport.onStatus = null; // close()後の状態通知でUIを上書きさせない
+  liveTransport.close();
+  liveTransport = null;
+  livePlayer = null;
   currentApplier?.reset();
   wsButton.textContent = '接続';
+  transportSelect.disabled = false;
 }
 
-function connectWs(url: string): void {
+function connectTransport(kind: string, url: string): void {
   stopDemo();
-  disconnectWs();
-  wsPlayer = new PoseStreamPlayer();
-  wsTransport = new WebSocketTransport(url);
-  wsTransport.onStatus = (text, isError) => setStatus(text, isError);
-  wsTransport.onPacket = (bytes) => {
+  disconnectTransport();
+  livePlayer = new PoseStreamPlayer();
+  liveTransport = kind === 'sfu' ? new SfuTransport(url) : new WebSocketTransport(url);
+  liveTransport.onStatus = (text, isError) => setStatus(text, isError);
+  liveTransport.onPacket = (bytes) => {
     try {
-      wsPlayer?.push(decodePacket(bytes), performance.now());
+      livePlayer?.push(decodePacket(bytes), performance.now());
     } catch (error) {
       console.warn('パケットのデコードに失敗:', error);
     }
   };
-  wsTransport.connect();
+  liveTransport.connect();
   wsButton.textContent = '切断';
+  transportSelect.disabled = true;
 }
 
 const loader = new GLTFLoader();
@@ -189,7 +200,7 @@ demoButton.addEventListener('click', () => {
     stopDemo();
     setStatus('デモ停止');
   } else {
-    disconnectWs();
+    disconnectTransport();
     demo.start();
     demoButton.textContent = 'デモ停止';
     demoButton.classList.add('active');
@@ -202,17 +213,25 @@ dropCheckbox.addEventListener('change', () => {
 });
 
 wsButton.addEventListener('click', () => {
-  if (wsTransport) {
-    disconnectWs();
-    setStatus('WebSocket切断');
+  if (liveTransport) {
+    disconnectTransport();
+    setStatus('切断しました');
   } else {
     const url = wsUrlInput.value.trim();
-    if (url) connectWs(url);
+    if (url) connectTransport(transportSelect.value, url);
+  }
+});
+
+// トランスポート切り替え時、URLが既定値のままなら新しい既定値に差し替える
+transportSelect.addEventListener('change', () => {
+  const defaults = Object.values(TRANSPORT_DEFAULT_URLS);
+  if (defaults.includes(wsUrlInput.value.trim()) || wsUrlInput.value.trim() === '') {
+    wsUrlInput.value = TRANSPORT_DEFAULT_URLS[transportSelect.value] ?? '';
   }
 });
 
 wsUrlInput.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !wsTransport) wsButton.click();
+  if (event.key === 'Enter' && !liveTransport) wsButton.click();
 });
 
 window.addEventListener('resize', () => {
@@ -225,7 +244,7 @@ const clock = new THREE.Clock();
 
 renderer.setAnimationLoop(() => {
   const delta = clock.getDelta();
-  const player = wsPlayer ?? (demo.active ? demo.player : null);
+  const player = livePlayer ?? (demo.active ? demo.player : null);
   if (player && currentApplier) {
     currentApplier.apply(player.sample(performance.now()));
   }

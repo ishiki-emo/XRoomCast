@@ -41,6 +41,14 @@
         color: #eee;
         font-size: 13px;
       }
+      #transport-select {
+        padding: 6px 4px;
+        border: 1px solid #555;
+        border-radius: 4px;
+        background: rgba(0, 0, 0, 0.6);
+        color: #eee;
+        font-size: 13px;
+      }
       #ws-button,
       #load-button {
         padding: 6px 14px;
@@ -95,6 +103,10 @@
         <button id="load-button">ロード</button>
       </div>
       <div class="row">
+        <select id="transport-select">
+          <option value="ws">WebSocket</option>
+          <option value="sfu">SFU</option>
+        </select>
         <input id="ws-url" type="text" value="ws://localhost:8080" spellcheck="false" />
         <button id="ws-button">接続</button>
       </div>

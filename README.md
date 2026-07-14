@@ -123,3 +123,50 @@ npm run sim --workspace apps/bridge -- right       # 右手だけ挙げる(§7�
   タイムスタンプが不連続になった場合はジッタバッファを仕切り直して再生を続行する
 - トランスポートは `Transport` インターフェース(`apps/viewer/src/transport.ts`)で
   抽象化済み。Phase 2cでSFU実装に差し替える
+
+## Phase 2c: Cloudflare Realtime SFU
+
+WebSocketの代わりにCloudflare Realtime SFUのDataChannel(一方向:
+publisher→subscribers)で配信する。別ネットワークのマシン・スマホや
+複数ブラウザからの同時視聴が可能になる。
+
+### セットアップ
+
+1. [Cloudflareダッシュボード](https://dash.cloudflare.com/) → Realtime → Create App
+2. リポジトリルートに `.env` を作成(`.env.example` 参照):
+
+```
+CF_REALTIME_APP_ID=<App ID>
+CF_REALTIME_APP_SECRET=<App Secret>
+```
+
+**App Secretはブリッジ(Node)だけが読む。** ビューアのセッション作成は
+ブリッジのプロキシAPI(`/api/sfu/*`)経由で行うため、Secretがブラウザへ
+渡ることはない。
+
+### 使い方
+
+`npm run bridge` 起動時に `.env` があればブリッジがパブリッシャーセッションを
+自動確立する(ログに `[sfu] パブリッシャー接続完了` が出る)。ビューア左上の
+セレクタで **SFU** を選び、接続先にブリッジのHTTP URL(既定
+`http://localhost:8080`)を入れて接続する。WebSocketとSFUはセレクタで
+いつでも切り替えられる(受け入れ条件のフラグ)。
+
+別マシン・スマホから視聴する場合:
+
+```sh
+npm run dev -- -- --host   # ビューアをLANに公開
+```
+
+スマホのブラウザで `http://<PCのIP>:5173` を開き、SFUの接続先に
+`http://<PCのIP>:8080` を指定する(ポーズデータ自体はCloudflare経由なので、
+ブリッジAPIに届きさえすればよい)。
+
+### 実装のポイント
+
+- 手順は公式 `cloudflare/realtime-examples` の echo-datachannels に準拠
+  (sessions/new でSDP交換 → datachannels/new で negotiated ID取得 →
+  `createDataChannel(name, { negotiated: true, id })`)
+- ブリッジ側のWebRTCは `node-datachannel` のWebRTCポリフィルを使用
+- 辞書と表情全量は5秒間隔で定期再送する(§6.5。SFUは一方向で
+  途中参加者に接続時送信ができないため)
