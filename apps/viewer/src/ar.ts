@@ -88,7 +88,7 @@ export class ArController {
    */
   private readonly planeOccluders = new Map<
     object,
-    { mesh: THREE.Mesh; lastChanged: number; skip: boolean }
+    { mesh: THREE.Mesh; lastChanged: number; rebuiltAt: number; skip: boolean }
   >();
 
   constructor(
@@ -148,15 +148,13 @@ export class ArController {
   private async start(): Promise<void> {
     if (this.session) return;
     try {
+      // 注意: depth-sensing は要求しない。Chrome(ARCore)では許可されると
+      // three.js が自動で深度オクルージョン処理を始め、深度データが流れ始める
+      // 瞬間(=床認識確立時)にフリーズする事例があったため、当面無効化
       const session = await navigator.xr!.requestSession('immersive-ar', {
         requiredFeatures: ['hit-test'],
-        // depth-sensing等は「あれば使う」で要求し、実際に許可されたかを探る
-        optionalFeatures: ['dom-overlay', 'depth-sensing', 'mesh-detection', 'plane-detection', 'anchors'],
+        optionalFeatures: ['dom-overlay', 'mesh-detection', 'plane-detection', 'anchors'],
         domOverlay: { root: this.elements.overlayRoot },
-        depthSensing: {
-          usagePreference: ['gpu-optimized', 'cpu-optimized'],
-          dataFormatPreference: ['luminance-alpha', 'float32'],
-        },
       } as XRSessionInit);
       this.probePending = true;
       this.session = session;
@@ -227,15 +225,8 @@ export class ArController {
       const granted = enabled ? enabled.includes(feature) : fallback;
       return granted ? '✅' : '❌';
     };
-    let depthByApi = false;
-    try {
-      depthByApi = (session as unknown as { depthUsage?: string }).depthUsage !== undefined;
-    } catch {
-      depthByApi = false;
-    }
     const lines = [
       'AR機能の対応状況:',
-      `depth-sensing(オクルージョン): ${has('depth-sensing', depthByApi)}`,
       `mesh-detection: ${has('mesh-detection', 'detectedMeshes' in frame)}`,
       `plane-detection: ${has('plane-detection', 'detectedPlanes' in frame)}`,
       `anchors: ${has('anchors', 'createAnchor' in frame)}`,
@@ -269,8 +260,23 @@ export class ArController {
     }
   }
 
-  /** 毎フレーム呼ぶ。レティクル更新・ヒットキャッシュ・つかみ追従 */
+  private frameErrorShown = false;
+
+  /** 毎フレーム呼ぶ。レティクル更新・ヒットキャッシュ・つかみ追従。
+   *  例外はここで握りつぶす(投げると描画ループごと止まり画面が固まる) */
   onFrame(frame: XRFrame | undefined): void {
+    try {
+      this.onFrameInner(frame);
+    } catch (error) {
+      console.error('[ar] フレーム処理でエラー:', error);
+      if (!this.frameErrorShown) {
+        this.frameErrorShown = true;
+        this.elements.hint.textContent = `ARエラー: ${String(error).slice(0, 120)}`;
+      }
+    }
+  }
+
+  private onFrameInner(frame: XRFrame | undefined): void {
     if (!frame || !this.session) return;
     if (this.probePending) this.probeFeatures(frame);
 
@@ -348,15 +354,21 @@ export class ArController {
       }
     }
 
+    const now = performance.now();
     for (const plane of detected) {
       let entry = this.planeOccluders.get(plane);
-      if (!entry || entry.lastChanged < plane.lastChangedTime) {
+      // ARCoreはスキャン中ポリゴンを毎フレーム更新し続けるため、
+      // ジオメトリ再構築は0.5秒に1回までに間引く(毎フレーム再構築すると重い)
+      const needsRebuild =
+        !entry || (entry.lastChanged < plane.lastChangedTime && now - entry.rebuiltAt > 500);
+      if (needsRebuild) {
         if (entry) this.disposeOccluder(entry.mesh);
         const mesh = this.buildOccluderMesh(plane.polygon);
-        entry = { mesh, lastChanged: plane.lastChangedTime, skip: false };
+        entry = { mesh, lastChanged: plane.lastChangedTime, rebuiltAt: now, skip: false };
         this.planeOccluders.set(plane, entry);
         this.scene.add(mesh);
       }
+      if (!entry) continue;
       if (entry.skip) continue;
       const pose = frame.getPose(plane.planeSpace, refSpace);
       if (!pose) {
@@ -530,6 +542,7 @@ export class ArController {
   private cleanup(): void {
     this.removeProbeBoard();
     this.probePending = false;
+    this.frameErrorShown = false;
     for (const entry of this.planeOccluders.values()) this.disposeOccluder(entry.mesh);
     this.planeOccluders.clear();
     this.session = null;
