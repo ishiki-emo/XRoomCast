@@ -11,12 +11,14 @@
  */
 import * as THREE from 'three';
 import type { ArPanel } from './spatialUI';
+import { TouchAR } from './touchAR';
 
 export interface ArElements {
   button: HTMLButtonElement;
   overlayRoot: HTMLElement;
   hint: HTMLElement;
   exitButton: HTMLButtonElement;
+  touch: HTMLElement;
 }
 
 const SCALE_MIN = 0.1;
@@ -77,6 +79,8 @@ export class ArController {
   } | null = null;
 
   private boundsBox: THREE.Object3D | null = null;
+  /** スマホAR(コントローラ無し端末)向けのタッチ操作 */
+  private readonly touchAR: TouchAR;
   /** AR機能の探りボード(初回フレームで判定して表示) */
   private probePending = false;
   private probeBoard: THREE.Mesh | null = null;
@@ -132,6 +136,16 @@ export class ArController {
       this.scene.add(this.controllers[i]!);
     }
 
+    this.touchAR = new TouchAR({
+      touchEl: elements.touch,
+      renderer,
+      avatarRoot,
+      panels,
+      place: () => this.place(),
+      onScaleChanged: (scale) => this.onScaleChanged?.(scale),
+      setHint: (text) => (this.elements.hint.textContent = text),
+    });
+
     void this.init();
   }
 
@@ -160,7 +174,8 @@ export class ArController {
       this.session = session;
       this.onModeChange(true);
       this.elements.overlayRoot.hidden = false;
-      this.elements.hint.textContent = '床にかざしてトリガーで設置 / グリップでつかむ';
+      this.elements.hint.textContent = '床にかざしてタップで設置 / 二本指で伸縮';
+      this.touchAR.setEnabled(true);
       for (const laser of this.lasers) laser.visible = true;
       // 各パネルを初期配置(視点=原点の前方)に、視点へ向けて出す
       for (const panel of this.panels) {
@@ -543,6 +558,7 @@ export class ArController {
     this.removeProbeBoard();
     this.probePending = false;
     this.frameErrorShown = false;
+    this.touchAR.setEnabled(false);
     for (const entry of this.planeOccluders.values()) this.disposeOccluder(entry.mesh);
     this.planeOccluders.clear();
     this.session = null;

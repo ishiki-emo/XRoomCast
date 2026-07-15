@@ -218,11 +218,22 @@
         pointer-events: none;
         font-family: system-ui, sans-serif;
       }
+      /* スマホARのタッチ操作を拾う全画面レイヤー(タッチが直接XRのselectに
+         なるのを防ぎ、ジェスチャをこちらで処理する) */
+      #ar-touch {
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        pointer-events: auto;
+        touch-action: none;
+        background: transparent;
+      }
       #ar-hint {
         position: absolute;
         top: 24px;
         left: 50%;
         transform: translateX(-50%);
+        z-index: 2;
         background: rgba(0, 0, 0, 0.6);
         color: #fff;
         padding: 8px 16px;
@@ -235,6 +246,7 @@
         bottom: 32px;
         left: 50%;
         transform: translateX(-50%);
+        z-index: 3;
         pointer-events: auto;
         padding: 12px 28px;
         border: 1px solid #666;
@@ -392,6 +404,7 @@
       </section>
     </div>
     <div id="ar-overlay" hidden>
+      <div id="ar-touch"></div>
       <div id="ar-hint">床にかざして、タップで設置</div>
       <button id="ar-exit">AR終了</button>
     </div>

@@ -117,6 +117,7 @@ const arController = new ArController(
     overlayRoot: document.getElementById('ar-overlay') as HTMLElement,
     hint: document.getElementById('ar-hint') as HTMLElement,
     exitButton: document.getElementById('ar-exit') as HTMLButtonElement,
+    touch: document.getElementById('ar-touch') as HTMLElement,
   },
   (arActive) => {
     scenery.setARMode(arActive);
@@ -500,6 +501,7 @@ Object.assign(window, {
     setShadowMode: (mode: ShadowMode) => contactShadow.setMode(mode),
     settingsPanel,
     spatialChat,
+    arController,
   },
 });
 
