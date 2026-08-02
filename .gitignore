@@ -25,3 +25,6 @@ fixtures/dummy-motion.bin
 
 # 視聴URLのQR(秘密キー入りURLを含む)
 qr-watch.png
+
+# 初期の設計指示書(現在の実装と乖離しているため公開しない)
+実装仕様書.md
