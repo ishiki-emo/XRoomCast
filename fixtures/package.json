@@ -1,5 +1,5 @@
 {
-  "name": "@vrmsync/fixtures",
+  "name": "@xroomcast/fixtures",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -10,7 +10,7 @@
     "generate": "tsx src/cli.ts"
   },
   "dependencies": {
-    "@vrmsync/protocol": "*"
+    "@xroomcast/protocol": "*"
   },
   "devDependencies": {
     "tsx": "^4.19.0",

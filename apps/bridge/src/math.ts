@@ -3,7 +3,7 @@
  * Unity(左手系, Y-up, +Z前)→ Three.js(右手系, Y-up)の座標系変換(実装仕様書 §7)。
  * ワイヤ上のデータはThree.js系に統一する。変換は必ずブリッジ側で行う。
  */
-import type { Quat, Vec3 } from '@vrmsync/protocol';
+import type { Quat, Vec3 } from '@xroomcast/protocol';
 
 export const IDENTITY_QUAT: Quat = [0, 0, 0, 1];
 export const ZERO_VEC3: Vec3 = [0, 0, 0];

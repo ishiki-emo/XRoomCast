@@ -1,5 +1,5 @@
 {
-  "name": "vrmsyncweb",
+  "name": "xroomcast",
   "private": true,
   "version": "0.0.0",
   "workspaces": [
@@ -14,6 +14,8 @@
     "sim": "npm run sim --workspace apps/bridge",
     "test": "npm run test --workspace packages/protocol",
     "generate:motion": "npm run generate --workspace fixtures",
+    "room": "node apps/viewer/scripts/roomLink.mjs",
     "deploy:viewer": "npm run deploy --workspace apps/viewer"
-  }
+  },
+  "description": "VRMアバターのマルチ環境ライブ配信(PC/スマホ/HMD、AR/MR対応)"
 }

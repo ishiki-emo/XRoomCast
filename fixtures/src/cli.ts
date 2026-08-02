@@ -7,7 +7,7 @@
  */
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { decodePacket, encodePacket } from '@vrmsync/protocol';
+import { decodePacket, encodePacket } from '@xroomcast/protocol';
 import { dummyPacketAt, POSE_INTERVAL_MS, POSE_RATE } from './dummyMotion.js';
 
 const DURATION_MS = 10_000;

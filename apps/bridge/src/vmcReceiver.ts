@@ -4,7 +4,7 @@
  */
 import dgram from 'node:dgram';
 import { fromBuffer, type OscElement } from 'osc-min';
-import type { Quat, Vec3 } from '@vrmsync/protocol';
+import type { Quat, Vec3 } from '@xroomcast/protocol';
 
 export interface VmcHandlers {
   onBone(name: string, pos: Vec3, rot: Quat): void;

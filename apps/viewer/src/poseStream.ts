@@ -12,7 +12,7 @@ import type {
   PoseSection,
   Quat,
   Vec3,
-} from '@vrmsync/protocol';
+} from '@xroomcast/protocol';
 
 export const TARGET_DELAY_MS = 100;
 /** 受信タイムスタンプがローカル再生クロックからこれ以上ずれたらストリーム再開とみなす */

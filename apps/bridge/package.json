@@ -1,5 +1,5 @@
 {
-  "name": "@vrmsync/bridge",
+  "name": "@xroomcast/bridge",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vrmsync/protocol": "*",
+    "@xroomcast/protocol": "*",
     "node-datachannel": "^0.32.3",
     "osc-min": "^1.1.2",
     "ws": "^8.18.0"

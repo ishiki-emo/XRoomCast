@@ -3,8 +3,8 @@
  * ダミーモーションを30Hzで生成し、実経路と同じくエンコード→(ランダムドロップ)→
  * デコードを通してからジッタバッファへ流し込む。
  */
-import { decodePacket, encodePacket } from '@vrmsync/protocol';
-import { dummyPacketAt, POSE_INTERVAL_MS } from '@vrmsync/fixtures';
+import { decodePacket, encodePacket } from '@xroomcast/protocol';
+import { dummyPacketAt, POSE_INTERVAL_MS } from '@xroomcast/fixtures';
 import { PoseStreamPlayer } from './poseStream';
 
 export class DemoController {

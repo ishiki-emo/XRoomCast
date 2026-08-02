@@ -7,13 +7,13 @@
 VRMファイルは**リポジトリにコミットしない**(ライセンス・容量の観点)。
 開発者が自身のVRMを `apps/viewer/public/` に置いて使う。
 
-- 現在の想定ファイル名: `apps/viewer/public/Emo.vrm`(VRM 0.x)
-- VRM 1.0の確認用に、公式サンプルの
+- 既定のファイル名: `apps/viewer/public/avatar.vrm`
+  (`apps/viewer/src/config.ts` の `DEFAULT_VRM_PATH`)
+- VRM 1.0の確認用には、公式サンプルの
   [Seed-san](https://github.com/vrm-c/vrm-specification/tree/master/samples/Seed-san)
-  を `apps/viewer/public/Seed-san.vrm` として配置済み(こちらもコミット対象外)。
-  消してしまった場合は上記URLの `vrm/Seed-san.vrm` を再取得する。
-- 表示するモデルを切り替えるには `apps/viewer/src/main.ts` の `VRM_PATH` を変更する
-  (Phase 1でURL指定の動的ロードに置き換わる予定)。
+  が使える。`vrm/Seed-san.vrm` を取得して `apps/viewer/public/` に置く
+- 別のモデルを表示するときは、ファイルを置き換えるか
+  `?vrm=<VRMのURL>` で指定する(ページ上の入力欄からも読み込める)
 
 ## ダミーモーションデータ
 

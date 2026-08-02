@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎙</text></svg>" />
-    <title>配信者コンソール - 音声</title>
+    <title>配信者コンソール</title>
     <style>
       html,
       body {
@@ -68,18 +68,218 @@
         font-size: 13px;
         line-height: 1.8;
       }
+      h2 {
+        font-size: 17px;
+        margin: 40px 0 8px;
+        padding-top: 24px;
+        border-top: 1px solid #333;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 12px;
+        flex-wrap: wrap;
+      }
+      input[type='file'] {
+        flex: 1 1 240px;
+        min-width: 0;
+        font-size: 13px;
+        color: #ccc;
+      }
+      button.small {
+        padding: 8px 14px;
+        font-size: 13px;
+        border-radius: 8px;
+        border: 1px solid #444;
+        background: #2b2b2b;
+        color: #eee;
+        cursor: pointer;
+      }
+      button.small:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      button.small.primary {
+        background: #2d4a2d;
+      }
+      button.small.danger {
+        border-color: #5f3a3a;
+        color: #ff9d9d;
+      }
+      #a-progress {
+        width: 100%;
+        height: 6px;
+        margin-top: 10px;
+      }
+      #a-list {
+        list-style: none;
+        margin: 14px 0 0;
+        padding: 0;
+      }
+      #a-list li {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 10px 12px;
+        border: 1px solid #333;
+        border-radius: 8px;
+        background: #1b1b1b;
+        margin-bottom: 8px;
+        font-size: 14px;
+      }
+      #a-list li.current {
+        border-color: #3a5f3a;
+        background: #1b241b;
+      }
+      #a-list .name {
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #a-list .size {
+        color: #888;
+        font-size: 12px;
+        flex: 0 0 auto;
+      }
+      .empty {
+        color: #777;
+        font-size: 13px;
+        margin: 14px 0 0;
+      }
+      #p-canvas {
+        display: block;
+        width: 100%;
+        aspect-ratio: 16 / 10;
+        border-radius: 10px;
+        border: 1px solid #333;
+        background: #1b1b22;
+        touch-action: none;
+      }
+      #p-status {
+        margin-top: 8px;
+        color: #aaa;
+        font-size: 13px;
+        min-height: 1.3em;
+      }
+      .ar-label {
+        color: #bbb;
+        font-size: 13px;
+      }
+      .wrist-axis {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: #bbb;
+        font-size: 13px;
+      }
+      .wrist-axis span {
+        display: inline-block;
+        min-width: 3.2em;
+        text-align: center;
+        color: #eee;
+      }
+      .wrist-axis button {
+        padding: 4px 10px;
+      }
+      button.small.on {
+        background: #3a6f4a;
+        border-color: #5c9c72;
+        color: #d7f5e2;
+      }
     </style>
   </head>
   <body>
     <div id="wrap">
-      <h1>🎙 配信者コンソール(音声)</h1>
-      <p class="sub">このページを開いている間だけ、マイク音声が視聴ページへ配信されます</p>
+      <h1>🎙 配信者コンソール</h1>
+      <p class="sub" id="b-room">このページを開いている間だけ、マイク音声が視聴ページへ配信されます</p>
       <div id="b-status">待機中</div>
       <button id="b-toggle">マイク配信を開始</button>
       <p class="note">
         ・音声はCloudflare Realtime SFUの音声トラック(Opus)として配信されます<br />
         ・ポーズ配信(VSeeFace+ブリッジ)とは独立して動きます<br />
         ・タブを閉じる/停止ボタンで配信は止まります
+      </p>
+
+      <h2>👀 プレビューと視聴者</h2>
+      <p class="note" style="margin-top: 0">
+        視聴者に実際に届いている姿です。視聴者の位置は端末ごとの形で表示されます
+      </p>
+      <canvas id="p-canvas"></canvas>
+      <div id="p-status">準備中...</div>
+      <div class="row">
+        <button id="p-hmd-ar" class="small primary" hidden>🥽 パススルーで配信</button>
+        <button id="p-hmd-vr" class="small primary" hidden>🌌 VRで配信</button>
+        <button id="p-mirror" class="small on" hidden>🪞 鏡を表示</button>
+      </div>
+      <div id="wrist-row" hidden>
+        <div class="row">
+          <span class="ar-label">手首の向き</span>
+          <span class="wrist-axis">
+            X <button class="small" data-wrist="x-">−</button>
+            <span id="wrist-x">0°</span>
+            <button class="small" data-wrist="x+">＋</button>
+          </span>
+          <span class="wrist-axis">
+            Y <button class="small" data-wrist="y-">−</button>
+            <span id="wrist-y">0°</span>
+            <button class="small" data-wrist="y+">＋</button>
+          </span>
+          <span class="wrist-axis">
+            Z <button class="small" data-wrist="z-">−</button>
+            <span id="wrist-z">0°</span>
+            <button class="small" data-wrist="z+">＋</button>
+          </span>
+          <button class="small" data-wrist="reset">戻す</button>
+        </div>
+        <p class="note">
+          手首がねじれて見えるときに調整します(15°刻み・左右対称)。設定は次回も保持されます。<br />
+          既定値は PICO 4 Ultra で合わせたものです。「戻す」でその値に戻ります
+        </p>
+      </div>
+      <p class="note" id="p-hmd-note" hidden>
+        ・VSeeFaceもブリッジも不要で、ヘッドセット単体で配信できます<br />
+        ・<strong>マイクも自動で開始します</strong>(HMD内蔵マイクが使われます。音声とモーションは別経路なので同時に配信されます)<br />
+        ・パススルーは現実が見え、VRは暗い空間にアバターと視聴者だけが見えます<br />
+        ・入った瞬間の立ち位置と向きが基準になります。<strong>コントローラのトリガーでいつでも取り直せます</strong><br />
+        ・<strong>HMD内にも操作パネルが出ます</strong>(左前方)。手首の調整やマイクもそこから触れます<br />
+        ・身長はアバターに自動で合わせます(目の高さの比で補正)<br />
+        ・自分の少し前にアバターが立つので、視聴者から見た姿を確認できます<br />
+        ・<strong>ブリッジは止めてください</strong>(同時に配信すると後から登録した方が優先されます)<br />
+        ・顔の表情は送れません(WebXRに顔トラッキングのAPIがないため)
+      </p>
+      <div class="row">
+        <span class="ar-label">視聴者の位置を</span>
+        <button class="small" data-peermode="all">全員に見せる</button>
+        <button class="small" data-peermode="broadcaster">配信者のみ</button>
+        <button class="small" data-peermode="off">無効</button>
+      </div>
+      <p class="note">
+        ・「全員に見せる」は少人数のミーティング向け。視聴者どうしもお互いが見えます<br />
+        ・「配信者のみ」は中継量が人数に比例するだけなので、大人数のイベントでも軽い<br />
+        ・視聴者側でも各自「隠す」を選べます
+      </p>
+
+      <h2>🧍 アバター</h2>
+      <div id="a-status">読み込み中...</div>
+      <div class="row">
+        <input type="file" id="a-file" accept=".vrm,model/vrm" />
+        <button id="a-upload" class="small primary">アップロード</button>
+      </div>
+      <progress id="a-progress" max="100" value="0" hidden></progress>
+      <ul id="a-list"></ul>
+      <p class="empty" id="a-empty" hidden>
+        このルームにはまだVRMがありません。上から追加してください
+      </p>
+      <div class="row">
+        <button id="a-default" class="small" hidden>既定のVRMに切り替え</button>
+        <button id="a-reload" class="small">一覧を更新</button>
+      </div>
+      <p class="note">
+        ・「切り替え」を押すと、視聴中の全員がそのVRMを読み込み直します<br />
+        ・読み込み完了まで各視聴者には元のアバター(初回はクリスタル)が表示されます<br />
+        ・アップロードしたVRMはこのルーム専用です。イベント後は削除してください
       </p>
     </div>
     <script type="module" src="/src/broadcast.ts"></script>

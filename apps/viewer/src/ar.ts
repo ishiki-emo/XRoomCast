@@ -24,6 +24,9 @@ export interface ArElements {
 const SCALE_MIN = 0.1;
 const SCALE_MAX = 2.5;
 const LASER_DEFAULT_LEN = 1.5;
+/** AR開始時にアバターを置く距離(視線の前方・メートル) */
+const INITIAL_PLACE_DISTANCE = 1.2;
+const UP_AXIS = new THREE.Vector3(0, 1, 0);
 
 const _m1 = new THREE.Matrix4();
 const _v1 = new THREE.Vector3();
@@ -41,6 +44,11 @@ interface RayHit {
 export class ArController {
   /** スケールが変わったときに呼ばれる(スプリングボーン等の追従用) */
   onScaleChanged: ((scale: number) => void) | null = null;
+  /**
+   * AR開始時、DOMオーバーレイが実際に有効かを通知する。
+   * true(スマホ)なら画面固定のUIを、false(HMD)なら空間パネルを使う
+   */
+  onOverlayModeChange: ((domOverlayActive: boolean) => void) | null = null;
 
   private session: XRSession | null = null;
   private hitTestSource: XRHitTestSource | null = null;
@@ -79,6 +87,18 @@ export class ArController {
   } | null = null;
 
   private boundsBox: THREE.Object3D | null = null;
+  /** このセッションでDOMオーバーレイが有効か(AR開始時に判定) */
+  private domOverlayActive = false;
+  /**
+   * 設置済みか。設置後はレティクル(床のリング)を隠し、タップ/トリガーでの
+   * 再設置も止める(見ているものの前で誤って動かないようにする)。
+   * 置き直すときは requestPlacement() で設置モードへ戻す
+   */
+  private placed = false;
+  /** 床が原点の参照空間(local-floor)を使えているか */
+  private floorSpace = false;
+  /** AR開始直後、最初のフレームで正面へ仮置きする */
+  private initialPlacementPending = false;
   /** スマホAR(コントローラ無し端末)向けのタッチ操作 */
   private readonly touchAR: TouchAR;
   /** AR機能の探りボード(初回フレームで判定して表示) */
@@ -167,7 +187,15 @@ export class ArController {
       // 瞬間(=床認識確立時)にフリーズする事例があったため、当面無効化
       const session = await navigator.xr!.requestSession('immersive-ar', {
         requiredFeatures: ['hit-test'],
-        optionalFeatures: ['dom-overlay', 'mesh-detection', 'plane-detection', 'anchors'],
+        // local-floor は既定機能ではないため、ここで要求しないと
+        // requestReferenceSpace('local-floor') が拒否される
+        optionalFeatures: [
+          'local-floor',
+          'dom-overlay',
+          'mesh-detection',
+          'plane-detection',
+          'anchors',
+        ],
         domOverlay: { root: this.elements.overlayRoot },
       } as XRSessionInit);
       this.probePending = true;
@@ -177,15 +205,36 @@ export class ArController {
       this.elements.hint.textContent = '床にかざしてタップで設置 / 二本指で伸縮';
       this.touchAR.setEnabled(true);
       for (const laser of this.lasers) laser.visible = true;
-      // 各パネルを初期配置(視点=原点の前方)に、視点へ向けて出す
-      for (const panel of this.panels) {
-        _q1.setFromAxisAngle(new THREE.Vector3(0, 1, 0), panel.arPlacement.yaw);
-        panel.show(panel.arPlacement.position.clone(), _q1);
+
+      // DOMオーバーレイが効く端末(スマホ)は画面固定のボタンで操作できるので、
+      // 空間パネルは出さない。HMDはDOMが見えないため空間パネルを使う
+      const enabled = (session as unknown as { enabledFeatures?: readonly string[] })
+        .enabledFeatures;
+      this.domOverlayActive = enabled ? enabled.includes('dom-overlay') : false;
+      this.onOverlayModeChange?.(this.domOverlayActive);
+      if (!this.domOverlayActive) {
+        // 各パネルを初期配置(視点=原点の前方)に、視点へ向けて出す
+        for (const panel of this.panels) {
+          _q1.setFromAxisAngle(new THREE.Vector3(0, 1, 0), panel.arPlacement.yaw);
+          panel.show(panel.arPlacement.position.clone(), _q1);
+        }
       }
 
-      this.renderer.xr.setReferenceSpaceType('local');
+      /**
+       * 'local' は原点がセッション開始時の「頭の位置」になるため、原点に置いた
+       * アバターは足元が目の高さに来てしまう(見上げる形になる)。
+       * 'local-floor' なら原点が床なので、y=0 に置けば足が接地する
+       */
+      this.floorSpace = await session
+        .requestReferenceSpace('local-floor')
+        .then(() => true)
+        .catch(() => false);
+      this.renderer.xr.setReferenceSpaceType(this.floorSpace ? 'local-floor' : 'local');
       await this.renderer.xr.setSession(session);
       this.refSpace = this.renderer.xr.getReferenceSpace();
+      console.log(`[ar] 参照空間: ${this.floorSpace ? 'local-floor(床が原点)' : 'local(頭が原点)'}`);
+      // 最初のフレームで正面へ仮置きする(掴んで引き寄せる手間をなくす)
+      this.initialPlacementPending = true;
 
       const viewerSpace = await session.requestReferenceSpace('viewer');
       this.hitTestSource = (await session.requestHitTestSource?.({ space: viewerSpace })) ?? null;
@@ -295,11 +344,21 @@ export class ArController {
     if (!frame || !this.session) return;
     if (this.probePending) this.probeFeatures(frame);
 
+    // 視点の姿勢はヒットテストの有無に関わらず要る(初期配置・設置時の向き)
+    const viewer = this.refSpace ? frame.getViewerPose(this.refSpace) : null;
+    if (viewer) {
+      this.latestViewer.set(
+        viewer.transform.position.x,
+        viewer.transform.position.y,
+        viewer.transform.position.z,
+      );
+    }
+
     if (this.hitTestSource && this.refSpace) {
       const hit = frame.getHitTestResults(this.hitTestSource)[0];
       const pose = hit?.getPose(this.refSpace);
       if (pose) {
-        this.reticle.visible = this.avatarHands() === 0;
+        this.reticle.visible = !this.placed && this.avatarHands() === 0;
         this.reticle.matrix.fromArray(pose.transform.matrix);
         this.latestHit = (this.latestHit ?? new THREE.Vector3()).set(
           pose.transform.position.x,
@@ -310,13 +369,15 @@ export class ArController {
         this.reticle.visible = false;
         this.latestHit = null;
       }
-      const viewer = frame.getViewerPose(this.refSpace);
-      if (viewer) {
-        this.latestViewer.set(
-          viewer.transform.position.x,
-          viewer.transform.position.y,
-          viewer.transform.position.z,
-        );
+    }
+
+    // 初期配置。床の高さは local-floor なら 0、そうでなければヒットテストの
+    // 検出結果を待つ('local' は原点が頭の高さなので、そのままでは足が浮く)
+    if (this.initialPlacementPending && viewer) {
+      const floorY = this.floorSpace ? 0 : this.latestHit?.y;
+      if (floorY !== undefined) {
+        this.initialPlacementPending = false;
+        this.placeInFront(viewer, floorY);
       }
     }
 
@@ -486,7 +547,9 @@ export class ArController {
     if (this.avatarHands() === 0) {
       this.grabHand = -1;
       if (this.boundsBox) this.boundsBox.visible = false;
-      this.elements.hint.textContent = '設置しました(トリガーで置き直し)';
+      // つかんで置いた時点で配置済みとみなす(レティクルを出しっぱなしにしない)
+      this.placed = true;
+      this.elements.hint.textContent = 'つかんで移動しました';
     } else {
       // 片手が残ったらその手でつかみ直す
       this.beginOneHandGrab(this.heldTarget[0] === 'avatar' ? 0 : 1);
@@ -545,13 +608,75 @@ export class ArController {
   }
 
   /** レティクル位置に設置(スケール維持・直立・視聴者の方を向く) */
+  /**
+   * AR開始直後に、視線の前方へ足を接地させて仮置きする。
+   * 'local' では床の高さが分からないため、local-floor が使えるときだけ呼ぶ。
+   * これが無いと原点(=頭の高さ・自分と同じ場所)に立つので、見上げたうえで
+   * 掴んで引き寄せる必要があった
+   */
+  private placeInFront(viewer: XRViewerPose, floorY: number): void {
+    const p = viewer.transform.position;
+    const o = viewer.transform.orientation;
+    _q1.set(o.x, o.y, o.z, o.w);
+    // 視線の水平成分(真上や真下を向いていた場合の保険つき)
+    _v1.set(0, 0, -1).applyQuaternion(_q1);
+    _v1.y = 0;
+    if (_v1.lengthSq() < 1e-6) _v1.set(0, 0, -1);
+    _v1.normalize();
+
+    const x = p.x + _v1.x * INITIAL_PLACE_DISTANCE;
+    const z = p.z + _v1.z * INITIAL_PLACE_DISTANCE;
+    this.avatarRoot.position.set(x, floorY, z);
+    this.avatarRoot.quaternion.setFromAxisAngle(UP_AXIS, Math.atan2(p.x - x, p.z - z));
+    this.placed = true;
+    this.reticle.visible = false;
+    this.elements.hint.textContent = '正面に置きました(設定の「置き直す」で移動できます)';
+  }
+
   private place(): void {
-    if (!this.session || this.avatarHands() > 0 || !this.latestHit) return;
+    // 設置済みのあいだは無視する(画面のどこを触ってもアバターが飛ぶのを防ぐ)
+    if (!this.session || this.placed || this.avatarHands() > 0 || !this.latestHit) return;
     const p = this.latestHit;
     const yaw = Math.atan2(this.latestViewer.x - p.x, this.latestViewer.z - p.z);
     this.avatarRoot.position.copy(p);
     this.avatarRoot.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
-    this.elements.hint.textContent = '設置しました(グリップでつかめます)';
+    this.placed = true;
+    this.reticle.visible = false;
+    this.elements.hint.textContent = '設置しました(つかんで移動できます)';
+  }
+
+  /** AR中のヒント表示を差し替える(AR外では何もしない) */
+  showHint(text: string): void {
+    if (!this.session) return;
+    this.elements.hint.textContent = text;
+  }
+
+  get isPresenting(): boolean {
+    return this.session !== null;
+  }
+
+  /**
+   * 視聴者の気配で使う端末種別。
+   * DOMオーバーレイが効くのはスマホ(HMDのブラウザでは表示されない)なので、
+   * AR中はその可否で分ける
+   */
+  get deviceKind(): 'hmd' | 'phone' | 'desktop' {
+    if (!this.session) return 'desktop';
+    return this.domOverlayActive ? 'phone' : 'hmd';
+  }
+
+  /** コントローラのグリップ姿勢(AR中のみ。掴んでいる手も含めてそのまま返す) */
+  getGrip(index: 0 | 1): THREE.Object3D | null {
+    const grip = this.grips[index];
+    // 未接続のコントローラは原点に置かれたままなので、見えているものだけ返す
+    return this.session && grip && grip.visible ? grip : null;
+  }
+
+  /** 設置モードへ戻す(レティクルを再表示し、次のタップ/トリガーで置き直す) */
+  requestPlacement(): void {
+    if (!this.session) return;
+    this.placed = false;
+    this.elements.hint.textContent = '床にかざして、タップ/トリガーで置き直し';
   }
 
   private cleanup(): void {
@@ -565,6 +690,9 @@ export class ArController {
     this.hitTestSource = null;
     this.refSpace = null;
     this.latestHit = null;
+    this.placed = false;
+    this.floorSpace = false;
+    this.initialPlacementPending = false;
     this.reticle.visible = false;
     this.heldTarget[0] = null;
     this.heldTarget[1] = null;

@@ -1,0 +1,33 @@
+Copyright (c) 2026 癒色えも (ISHIKI Emo)
+All rights reserved.
+
+## 日本語
+
+このソフトウェアのライセンス形態は現在検討中です。
+
+現時点では、閲覧および学習を目的とした参照以外の利用
+(複製・改変・再配布・商用利用など)を許諾していません。
+利用をご希望の場合はご連絡ください。
+
+正式なライセンスを定めた時点で、このファイルを差し替えます。
+
+連絡先: X (Twitter) のDM — https://x.com/ishiki_emo
+
+## English
+
+The license for this software is currently under consideration.
+
+At this time, no permission is granted for any use beyond viewing and study
+for reference purposes. This includes, but is not limited to, copying,
+modification, redistribution, and commercial use.
+Please contact the author if you wish to use this software.
+
+This file will be replaced once a formal license is decided.
+
+Contact: DM on X (Twitter) — https://x.com/ishiki_emo
+
+---
+
+Note: This repository depends on third-party open source software
+(three.js, @pixiv/three-vrm, ws, osc-min, node-datachannel, and others).
+Those components remain under their own licenses. See README for details.

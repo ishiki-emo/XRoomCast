@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎭</text></svg>" />
-    <title>癒色えも Live 3D Viewer</title>
+    <title>XRoomCast</title>
     <style>
       html,
       body {
@@ -255,6 +255,65 @@
         color: #fff;
         font-size: 15px;
       }
+      /* スマホAR用の画面固定コントロール(AR終了ボタンの上に積む)。
+         項目が増えたので既定は閉じておき、⚙設定ボタンで開閉する */
+      #ar-settings-toggle {
+        position: absolute;
+        bottom: 88px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 3;
+        pointer-events: auto;
+      }
+      #ar-controls {
+        position: absolute;
+        bottom: 136px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 3;
+        pointer-events: auto;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        max-width: calc(100vw - 24px);
+      }
+      #ar-controls[hidden] {
+        display: none;
+      }
+      #ar-controls .ar-group {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+        justify-content: center;
+        padding: 6px 10px;
+        border-radius: 22px;
+        background: rgba(0, 0, 0, 0.6);
+      }
+      #ar-controls .ar-label {
+        color: #bbb;
+        font-size: 12px;
+        padding: 0 2px;
+      }
+      .ar-chip {
+        padding: 8px 14px;
+        border: 1px solid #666;
+        border-radius: 18px;
+        background: rgba(0, 0, 0, 0.6);
+        color: #fff;
+        font-size: 14px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      #ar-controls .ar-chip {
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .ar-chip.active {
+        background: #3a6f4a;
+        border-color: #5c9c72;
+        color: #d7f5e2;
+      }
 
       /* ---- 視聴モード(?watch=1): ページレイアウト+16:9ステージ ---- */
       body.watch {
@@ -354,8 +413,8 @@
   <body>
     <div id="page">
       <header id="page-header">
-        <h1>癒色えも Live 3D Viewer</h1>
-        <p class="sub">モーションを約3KB/sのポーズデータで配信し、ブラウザ上でリアルタイムに3D再構成する実験ページ</p>
+        <h1>XRoomCast</h1>
+        <p class="sub">モーションを約3KB/sのポーズデータで配信し、PC・スマホ・HMDのブラウザ上でリアルタイムに3D再構成します</p>
       </header>
       <div id="stage">
         <div id="ui">
@@ -400,12 +459,39 @@
           動画ではないので転送量は動画配信の約1/1000。髪や服の揺れはあなたのブラウザが
           その場で物理演算しています。
         </p>
-        <p>配信がオフのときはTポーズのまま待機し、配信が始まると自動で動き出します。</p>
+        <p>配信がオフのときは待機モーション(ゆっくりした呼吸とまばたき)で待ち、配信が始まると自動で切り替わります。</p>
       </section>
     </div>
     <div id="ar-overlay" hidden>
       <div id="ar-touch"></div>
       <div id="ar-hint">床にかざして、タップで設置</div>
+      <!-- スマホAR用の画面固定UI(DOMオーバーレイ対応端末でのみ見える)。
+           HMDではDOMが表示されないため、同じ操作を空間パネルで行う -->
+      <div id="ar-controls" hidden>
+        <div class="ar-group">
+          <span class="ar-label">アバター</span>
+          <button class="ar-chip" data-size="life">等身大</button>
+          <button class="ar-chip" data-size="mini">ミニ 1/10</button>
+          <button class="ar-chip" id="ar-replace">置き直す</button>
+        </div>
+        <div class="ar-group">
+          <span class="ar-label">影</span>
+          <button class="ar-chip" data-shadow="full">リアル</button>
+          <button class="ar-chip" data-shadow="blob">かんたん</button>
+          <button class="ar-chip" data-shadow="off">なし</button>
+        </div>
+        <div class="ar-group">
+          <span class="ar-label">音声</span>
+          <button class="ar-chip" data-audio="spatial">空間</button>
+          <button class="ar-chip" data-audio="flat">通常</button>
+        </div>
+        <div class="ar-group">
+          <span class="ar-label">他の視聴者</span>
+          <button class="ar-chip" data-peers="on">表示</button>
+          <button class="ar-chip" data-peers="off">隠す</button>
+        </div>
+      </div>
+      <button id="ar-settings-toggle" class="ar-chip">⚙ 設定</button>
       <button id="ar-exit">AR終了</button>
     </div>
     <script type="module" src="/src/main.ts"></script>

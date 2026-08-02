@@ -5,7 +5,7 @@
  * Hipsから対象ボーンまで順に合成する必要がある(チェーン上にないボーンは無視)。
  * 座標系はここではUnity系のまま。Three.js系への変換は送出直前に行う。
  */
-import type { FingerCurls, Quat, Vec3 } from '@vrmsync/protocol';
+import type { FingerCurls, Quat, Vec3 } from '@xroomcast/protocol';
 import { addVec3, IDENTITY_QUAT, quatAngle, quatMul, rotateVec3, ZERO_VEC3 } from './math.js';
 
 interface BonePose {

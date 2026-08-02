@@ -4,7 +4,7 @@
  * 時刻の純関数なので、CLIでのファイル保存とビューアでの実時間再生の両方から使える。
  * 座標系はワイヤ仕様どおりThree.js系(右手系, Y-up, モデル正面+Z, 原点=足元)。
  */
-import type { DictionaryEntry, FingerCurls, Packet, PoseSection, Quat } from '@vrmsync/protocol';
+import type { DictionaryEntry, FingerCurls, Packet, PoseSection, Quat } from '@xroomcast/protocol';
 
 export const POSE_RATE = 30;
 export const POSE_INTERVAL_MS = 1000 / POSE_RATE;

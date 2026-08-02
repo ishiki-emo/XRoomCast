@@ -2,6 +2,9 @@
  * 空間に置ける設定パネル(AR用)。
  * canvasテクスチャを貼ったプレーンで、コントローラのレイが当たったボタンを
  * ハイライトし、トリガーで選択する。パネル自体はグリップで掴んで移動できる。
+ *
+ * 設定項目が増えたため複数セクションを1枚にまとめられる構造にしている
+ * (パネルを何枚も浮かべると視界が埋まるため)。
  */
 import * as THREE from 'three';
 
@@ -22,19 +25,30 @@ export interface ArPanel {
 export interface PanelOption {
   label: string;
   value: string;
+  /** 選択状態を持たない実行ボタン(押しても●印は付かない) */
+  action?: boolean;
 }
 
-export interface PanelSpec {
+export interface PanelSection {
   title: string;
   options: PanelOption[];
   initial: string;
   onSelect: (value: string) => void;
 }
 
+export interface PanelSpec {
+  title: string;
+  sections: PanelSection[];
+}
+
 const CANVAS_W = 512;
-const CANVAS_H = 300;
 const PANEL_W = 0.34; // メートル
-const PANEL_H = (PANEL_W * CANVAS_H) / CANVAS_W;
+const PAD = 24;
+const HEADER_H = 64;
+const SECTION_TITLE_H = 40;
+const BUTTON_H = 52;
+const BUTTON_GAP = 12;
+const SECTION_GAP = 18;
 
 interface ButtonRect {
   x: number;
@@ -42,6 +56,7 @@ interface ButtonRect {
   w: number;
   h: number;
   option: PanelOption;
+  section: number;
 }
 
 export class SpatialPanel implements ArPanel {
@@ -52,30 +67,44 @@ export class SpatialPanel implements ArPanel {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly texture: THREE.CanvasTexture;
   private readonly buttons: ButtonRect[] = [];
-  private active: string;
+  private readonly sectionTitleY: number[] = [];
+  private readonly canvasHeight: number;
+  /** セクションごとの選択値 */
+  private readonly active: string[];
   private hover = -1;
 
   constructor(private readonly spec: PanelSpec) {
-    this.active = spec.initial;
+    this.active = spec.sections.map((section) => section.initial);
+
+    // レイアウトを先に確定させてキャンバス高さを決める
+    let y = HEADER_H;
+    spec.sections.forEach((section, sectionIndex) => {
+      this.sectionTitleY.push(y);
+      y += SECTION_TITLE_H;
+      section.options.forEach((option) => {
+        this.buttons.push({
+          x: PAD,
+          y,
+          w: CANVAS_W - PAD * 2,
+          h: BUTTON_H,
+          option,
+          section: sectionIndex,
+        });
+        y += BUTTON_H + BUTTON_GAP;
+      });
+      y += SECTION_GAP - BUTTON_GAP;
+    });
+    this.canvasHeight = y + PAD;
+
     this.canvas = document.createElement('canvas');
     this.canvas.width = CANVAS_W;
-    this.canvas.height = CANVAS_H;
+    this.canvas.height = this.canvasHeight;
     this.ctx = this.canvas.getContext('2d')!;
-
-    // ボタンレイアウト(縦積み。押しやすいよう大きめ)
-    const pad = 24;
-    const top = 92;
-    const gap = 16;
-    const bh = 56;
-    const bw = CANVAS_W - pad * 2;
-    this.spec.options.forEach((option, i) => {
-      this.buttons.push({ x: pad, y: top + i * (bh + gap), w: bw, h: bh, option });
-    });
 
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.colorSpace = THREE.SRGBColorSpace;
     this.mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(PANEL_W, PANEL_H),
+      new THREE.PlaneGeometry(PANEL_W, (PANEL_W * this.canvasHeight) / CANVAS_W),
       new THREE.MeshBasicMaterial({ map: this.texture, transparent: true }),
     );
     this.object = new THREE.Group();
@@ -86,19 +115,29 @@ export class SpatialPanel implements ArPanel {
 
   private redraw(): void {
     const ctx = this.ctx;
-    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+    const height = this.canvasHeight;
+    ctx.clearRect(0, 0, CANVAS_W, height);
     // 背景
     ctx.fillStyle = 'rgba(20,20,26,0.92)';
-    roundRect(ctx, 0, 0, CANVAS_W, CANVAS_H, 24);
+    roundRect(ctx, 0, 0, CANVAS_W, height, 24);
     ctx.fill();
-    // タイトル
+    // パネルタイトル
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 34px sans-serif';
     ctx.textBaseline = 'middle';
-    ctx.fillText(this.spec.title, 26, 48);
+    ctx.fillText(this.spec.title, 26, 40);
+
+    // セクション見出し
+    this.spec.sections.forEach((section, i) => {
+      const titleY = this.sectionTitleY[i]!;
+      ctx.fillStyle = '#8fd0ff';
+      ctx.font = 'bold 25px sans-serif';
+      ctx.fillText(section.title, 26, titleY + SECTION_TITLE_H / 2 - 2);
+    });
+
     // ボタン
     this.buttons.forEach((b, i) => {
-      const isActive = b.option.value === this.active;
+      const isActive = !b.option.action && b.option.value === this.active[b.section];
       const isHover = i === this.hover;
       ctx.fillStyle = isActive ? '#3a6f4a' : isHover ? '#3a3a44' : '#2a2a32';
       roundRect(ctx, b.x, b.y, b.w, b.h, 14);
@@ -109,7 +148,7 @@ export class SpatialPanel implements ArPanel {
         ctx.stroke();
       }
       ctx.fillStyle = isActive ? '#bff0cf' : '#eeeeee';
-      ctx.font = '30px sans-serif';
+      ctx.font = '28px sans-serif';
       ctx.fillText((isActive ? '● ' : '') + b.option.label, b.x + 22, b.y + b.h / 2);
     });
     this.texture.needsUpdate = true;
@@ -137,7 +176,7 @@ export class SpatialPanel implements ArPanel {
     const hit = raycaster.intersectObject(this.mesh, false)[0];
     if (!hit || !hit.uv) return null;
     const cx = hit.uv.x * CANVAS_W;
-    const cy = (1 - hit.uv.y) * CANVAS_H;
+    const cy = (1 - hit.uv.y) * this.canvasHeight;
     const index = this.buttons.findIndex(
       (b) => cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h,
     );
@@ -153,14 +192,37 @@ export class SpatialPanel implements ArPanel {
   activate(index: number): void {
     const button = this.buttons[index];
     if (!button) return;
-    this.active = button.option.value;
+    if (!button.option.action) this.active[button.section] = button.option.value;
     this.redraw();
-    this.spec.onSelect(button.option.value);
+    this.spec.sections[button.section]!.onSelect(button.option.value);
   }
 
+  /** 外部(画面側UI・ピンチ操作など)で変わった選択状態を反映する */
   setActive(value: string): void {
-    if (this.active === value) return;
-    this.active = value;
+    for (let i = 0; i < this.spec.sections.length; i += 1) {
+      const owns = this.spec.sections[i]!.options.some((o) => !o.action && o.value === value);
+      // 空文字などどのセクションにも属さない値は「選択なし」として扱う
+      if (!owns) continue;
+      if (this.active[i] === value) return;
+      this.active[i] = value;
+      this.redraw();
+      return;
+    }
+  }
+
+  /** セクション見出しを差し替える(現在値を見出しに出したいとき用) */
+  setSectionTitle(index: number, title: string): void {
+    const section = this.spec.sections[index];
+    if (!section || section.title === title) return;
+    section.title = title;
+    this.redraw();
+  }
+
+  /** 指定セクションの選択を外す(どのプリセットにも一致しない状態の表現) */
+  clearActive(sectionTitle: string): void {
+    const index = this.spec.sections.findIndex((s) => s.title === sectionTitle);
+    if (index < 0 || this.active[index] === '') return;
+    this.active[index] = '';
     this.redraw();
   }
 }

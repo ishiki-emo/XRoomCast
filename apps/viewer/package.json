@@ -1,5 +1,5 @@
 {
-  "name": "@vrmsync/viewer",
+  "name": "@xroomcast/viewer",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -11,8 +11,8 @@
   },
   "dependencies": {
     "@pixiv/three-vrm": "^3.4.0",
-    "@vrmsync/fixtures": "*",
-    "@vrmsync/protocol": "*",
+    "@xroomcast/fixtures": "*",
+    "@xroomcast/protocol": "*",
     "three": "^0.172.0"
   },
   "devDependencies": {

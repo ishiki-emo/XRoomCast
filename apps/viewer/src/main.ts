@@ -1,22 +1,32 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
-import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
-import { decodePacket } from '@vrmsync/protocol';
+import { decodePacket } from '@xroomcast/protocol';
 import { ArController } from './ar';
-import { AvatarScaleAdapter } from './avatarScale';
+import { Avatar } from './avatar';
+import {
+  DEFAULT_VRM_PATH,
+  defaultServerUrls,
+  readConfig,
+  withRoom,
+  type TransportKind,
+} from './config';
 import { ContactShadow, type ShadowMode } from './contactShadow';
 import { DemoController } from './demo';
+import { IdleMotion, blendPose } from './idleMotion';
+import { PeerPresence, type PeerDevice, type PeerState } from './peers';
+import { PlaceholderAvatar } from './placeholderAvatar';
+import { SpatialAudio } from './spatialAudio';
 import { SpatialChat } from './spatialChat';
 import { SpatialPanel } from './spatialUI';
-import { PoseApplier } from './poseApplier';
 import { setupScenery } from './scenery';
 import { PoseStreamPlayer } from './poseStream';
 import type { Transport } from './transport';
 import { WebSocketTransport } from './wsTransport';
 import { SfuTransport } from './sfuTransport';
 
-const DEFAULT_VRM_PATH = '/Emo.vrm';
+// URLクエリの解釈は config.ts に集約している(ルーム・ロール・接続先・VRM)
+const config = readConfig();
+const watchMode = config.watchMode;
 
 const stage = document.getElementById('stage') as HTMLDivElement;
 const statsEl = document.getElementById('stats') as HTMLDivElement;
@@ -24,9 +34,8 @@ const statusEl = document.getElementById('status') as HTMLDivElement;
 const urlInput = document.getElementById('vrm-url') as HTMLInputElement;
 const loadButton = document.getElementById('load-button') as HTMLButtonElement;
 
-// 視聴モード(?watch=1): 操作UIを隠してページレイアウトに切り替える。
+// 視聴モード: 操作UIを隠してページレイアウトに切り替える。
 // レンダラのサイズ計算より先にクラスを付けておく必要がある
-const watchMode = new URLSearchParams(location.search).get('watch') === '1';
 if (watchMode) document.body.classList.add('watch');
 
 if (watchMode && location.protocol === 'https:') {
@@ -39,12 +48,7 @@ const wsUrlInput = document.getElementById('ws-url') as HTMLInputElement;
 const wsButton = document.getElementById('ws-button') as HTMLButtonElement;
 const transportSelect = document.getElementById('transport-select') as HTMLSelectElement;
 
-// 既定の接続先。SFUはHTTPS(=Worker配信)なら同一オリジンのプロキシAPIを使い、
-// ローカル開発(http)ではブリッジ直結。WSはビューアを開いたホストのブリッジへ
-const TRANSPORT_DEFAULT_URLS: Record<string, string> = {
-  ws: `ws://${location.hostname}:8080`,
-  sfu: location.protocol === 'https:' ? location.origin : `http://${location.hostname}:8080`,
-};
+const TRANSPORT_DEFAULT_URLS = defaultServerUrls();
 
 function setStatus(text: string, isError = false): void {
   statusEl.textContent = text;
@@ -91,16 +95,60 @@ scene.add(avatarRoot);
 // AR用の接地影(装飾床が消えるARでのみ有効化する)
 const contactShadow = new ContactShadow(avatarRoot);
 
-// 空間設定パネル(AR中に掴んで置ける)。今は影モードの切り替え
+/**
+ * AR中のアバターサイズのプリセット。等身大と、卓上に置ける1/10のミニサイズ。
+ * ピンチ/両手グリップによる無段階の伸縮とは併用でき、ボタンはそこへジャンプする
+ */
+const AVATAR_SCALES = { life: 1, mini: 0.1 } as const;
+type AvatarSizeMode = keyof typeof AVATAR_SCALES;
+
+// 空間設定パネル(AR中に掴んで置ける)。HMDのようにDOMオーバーレイが
+// 使えない端末ではこれが操作手段になるので、設定は1枚にまとめる
 const settingsPanel = new SpatialPanel({
-  title: '影',
-  options: [
-    { label: 'リアル', value: 'full' },
-    { label: 'かんたん(軽量)', value: 'blob' },
-    { label: 'なし', value: 'off' },
+  title: '設定',
+  sections: [
+    {
+      title: 'アバター',
+      options: [
+        { label: '等身大', value: 'life' },
+        { label: 'ミニ 1/10', value: 'mini' },
+        { label: '置き直す', value: 'replace', action: true },
+      ],
+      initial: 'life',
+      onSelect: (value) => {
+        if (value === 'replace') arController.requestPlacement();
+        else setAvatarSizeMode(value as AvatarSizeMode);
+      },
+    },
+    {
+      title: '影',
+      options: [
+        { label: 'リアル', value: 'full' },
+        { label: 'かんたん(軽量)', value: 'blob' },
+        { label: 'なし', value: 'off' },
+      ],
+      initial: contactShadow.getMode(),
+      onSelect: (value) => setShadowMode(value as ShadowMode),
+    },
+    {
+      title: '音声',
+      options: [
+        { label: '空間(頭から鳴る)', value: 'spatial' },
+        { label: '通常', value: 'flat' },
+      ],
+      initial: 'spatial',
+      onSelect: (value) => setSpatialAudio(value === 'spatial'),
+    },
+    {
+      title: '他の視聴者',
+      options: [
+        { label: '表示する', value: 'peers-on' },
+        { label: '隠す', value: 'peers-off' },
+      ],
+      initial: 'peers-on',
+      onSelect: (value) => setPeersVisible(value === 'peers-on'),
+    },
   ],
-  initial: contactShadow.getMode(),
-  onSelect: (value) => contactShadow.setMode(value as ShadowMode),
 });
 
 // AR空間のコメントフィード(視聴ページのコメントをAR内にも表示)
@@ -124,17 +172,108 @@ const arController = new ArController(
     contactShadow.setARActive(arActive);
   },
 );
-arController.onScaleChanged = (scale) => currentScaleAdapter?.apply(scale);
+// ピンチ/両手グリップで無段階に変えたときもUIの選択状態を追従させる
+arController.onScaleChanged = (scale) => {
+  avatar?.applyScale(scale);
+  spatialAudio.setAvatarScale(scale);
+  syncSizeUi(scale);
+};
 
-let currentVrm: VRM | null = null;
-let currentApplier: PoseApplier | null = null;
-let currentScaleAdapter: AvatarScaleAdapter | null = null;
+// ---- AR中のUI(スマホ=画面固定のDOM / HMD=空間パネル) ----
+const arControls = document.getElementById('ar-controls') as HTMLElement;
+const sizeButtons = [...arControls.querySelectorAll<HTMLButtonElement>('[data-size]')];
+const shadowButtons = [...arControls.querySelectorAll<HTMLButtonElement>('[data-shadow]')];
+const audioButtons = [...arControls.querySelectorAll<HTMLButtonElement>('[data-audio]')];
+const peerButtons = [...arControls.querySelectorAll<HTMLButtonElement>('[data-peers]')];
+
+/** スケールに最も近いプリセット(離れていればnull=どのボタンも選択されない) */
+function nearestSizeMode(scale: number): AvatarSizeMode | null {
+  for (const mode of Object.keys(AVATAR_SCALES) as AvatarSizeMode[]) {
+    const preset = AVATAR_SCALES[mode];
+    if (Math.abs(scale - preset) < preset * 0.15) return mode;
+  }
+  return null;
+}
+
+function syncSizeUi(scale: number): void {
+  const mode = nearestSizeMode(scale);
+  // ピンチ等でプリセットから外れたら、どのボタンも選択されていない状態にする
+  if (mode) settingsPanel.setActive(mode);
+  else settingsPanel.clearActive('アバター');
+  for (const button of sizeButtons) {
+    button.classList.toggle('active', button.dataset.size === mode);
+  }
+}
+
+function setAvatarSizeMode(mode: AvatarSizeMode): void {
+  const scale = AVATAR_SCALES[mode];
+  avatarRoot.scale.setScalar(scale);
+  avatar?.applyScale(scale);
+  spatialAudio.setAvatarScale(scale);
+  syncSizeUi(scale);
+}
+
+function setShadowMode(mode: ShadowMode): void {
+  contactShadow.setMode(mode);
+  settingsPanel.setActive(mode);
+  for (const button of shadowButtons) {
+    button.classList.toggle('active', button.dataset.shadow === mode);
+  }
+}
+
+for (const button of sizeButtons) {
+  // AR中のタップがXRのselect(=アバター設置)として拾われないようにする
+  button.addEventListener('beforexrselect', (event) => event.preventDefault());
+  button.addEventListener('click', () => setAvatarSizeMode(button.dataset.size as AvatarSizeMode));
+}
+for (const button of shadowButtons) {
+  button.addEventListener('beforexrselect', (event) => event.preventDefault());
+  button.addEventListener('click', () => setShadowMode(button.dataset.shadow as ShadowMode));
+}
+
+for (const button of audioButtons) {
+  button.addEventListener('beforexrselect', (event) => event.preventDefault());
+  button.addEventListener('click', () => setSpatialAudio(button.dataset.audio === 'spatial'));
+}
+for (const button of peerButtons) {
+  button.addEventListener('beforexrselect', (event) => event.preventDefault());
+  button.addEventListener('click', () => setPeersVisible(button.dataset.peers === 'on'));
+}
+
+const replaceButton = document.getElementById('ar-replace') as HTMLButtonElement;
+replaceButton.addEventListener('beforexrselect', (event) => event.preventDefault());
+replaceButton.addEventListener('click', () => arController.requestPlacement());
+
+// 設定パネルの開閉(項目が増えて視界を塞ぐため、既定は閉じておく)
+const settingsToggle = document.getElementById('ar-settings-toggle') as HTMLButtonElement;
+settingsToggle.addEventListener('beforexrselect', (event) => event.preventDefault());
+settingsToggle.addEventListener('click', () => {
+  const open = arControls.hidden;
+  arControls.hidden = !open;
+  settingsToggle.classList.toggle('active', open);
+  settingsToggle.textContent = open ? '✕ 閉じる' : '⚙ 設定';
+});
+
+syncSizeUi(avatarRoot.scale.x);
+setShadowMode(contactShadow.getMode());
+
+/** 音源位置の計算に使い回すベクトル */
+const _headWorld = new THREE.Vector3();
+
+// 他の視聴者の気配。位置はアバター基準の相対座標でやり取りする
+const peers = new PeerPresence(avatarRoot);
+
+// ロード中に立てておくクリスタルの仮アバター(ロード成功時に本体と入れ替わる)
+const placeholder = new PlaceholderAvatar(avatarRoot);
+placeholder.setVisible(false);
+
+let avatar: Avatar | null = null;
 let loading = false;
-const _boundsInverse = new THREE.Matrix4();
 
 const demo = new DemoController();
 let liveTransport: Transport | null = null;
 let livePlayer: PoseStreamPlayer | null = null;
+
 
 // 転送量・描画の統計(視聴モードでステージ下に表示)
 const netStats = { bytes: 0, packets: 0, totalBytes: 0, frames: 0 };
@@ -150,6 +289,18 @@ if (watchMode) {
   }, 1000);
 }
 
+// ---- 待機モーション ----
+// 配信が届いていない間はクライアント側で生成した待機モーションを再生し、
+// パケットが来たら配信側を優先する(戻るときもクロスフェードする)
+const idleMotion = new IdleMotion();
+/** 最後の受信からこの時間が空いたら待機モーションへ移る */
+const IDLE_AFTER_MS = OFFLINE_AFTER_MS;
+const IDLE_BLEND_MS = 700;
+/** 待機↔配信の混ぜ具合(0=待機のみ、1=配信のみ) */
+let liveBlend = 0;
+/** 完全に配信側へ移行済みか(移行の瞬間だけ待機の表情を片付ける) */
+let liveOnly = false;
+
 window.setInterval(() => {
   const kbps = (netStats.bytes / 1024).toFixed(1);
   const total = (netStats.totalBytes / 1024 / 1024).toFixed(2);
@@ -160,44 +311,60 @@ window.setInterval(() => {
   netStats.frames = 0;
 }, 1000);
 
-// ---- 配信者の音声再生 ----
-// 音声付き自動再生はブラウザにブロックされるため、ミュートで再生を始めて
-// ボタン(ユーザー操作)でミュート解除する
+// ---- 配信者の音声再生(アバターの頭を音源にする空間オーディオ) ----
+// 音声付き自動再生はブラウザにブロックされるため、ミュートで待機して
+// ボタン(ユーザー操作)でAudioContextを開始+ミュート解除する
 const audioButton = document.getElementById('audio-button') as HTMLButtonElement;
-const liveAudio = new Audio();
-liveAudio.autoplay = true;
-liveAudio.muted = true;
+const spatialAudio = new SpatialAudio(camera, scene);
+let audioMuted = true;
+let currentAudioTrack: MediaStreamTrack | null = null;
 
 function handleAudioTrack(track: MediaStreamTrack | null): void {
+  currentAudioTrack = track;
+  spatialAudio.setTrack(track);
   if (!track) {
-    liveAudio.srcObject = null;
     audioButton.hidden = true;
     return;
   }
-  liveAudio.srcObject = new MediaStream([track]);
-  void liveAudio.play().catch(() => {});
   audioButton.hidden = false;
   // 配信者側が停止するとリモートトラックはmuteになる(endedは飛んでこない)
   const hideIfCurrent = (): void => {
-    if (liveAudio.srcObject instanceof MediaStream && liveAudio.srcObject.getTracks()[0] === track) {
-      audioButton.hidden = true;
-    }
+    if (currentAudioTrack === track) audioButton.hidden = true;
   };
   track.onmute = hideIfCurrent;
   track.onended = hideIfCurrent;
   track.onunmute = () => {
-    if (liveAudio.srcObject instanceof MediaStream && liveAudio.srcObject.getTracks()[0] === track) {
-      audioButton.hidden = false;
-    }
+    if (currentAudioTrack === track) audioButton.hidden = false;
   };
 }
 
 audioButton.addEventListener('click', () => {
-  liveAudio.muted = !liveAudio.muted;
-  if (!liveAudio.muted) void liveAudio.play().catch(() => {});
-  audioButton.textContent = liveAudio.muted ? '🔇 タップで音声ON' : '🔊 音声ON';
-  audioButton.classList.toggle('on', !liveAudio.muted);
+  audioMuted = !audioMuted;
+  if (!audioMuted) void spatialAudio.resume();
+  spatialAudio.setMuted(audioMuted);
+  audioButton.textContent = audioMuted ? '🔇 タップで音声ON' : '🔊 音声ON';
+  audioButton.classList.toggle('on', !audioMuted);
 });
+
+function setSpatialAudio(on: boolean): void {
+  spatialAudio.setSpatial(on);
+  const value = on ? 'spatial' : 'flat';
+  settingsPanel.setActive(value);
+  for (const button of audioButtons) {
+    button.classList.toggle('active', button.dataset.audio === value);
+  }
+}
+setSpatialAudio(spatialAudio.isSpatial);
+
+/** 他の視聴者の気配の表示切り替え(隠すと送信も止める) */
+function setPeersVisible(on: boolean): void {
+  peers.setEnabled(on);
+  settingsPanel.setActive(on ? 'peers-on' : 'peers-off');
+  for (const button of peerButtons) {
+    button.classList.toggle('active', button.dataset.peers === (on ? 'on' : 'off'));
+  }
+}
+setPeersVisible(peers.isEnabled);
 
 // ---- 同接カウント+匿名コメント(Worker上のDurable Object) ----
 const chatLog = document.getElementById('chat-log') as HTMLDivElement;
@@ -234,17 +401,96 @@ function setChatEnabled(enabled: boolean): void {
   chatSendButton.disabled = !enabled;
 }
 
-interface PresenceMessage {
+interface PresenceMessage extends PeerState {
   type?: string;
   count?: number;
   text?: string;
   items?: { text: string }[];
+  /** type==='avatar': 配信者が選んだVRMの配信URL */
+  url?: string;
+  name?: string;
+  /** type==='peer' / 'peerLeft': 送信元の接続ID */
+  id?: string;
+  /** type==='peerMode': 気配の公開範囲 */
+  mode?: string;
+}
+
+/** 気配の公開範囲(サーバーが決める。配信者コンソールから変更できる) */
+let peerMode: 'all' | 'broadcaster' | 'off' = 'all';
+
+// ---- 視聴者の気配の送信 ----
+/** 送信レート。動きの少ない対象なので10Hzで足りる */
+const PEER_SEND_INTERVAL_MS = 100;
+/** 送信量を抑えるため小数点以下3桁に丸める(1mm単位) */
+const round3 = (value: number): number => Math.round(value * 1000) / 1000;
+let lastPeerSentAt = 0;
+
+const _peerPos = new THREE.Vector3();
+const _peerQuat = new THREE.Quaternion();
+const _peerScale = new THREE.Vector3();
+const _frameInverse = new THREE.Matrix4();
+
+/** ワールド姿勢をアバター基準のローカル姿勢に直して [x,y,z,qx,qy,qz,qw] にする */
+function toPeerNode(matrixWorld: THREE.Matrix4): number[] {
+  _frameInverse.copy(avatarRoot.matrixWorld).invert().multiply(matrixWorld);
+  _frameInverse.decompose(_peerPos, _peerQuat, _peerScale);
+  return [
+    round3(_peerPos.x),
+    round3(_peerPos.y),
+    round3(_peerPos.z),
+    round3(_peerQuat.x),
+    round3(_peerQuat.y),
+    round3(_peerQuat.z),
+    round3(_peerQuat.w),
+  ];
+}
+
+function sendPeerState(): void {
+  // 「隠す」を選んでいる間と、ルームが無効設定の間は自分の位置も送らない
+  if (!peers.isEnabled || peerMode === 'off' || presenceWs?.readyState !== WebSocket.OPEN) return;
+  avatarRoot.updateWorldMatrix(true, false);
+
+  const device: PeerDevice = arController.deviceKind;
+  // AR中はXRカメラ(=実際の視点)、それ以外は通常のカメラを使う
+  const viewCamera = arController.isPresenting ? renderer.xr.getCamera() : camera;
+  viewCamera.updateWorldMatrix(true, false);
+  const payload: PresenceMessage = { type: 'peer', device, h: toPeerNode(viewCamera.matrixWorld) };
+
+  if (device === 'hmd') {
+    const left = arController.getGrip(0);
+    const right = arController.getGrip(1);
+    if (left) payload.l = toPeerNode(left.matrixWorld);
+    if (right) payload.r = toPeerNode(right.matrixWorld);
+  }
+  presenceWs.send(JSON.stringify(payload));
+}
+
+/** 配信者から指示された最後のアバターURL(同じ指示の再ロードを避ける) */
+let syncedAvatarUrl: string | null = null;
+/** ロード中に届いた切り替え指示(完了後に処理する) */
+let pendingAvatarUrl: string | null = null;
+
+function applyRemoteAvatar(url: string, name?: string): void {
+  if (url === syncedAvatarUrl) return;
+  syncedAvatarUrl = url;
+  urlInput.value = url;
+  const label = `アバターを切り替えています${name ? `: ${name}` : ''}`;
+  setStatus(label);
+  arController.showHint(label); // AR中はDOMのステータスが見えないため
+  if (loading) {
+    pendingAvatarUrl = url; // 今のロードが終わってから読み直す
+    return;
+  }
+  void loadVRM(url);
 }
 
 // 同接・コメント用WebSocket。切断時は少し間を置いて張り直す
 function connectPresence(): void {
   setChatEnabled(false);
-  const ws = new WebSocket(`wss://${location.host}/api/presence`);
+  // 配信者キーを持って開いた場合は配信者として接続する(気配を受け取れる)
+  let path = withRoom('/api/presence', config.room);
+  if (config.broadcastKey) path += `&key=${encodeURIComponent(config.broadcastKey)}`;
+  const ws = new WebSocket(`wss://${location.host}${path}`);
   let pingTimer: number | null = null;
   ws.onopen = () => {
     presenceWs = ws;
@@ -263,6 +509,15 @@ function connectPresence(): void {
         chatLog.replaceChildren();
         for (const item of data.items.slice(-CHAT_VISIBLE_MAX)) appendChat(item.text);
         spatialChat.setHistory(data.items.map((it) => it.text));
+      } else if (data.type === 'avatar' && typeof data.url === 'string') {
+        applyRemoteAvatar(data.url, data.name);
+      } else if (data.type === 'peer' && typeof data.id === 'string') {
+        peers.apply(data.id, data);
+      } else if (data.type === 'peerLeft' && typeof data.id === 'string') {
+        peers.remove(data.id);
+      } else if (data.type === 'peerMode') {
+        peerMode = data.mode === 'broadcaster' || data.mode === 'off' ? data.mode : 'all';
+        if (peerMode !== 'all') peers.clear(); // 配信者のみ/無効なら他人は見えない
       }
     } catch {
       // pong等は無視
@@ -280,7 +535,7 @@ function connectPresence(): void {
 function stopDemo(): void {
   if (!demo.active) return;
   demo.stop();
-  currentApplier?.reset();
+  avatar?.resetPose();
   demoButton.textContent = 'デモ再生';
   demoButton.classList.remove('active');
 }
@@ -291,7 +546,7 @@ function disconnectTransport(): void {
   liveTransport.close();
   liveTransport = null;
   livePlayer = null;
-  currentApplier?.reset();
+  avatar?.resetPose();
   wsButton.textContent = '接続';
   transportSelect.disabled = false;
 }
@@ -300,7 +555,7 @@ function connectTransport(kind: string, url: string): void {
   stopDemo();
   disconnectTransport();
   livePlayer = new PoseStreamPlayer();
-  liveTransport = kind === 'sfu' ? new SfuTransport(url) : new WebSocketTransport(url);
+  liveTransport = kind === 'sfu' ? new SfuTransport(url, config.room) : new WebSocketTransport(url);
   if (liveTransport instanceof SfuTransport) {
     liveTransport.onAudioTrack = handleAudioTrack;
   }
@@ -319,17 +574,6 @@ function connectTransport(kind: string, url: string): void {
   liveTransport.connect();
   wsButton.textContent = '切断';
   transportSelect.disabled = true;
-}
-
-const loader = new GLTFLoader();
-loader.register((parser) => new VRMLoaderPlugin(parser));
-
-function extractVrm(gltf: GLTF): VRM {
-  const vrm = gltf.userData.vrm as VRM | undefined;
-  if (!vrm) {
-    throw new Error('VRM拡張を含まないファイルです(glTF/GLBとしては読み込めました)');
-  }
-  return vrm;
 }
 
 function describeError(error: unknown): string {
@@ -358,50 +602,46 @@ async function loadVRM(source: string | ArrayBuffer): Promise<void> {
   loading = true;
   loadButton.disabled = true;
   setStatus('VRM 読み込み中...');
+  // 表示できるアバターがまだ無いときだけ仮アバターを立てる。
+  // 差し替え中は旧アバターをそのまま見せ続ける(視聴者ごとにDL完了時点で入れ替わる)
+  placeholder.setVisible(avatar === null);
 
   try {
-    const gltf =
-      typeof source === 'string'
-        ? await loader.loadAsync(source, (progress) => {
-            setStatus(`VRM 読み込み中... ${formatProgress(progress.loaded, progress.total)}`);
-          })
-        : await loader.parseAsync(source, '');
-
-    const vrm = extractVrm(gltf);
-
-    VRMUtils.removeUnnecessaryVertices(gltf.scene);
-    VRMUtils.combineSkeletons(gltf.scene);
-    // VRM 0.xは+Z向きで読み込まれるため、VRM 1.0(-Z向き)と向きを揃える
-    VRMUtils.rotateVRM0(vrm);
-
-    // 新モデルのロードに成功してから旧モデルを破棄する(失敗時は表示を維持)
-    if (currentVrm) {
-      avatarRoot.remove(currentVrm.scene);
-      VRMUtils.deepDispose(currentVrm.scene);
-    }
-    currentVrm = vrm;
-    vrm.scene.traverse((obj) => {
-      if ((obj as THREE.Mesh).isMesh) obj.castShadow = true;
+    const next = await Avatar.load(source, avatarRoot, {
+      onProgress: (progress) => {
+        setStatus(`VRM 読み込み中... ${formatProgress(progress.loaded, progress.total)}`);
+      },
+      // 表示に入れる前にシェーダとテクスチャをGPUへ載せておく
+      precompile: { renderer, camera, scene },
     });
-    avatarRoot.add(vrm.scene);
-    currentApplier = new PoseApplier(vrm, avatarRoot);
-    currentScaleAdapter = new AvatarScaleAdapter(vrm);
-    currentScaleAdapter.apply(avatarRoot.scale.x); // AR中の差し替えでもスケールに追従
 
-    // つかみ時の可視化用バウンディングボックス(フレームローカルで計測)
-    const bounds = new THREE.Box3().setFromObject(vrm.scene);
-    avatarRoot.updateWorldMatrix(true, false);
-    bounds.applyMatrix4(_boundsInverse.copy(avatarRoot.matrixWorld).invert());
-    arController.setAvatarBounds(bounds);
+    // 新モデルのロードに成功してから旧モデルを外す(失敗時は表示を維持)。
+    // GPUリソースの解放は重いので、見た目を切り替えたあと次のフレームで行う
+    const previous = avatar;
+    previous?.detach();
+    avatar = next;
+    if (previous) requestAnimationFrame(() => previous.dispose());
+    avatar.applyScale(avatarRoot.scale.x); // AR中の差し替えでもスケールに追従
+    arController.setAvatarBounds(avatar.bounds);
+    placeholder.setVisible(false);
 
-    setStatus(`VRM ${vrm.meta.metaVersion === '0' ? '0.x' : '1.0'} を表示中`);
-    console.log('VRM loaded:', vrm);
+    // モーフ削減が走ったかは端末依存なので、コンソールを見なくても分かるよう表示する
+    const morphNote =
+      avatar.morphNotes.length > 0 ? `(モーフ整理: ${avatar.morphNotes.join(' / ')})` : '';
+    setStatus(`VRM ${avatar.versionLabel} を表示中 ${morphNote}`);
+    arController.showHint(`アバターを切り替えました ${morphNote}`);
+    console.log('VRM loaded:', avatar.vrm);
   } catch (error) {
     console.error('VRM load error:', error);
     setStatus(`VRMの読み込みに失敗しました: ${describeError(error)}`, true);
+    placeholder.setVisible(avatar === null);
   } finally {
     loading = false;
     loadButton.disabled = false;
+    // ロード中に届いた切り替え指示を処理する
+    const next = pendingAvatarUrl;
+    pendingAvatarUrl = null;
+    if (next && next !== source) void loadVRM(next);
   }
 }
 
@@ -445,7 +685,7 @@ wsButton.addEventListener('click', () => {
 transportSelect.addEventListener('change', () => {
   const defaults = Object.values(TRANSPORT_DEFAULT_URLS);
   if (defaults.includes(wsUrlInput.value.trim()) || wsUrlInput.value.trim() === '') {
-    wsUrlInput.value = TRANSPORT_DEFAULT_URLS[transportSelect.value] ?? '';
+    wsUrlInput.value = TRANSPORT_DEFAULT_URLS[transportSelect.value as TransportKind] ?? '';
   }
 });
 
@@ -470,13 +710,46 @@ renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
   netStats.frames += 1;
   const delta = clock.getDelta();
   scenery.update(clock.elapsedTime);
+  placeholder.update(clock.elapsedTime);
   contactShadow.update();
   arController.onFrame(frame);
-  const player = livePlayer ?? (demo.active ? demo.player : null);
-  if (player && currentApplier) {
-    currentApplier.apply(player.sample(performance.now()));
+  peers.update();
+
+  // 自分の位置を一定間隔で送る(XR中はwindowのタイマーが止まるので描画ループから)
+  if (clock.elapsedTime * 1000 - lastPeerSentAt > PEER_SEND_INTERVAL_MS) {
+    lastPeerSentAt = clock.elapsedTime * 1000;
+    sendPeerState();
   }
-  currentVrm?.update(delta);
+
+  if (avatar) {
+    const now = performance.now();
+    const player = livePlayer ?? (demo.active ? demo.player : null);
+    const liveFrame = player?.sample(now);
+    // デモ再生は常に配信側扱い。実配信はパケットが途切れたら待機モーションへ戻す
+    const liveReady = Boolean(liveFrame?.pose) && (demo.active || now - lastLivePacketAt < IDLE_AFTER_MS);
+
+    const step = delta * (1000 / IDLE_BLEND_MS);
+    liveBlend = THREE.MathUtils.clamp(liveBlend + (liveReady ? step : -step), 0, 1);
+
+    // 音声の音源をアバターの頭へ追従させる
+    spatialAudio.setSourcePosition(avatar.getHeadWorldPosition(_headWorld));
+
+    if (liveBlend >= 1 && liveFrame) {
+      if (!liveOnly) {
+        // 待機中のまばたきが「目を閉じたまま」で残らないよう、移行時に戻す
+        avatar.vrm.expressionManager?.setValue('blink', 0);
+        liveOnly = true;
+      }
+      avatar.applyPose(liveFrame);
+    } else {
+      liveOnly = false;
+      const idleFrame = idleMotion.sample(now, avatar.restPose);
+      avatar.applyPose(
+        liveBlend > 0 && liveFrame ? blendPose(idleFrame, liveFrame, liveBlend) : idleFrame,
+      );
+    }
+  }
+  avatar?.update(delta);
   controls.update();
   renderer.render(scene, camera);
 });
@@ -487,32 +760,86 @@ Object.assign(window, {
     renderer,
     loadVRM,
     demo,
-    getVrm: () => currentVrm,
-    liveAudio,
+    getVrm: () => avatar?.vrm ?? null,
+    getAvatar: () => avatar,
+    /** メッシュごとの表示状態・モーフ数・マテリアル設定を一覧する(実機での切り分け用) */
+    inspectMeshes: () => {
+      const rows: Record<string, unknown>[] = [];
+      avatar?.vrm.scene.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const material = (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material) as
+          | (THREE.Material & { transparent?: boolean; side?: number })
+          | undefined;
+        const vertices = mesh.geometry?.getAttribute('position')?.count ?? 0;
+        const morphs = mesh.geometry?.morphAttributes?.position?.length ?? 0;
+        rows.push({
+          name: mesh.name,
+          visible: mesh.visible,
+          frustumCulled: mesh.frustumCulled,
+          vertices,
+          morphs,
+          // モーフはテクスチャに展開されるため、頂点数×成分×モーフ数のVRAMを食う
+          morphMB: Number(((vertices * 4 * 4 * morphs) / 1024 / 1024).toFixed(1)),
+          transparent: material?.transparent,
+          side: material?.side,
+          renderOrder: mesh.renderOrder,
+        });
+      });
+      console.table(rows);
+      return rows;
+    },
+    /**
+     * 指定メッシュ(省略時は全部)のモーフターゲットを外す。
+     * これで表示されるならモーフのVRAM圧迫が原因と確定できる(表情は動かなくなる)
+     */
+    disableMorphs: (meshName?: string) => {
+      let hit = 0;
+      avatar?.vrm.scene.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        if (meshName && mesh.name !== meshName) return;
+        if (!mesh.geometry?.morphAttributes?.position) return;
+        mesh.geometry.morphAttributes = {};
+        mesh.morphTargetInfluences = [];
+        mesh.morphTargetDictionary = {};
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const m of materials) m.needsUpdate = true;
+        hit += 1;
+      });
+      console.log(`[debug] ${hit}メッシュのモーフを外しました`);
+      return hit;
+    },
+    placeholder,
+    spatialAudio,
     avatarRoot,
     scene,
     scenery,
     THREE,
     setAvatarScale: (scale: number) => {
       avatarRoot.scale.setScalar(scale);
-      currentScaleAdapter?.apply(scale);
+      avatar?.applyScale(scale);
+      spatialAudio.setAvatarScale(scale);
     },
     setContactShadow: (on: boolean) => contactShadow.setARActive(on),
-    setShadowMode: (mode: ShadowMode) => contactShadow.setMode(mode),
+    setShadowMode,
+    setAvatarSizeMode,
+    setSpatialAudio,
     settingsPanel,
     spatialChat,
     arController,
   },
 });
 
-wsUrlInput.value = TRANSPORT_DEFAULT_URLS[transportSelect.value] ?? '';
+transportSelect.value = config.transport;
+wsUrlInput.value = config.serverUrl;
 
-const params = new URLSearchParams(location.search);
-const initialUrl = params.get('vrm') ?? DEFAULT_VRM_PATH;
-urlInput.value = initialUrl;
-void loadVRM(initialUrl).then(() => {
+urlInput.value = config.vrmUrl;
+// 初期表示と同じアバターが同期で流れてきても読み直さないようにする
+syncedAvatarUrl = config.vrmUrl;
+void loadVRM(config.vrmUrl).then(() => {
   // デプロイ環境には既定VRMを置かないため、初回ロード失敗時は使い方を案内する
-  if (!currentVrm && initialUrl === DEFAULT_VRM_PATH) {
+  if (!avatar && config.vrmUrl === DEFAULT_VRM_PATH) {
     setStatus(
       '既定のVRMがありません。上のURL欄にVRMのURL(CORS許可済み)を入れてロードするか、?vrm= で指定してください',
       true,
@@ -523,12 +850,6 @@ void loadVRM(initialUrl).then(() => {
 // ?transport=ws|sfu(+任意で ?server=)が付いていたら自動接続する。
 // Worker配信ページなら「?vrm=...&transport=sfu」だけで視聴を開始できる
 // (SFUプロキシが同一オリジンにあるため server の指定は不要)
-const serverParam = params.get('server');
-const transportParam = params.get('transport');
-if (serverParam || transportParam) {
-  const kind = transportParam ?? (serverParam?.startsWith('ws') ? 'ws' : 'sfu');
-  transportSelect.value = kind === 'ws' ? 'ws' : 'sfu';
-  const serverUrl = serverParam ?? TRANSPORT_DEFAULT_URLS[transportSelect.value] ?? '';
-  wsUrlInput.value = serverUrl;
-  if (serverUrl) connectTransport(transportSelect.value, serverUrl);
+if (config.autoConnect && config.serverUrl) {
+  connectTransport(config.transport, config.serverUrl);
 }

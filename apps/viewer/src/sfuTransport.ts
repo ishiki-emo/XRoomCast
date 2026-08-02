@@ -5,6 +5,7 @@
  * DataChannelは一方向(publisher→subscribers)のため send() は何もしない。
  * 切断・失敗時は指数バックオフ(1s→最大16s)でセッションを張り直す。
  */
+import { DEFAULT_ROOM, withRoom } from './config';
 import type { Transport } from './transport';
 
 const CF_STUN_URL = 'stun:stun.cloudflare.com:3478';
@@ -38,7 +39,11 @@ export class SfuTransport implements Transport {
   /** 世代カウンタ。古い接続試行のコールバックを無効化する */
   private generation = 0;
 
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    /** 購読するルーム。Worker側はパブリッシャーをルームごとに保持する */
+    private readonly room: string = DEFAULT_ROOM,
+  ) {}
 
   connect(): void {
     this.closedByUser = false;
@@ -46,7 +51,7 @@ export class SfuTransport implements Transport {
   }
 
   private async apiPost(path: string, body: unknown): Promise<Record<string, unknown>> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    const res = await fetch(`${this.baseUrl}${withRoom(path, this.room)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -134,7 +139,7 @@ export class SfuTransport implements Transport {
     const check = async (): Promise<void> => {
       if (generation !== this.generation || !this.pc || !this.mySessionId) return;
       try {
-        const res = await fetch(`${this.baseUrl}/api/sfu/status`);
+        const res = await fetch(`${this.baseUrl}${withRoom('/api/sfu/status', this.room)}`);
         const status = (await res.json()) as {
           audio: { sessionId: string; trackName: string } | null;
         };

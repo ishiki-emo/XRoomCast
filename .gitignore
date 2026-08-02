@@ -3,6 +3,17 @@ dist/
 .env
 .env.local
 
+# wrangler dev のローカル状態(KV/R2/DOのエミュレーション)
+.wrangler/
+
+# Cloudflareの設定。KVネームスペースIDなどアカウント固有の値を含むため、
+# テンプレート(wrangler.example.jsonc)だけをコミットする
+apps/viewer/wrangler.jsonc
+
+# 個人的な検討メモ(事業方針・利用量の見積もり)
+ライセンス・配布形態メモ.md
+Cloudflare利用量メモ.md
+
 # テスト用VRMはコミットしない(fixtures/README.md 参照)
 *.vrm
 

@@ -15,9 +15,9 @@ import {
   type ExpressionEntry,
   type Packet,
   type PoseNode,
-} from '@vrmsync/protocol';
+} from '@xroomcast/protocol';
 import { unityToThreePos, unityToThreeQuat } from './math.js';
-import type { Quat, Vec3 } from '@vrmsync/protocol';
+import type { Quat, Vec3 } from '@xroomcast/protocol';
 import { VmcSkeleton } from './skeleton.js';
 import { normalizeBlendName } from './blendNames.js';
 import { startVmcReceiver } from './vmcReceiver.js';
@@ -33,6 +33,11 @@ try {
 const VMC_PORT = Number(process.env.VMC_PORT ?? 39539);
 const WS_PORT = Number(process.env.WS_PORT ?? 8080);
 const POSE_INTERVAL_MS = 1000 / 30;
+/**
+ * 配信するルーム。ビューアWorkerはルームごとにパブリッシャーを保持するため、
+ * 視聴URLのルームと一致している必要がある(既定は 'main')
+ */
+const ROOM = /^[A-Za-z0-9_-]{1,64}$/.test(process.env.ROOM ?? '') ? String(process.env.ROOM) : 'main';
 /** /vrm/ ルートで配信するVRMの置き場所(ビューアのpublicと共用) */
 const VRM_DIR = fileURLToPath(new URL('../../viewer/public', import.meta.url));
 
@@ -164,7 +169,7 @@ const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN;
 async function registerPublisher(): Promise<void> {
   if (!VIEWER_ORIGIN || !BRIDGE_TOKEN || !publisher?.sessionId) return;
   try {
-    const res = await fetch(`${VIEWER_ORIGIN}/api/sfu/publisher`, {
+    const res = await fetch(`${VIEWER_ORIGIN}/api/sfu/publisher?room=${encodeURIComponent(ROOM)}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${BRIDGE_TOKEN}`,
@@ -173,7 +178,7 @@ async function registerPublisher(): Promise<void> {
       body: JSON.stringify({ sessionId: publisher.sessionId }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    console.log(`[sfu] ビューアWorkerへ登録完了: ${VIEWER_ORIGIN}`);
+    console.log(`[sfu] ビューアWorkerへ登録完了: ${VIEWER_ORIGIN} (ルーム: ${ROOM})`);
   } catch (error) {
     console.warn('[sfu] ビューアWorkerへの登録に失敗:', error);
   }
@@ -212,15 +217,18 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
     res.end();
     return;
   }
+  // ビューアはルームを ?room= で付けてくるため、パスはクエリを除いて比較する
+  const pathname = (req.url ?? '/').split('?')[0] ?? '/';
   try {
-    if (req.method === 'GET' && req.url === '/api/sfu/status') {
+    if (req.method === 'GET' && pathname === '/api/sfu/status') {
       sendJson(res, 200, {
         enabled: sfuApi !== null,
+        room: ROOM,
         publisherReady: publisher?.ready ?? false,
       });
       return;
     }
-    if (req.method === 'POST' && req.url === '/api/sfu/sessions/new') {
+    if (req.method === 'POST' && pathname === '/api/sfu/sessions/new') {
       if (!sfuApi) {
         sendJson(res, 503, { error: 'SFU未設定(.envにCF_REALTIME_APP_ID/SECRETを設定)' });
         return;
@@ -230,7 +238,7 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
       sendJson(res, 200, { sessionId: session.sessionId, sdp: session.sessionDescription.sdp });
       return;
     }
-    if (req.method === 'POST' && req.url === '/api/sfu/subscribe') {
+    if (req.method === 'POST' && pathname === '/api/sfu/subscribe') {
       if (!sfuApi || !publisher?.sessionId) {
         sendJson(res, 503, { error: 'パブリッシャーが未接続です(ブリッジのログを確認)' });
         return;
@@ -249,8 +257,8 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
     }
     // VRM配信: apps/viewer/public/ の .vrm をCORS付きで配る。
     // 公開ビューア(HTTPS)からトンネル経由で読み込むための簡易ホスティング
-    if (req.method === 'GET' && req.url?.startsWith('/vrm/')) {
-      const name = path.basename(decodeURIComponent(req.url.slice('/vrm/'.length)));
+    if (req.method === 'GET' && pathname.startsWith('/vrm/')) {
+      const name = path.basename(decodeURIComponent(pathname.slice('/vrm/'.length)));
       if (!name.toLowerCase().endsWith('.vrm')) {
         sendJson(res, 404, { error: 'not found' });
         return;
@@ -279,7 +287,7 @@ const server = http.createServer((req, res) => {
 });
 const wss = new WebSocketServer({ server });
 server.listen(WS_PORT, () => {
-  console.log(`[ws] 配信待機: ws://localhost:${WS_PORT}(SFUプロキシAPI同居)`);
+  console.log(`[ws] 配信待機: ws://localhost:${WS_PORT}(SFUプロキシAPI同居) ルーム: ${ROOM}`);
 });
 
 let sequence = 0;
@@ -418,13 +426,28 @@ setInterval(() => {
 }, 4);
 
 // ---- 統計ログ(毎秒) ----
+/**
+ * 直近に出力した「無通信」の行。送受信が0のあいだは同じ行が並び続けるだけなので、
+ * 内容(WS件数・SFU状態)が変わるまで出力を省く
+ */
+let lastIdleLine: string | null = null;
+
 setInterval(() => {
   const kb = (stats.bytes / 1024).toFixed(1);
   const suppressed = stats.suppressed > 0 ? ` | スパイク抑制 ${stats.suppressed}件` : '';
   const sfuState = publisher ? ` | SFU ${publisher.ready ? '配信中' : '接続中...'}` : '';
-  console.log(
-    `[stats] 受信 ${stats.received} msg/s | 送信 ${stats.sent} pkt/s | ${kb} KB/s | WS ${wss.clients.size}件${sfuState}${suppressed}`,
-  );
+  const line = `[stats] 受信 ${stats.received} msg/s | 送信 ${stats.sent} pkt/s | ${kb} KB/s | WS ${wss.clients.size}件${sfuState}${suppressed}`;
+
+  const idle = stats.received === 0 && stats.sent === 0;
+  if (!idle) {
+    console.log(line);
+    lastIdleLine = null;
+  } else if (line !== lastIdleLine) {
+    // 無通信に入った1回目、または無通信のまま状態が変わったときだけ出す
+    console.log(`${line} (変化があるまで省略します)`);
+    lastIdleLine = line;
+  }
+
   stats.received = 0;
   stats.sent = 0;
   stats.bytes = 0;

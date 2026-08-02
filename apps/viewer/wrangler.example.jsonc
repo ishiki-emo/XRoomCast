@@ -1,0 +1,48 @@
+// Cloudflare Workers(静的アセット+R2配信)でビューアを公開するための設定テンプレート。
+//
+// 使い方: このファイルを wrangler.jsonc としてコピーし、<> の箇所を自分の値に置き換える。
+//   cp wrangler.example.jsonc wrangler.jsonc
+//
+// wrangler.jsonc 自体はアカウント固有のIDを含むためコミットしない(.gitignore済み)。
+// secret類(VRM_TOKEN等)はこのファイルには書かず、`npx wrangler secret put <名前>` で登録する。
+{
+  "name": "xroomcast",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-01-01",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS"
+  },
+  "r2_buckets": [
+    {
+      "binding": "VRM_BUCKET",
+      // npx wrangler r2 bucket create <バケット名> で作る
+      "bucket_name": "xroomcast-assets"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SFU_STATE",
+      // npx wrangler kv namespace create SFU_STATE が出力するIDに置き換える
+      "id": "<KVネームスペースのID>"
+    }
+  ],
+  "vars": {
+    // /watch で表示する既定VRMのR2キー(R2へアップロードしたファイル名)
+    "DEFAULT_VRM_KEY": "avatar.vrm"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PRESENCE",
+        "class_name": "Presence"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Presence"]
+    }
+  ]
+}

@@ -7,6 +7,8 @@
  *    - パブリッシャー(ブリッジ)のセッションIDはKVで共有する。
  *      登録はBRIDGE_TOKENによるBearer認証必須(配信の乗っ取り防止)
  *    - これによりブリッジのトンネル公開が不要になる(共有リンクが固定化)
+ * 4. ルーム(同時に複数の配信を成立させる単位)。SFUのパブリッシャー・同接・
+ *    コメントはすべてルームごとに分かれる。ルーム名は ?room= で受け取る
  */
 import { DurableObject } from 'cloudflare:workers';
 
@@ -19,19 +21,158 @@ interface Env {
   CF_REALTIME_APP_ID?: string;
   CF_REALTIME_APP_SECRET?: string;
   BRIDGE_TOKEN?: string;
-  /** 視聴用の短縮パス /watch/<キー> の照合キー(secret) */
+  /** 視聴用の短縮パス /watch/<キー> の照合キー(secret)。既定ルーム専用の旧方式 */
   WATCH_KEY?: string;
-  /** 配信者コンソール /broadcast/<キー> と音声パブリッシュの照合キー(secret) */
+  /** 配信者コンソール /broadcast/<キー> の照合キー(secret)。全ルームのマスターキーも兼ねる */
   BROADCAST_KEY?: string;
+  /**
+   * ルームごとの視聴/配信トークンを導出するマスターシークレット。
+   * これを設定すると /watch/<ルーム>/<トークン> 形式で無制限にルームを作れる
+   * (ルーム一覧をサーバーに持たずに済む)。scripts/roomLink.mjs でURLを生成する
+   */
+  ROOM_SECRET?: string;
   /** /watch で使う既定VRMのR2キー(wrangler.jsoncのvars) */
   DEFAULT_VRM_KEY?: string;
 }
 
 const API_BASE = 'https://rtc.live.cloudflare.com/v1/apps';
 const DATA_CHANNEL_NAME = 'pose';
-const PUBLISHER_KEY = 'publisher';
 /** ブリッジのハートビート(5分間隔)がこの時間途絶えたらパブリッシャー不在とみなす */
 const PUBLISHER_FRESH_MS = 15 * 60 * 1000;
+
+// Workerのモジュールexportはハンドラ/Durable Objectクラスのみ許されるため定数はexportしない
+const DEFAULT_ROOM = 'main';
+/**
+ * ルーム名はDurable Objectの名前・KVキーの一部になるため文字種を制限する。
+ * ビューア側(src/config.ts)にも同じ規則がある
+ */
+const ROOM_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+function normalizeRoom(value: string | null | undefined): string {
+  const room = (value ?? '').trim();
+  return ROOM_PATTERN.test(room) ? room : DEFAULT_ROOM;
+}
+
+/** ルームごとのKVキー(旧デプロイのキーとは別空間になるが、失効待ちで問題ない) */
+function publisherKey(room: string): string {
+  return `publisher:${room}`;
+}
+
+function audioPublisherKey(room: string): string {
+  return `audio-publisher:${room}`;
+}
+
+/**
+ * アップロードVRMのサイズ上限。Workersのリクエストボディ上限(100MB)より
+ * 手前で弾いて、分かりやすいエラーを返す
+ */
+const MAX_VRM_BYTES = 80 * 1024 * 1024;
+
+/** ルームにアップロードしたVRMのR2キー接頭辞(既定VRMはトップレベルのまま) */
+function roomVrmPrefix(room: string): string {
+  return `rooms/${room}/`;
+}
+
+/**
+ * アップロードされたファイル名の検証。日本語名は許すが、パス区切り・
+ * 相対参照・制御文字は弾く(R2キーに直接使うため)
+ */
+function sanitizeVrmName(raw: string): string | null {
+  const base = (raw.split(/[\\/]/).pop() ?? '').trim();
+  if (!base || base.length > 100) return null;
+  if (base.startsWith('.') || base.includes('..')) return null;
+  if (/[\u0000-\u001f\u007f]/.test(base)) return null;
+  if (!base.toLowerCase().endsWith('.vrm')) return null;
+  return base;
+}
+
+/** R2キーを /vrm/ 配信URLに変換する(パス区切りは保ったままエンコード) */
+function vrmUrlFor(key: string, token: string): string {
+  const path = key.split('/').map(encodeURIComponent).join('/');
+  return `/vrm/${path}?k=${encodeURIComponent(token)}`;
+}
+
+const TOKEN_LENGTH = 22;
+const textEncoder = new TextEncoder();
+
+function base64url(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * ルームトークンの導出: HMAC-SHA256(ROOM_SECRET, "<用途>:<ルーム>")。
+ * ルーム一覧をサーバーに保存せずに、ルームごとに異なる鍵を配れる
+ */
+async function roomToken(secret: string, scope: 'watch' | 'broadcast', room: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    textEncoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(`${scope}:${room}`));
+  return base64url(new Uint8Array(signature)).slice(0, TOKEN_LENGTH);
+}
+
+/** 秘密の比較は文字列長・内容ともに早期リターンしない */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function matchesRoomToken(
+  env: Env,
+  scope: 'watch' | 'broadcast',
+  room: string,
+  candidate: string,
+): Promise<boolean> {
+  if (!env.ROOM_SECRET || !candidate) return false;
+  return timingSafeEqual(await roomToken(env.ROOM_SECRET, scope, room), candidate);
+}
+
+/**
+ * 短縮URLのルーム解決。
+ * - /<用途>/<ルーム>/<トークン>: ROOM_SECRETから導出したトークンと照合する新形式
+ * - /<用途>/<キー>: 既定ルーム専用の旧形式(WATCH_KEY / BROADCAST_KEY)
+ * 戻り値の key は配信者コンソールがAPI認可にそのまま使う
+ */
+async function resolveShortLink(
+  env: Env,
+  scope: 'watch' | 'broadcast',
+  pathname: string,
+  prefix: string,
+): Promise<{ room: string; key: string } | null> {
+  let segments: string[];
+  try {
+    segments = pathname.slice(prefix.length).split('/').map(decodeURIComponent);
+  } catch {
+    return null; // 不正なパーセントエンコード
+  }
+  // 末尾スラッシュを許容する
+  if (segments.length > 1 && segments[segments.length - 1] === '') segments.pop();
+
+  if (segments.length === 2) {
+    const room = segments[0] ?? '';
+    const token = segments[1] ?? '';
+    // 正規化で名前が変わるルーム(=文字種違反)はトークンが一致しても拒否する
+    if (!token || normalizeRoom(room) !== room) return null;
+    return (await matchesRoomToken(env, scope, room, token)) ? { room, key: token } : null;
+  }
+
+  if (segments.length === 1) {
+    const legacy = scope === 'watch' ? env.WATCH_KEY : env.BROADCAST_KEY;
+    const key = segments[0] ?? '';
+    if (!legacy || !key || !timingSafeEqual(legacy, key)) return null;
+    return { room: DEFAULT_ROOM, key };
+  }
+
+  return null;
+}
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -72,38 +213,44 @@ interface PublisherRecord {
   updatedAt: number;
 }
 
-const AUDIO_PUBLISHER_KEY = 'audio-publisher';
-
 interface AudioPublisherRecord {
   sessionId: string;
   trackName: string;
   updatedAt: number;
 }
 
-async function readPublisher(env: Env): Promise<PublisherRecord | null> {
-  const record = await env.SFU_STATE.get<PublisherRecord>(PUBLISHER_KEY, 'json');
+async function readPublisher(env: Env, room: string): Promise<PublisherRecord | null> {
+  const record = await env.SFU_STATE.get<PublisherRecord>(publisherKey(room), 'json');
   if (!record || Date.now() - record.updatedAt > PUBLISHER_FRESH_MS) return null;
   return record;
 }
 
-async function readAudioPublisher(env: Env): Promise<AudioPublisherRecord | null> {
-  const record = await env.SFU_STATE.get<AudioPublisherRecord>(AUDIO_PUBLISHER_KEY, 'json');
+async function readAudioPublisher(env: Env, room: string): Promise<AudioPublisherRecord | null> {
+  const record = await env.SFU_STATE.get<AudioPublisherRecord>(audioPublisherKey(room), 'json');
   if (!record || Date.now() - record.updatedAt > PUBLISHER_FRESH_MS) return null;
   return record;
 }
 
-function isBroadcaster(env: Env, request: Request, url: URL): boolean {
-  if (!env.BROADCAST_KEY) return false;
-  if (request.headers.get('Authorization') === `Bearer ${env.BROADCAST_KEY}`) return true;
-  // sendBeacon用(ヘッダを付けられないためクエリで受ける)
-  return url.searchParams.get('key') === env.BROADCAST_KEY;
+/**
+ * 配信者の判定。BROADCAST_KEYは全ルームに通用するマスターキー、
+ * ROOM_SECRETから導出したルーム別トークンはそのルームにのみ通用する
+ */
+async function isBroadcaster(env: Env, request: Request, url: URL, room: string): Promise<boolean> {
+  const header = request.headers.get('Authorization') ?? '';
+  // sendBeacon用(ヘッダを付けられないためクエリでも受ける)
+  const candidate = header.startsWith('Bearer ')
+    ? header.slice('Bearer '.length)
+    : (url.searchParams.get('key') ?? '');
+  if (!candidate) return false;
+  if (env.BROADCAST_KEY && timingSafeEqual(env.BROADCAST_KEY, candidate)) return true;
+  return matchesRoomToken(env, 'broadcast', room, candidate);
 }
 
 /** 音声パブリッシャーの登録/解除(bodyのsessionIdがnullなら解除) */
-async function handleAudioPublisherUpdate(request: Request, env: Env): Promise<Response> {
+async function handleAudioPublisherUpdate(request: Request, env: Env, room: string): Promise<Response> {
   const body = (await request.json()) as { sessionId?: string | null; trackName?: string };
   if (!body.sessionId) {
-    await env.SFU_STATE.delete(AUDIO_PUBLISHER_KEY);
+    await env.SFU_STATE.delete(audioPublisherKey(room));
     return json(200, { ok: true, cleared: true });
   }
   const record: AudioPublisherRecord = {
@@ -111,41 +258,70 @@ async function handleAudioPublisherUpdate(request: Request, env: Env): Promise<R
     trackName: String(body.trackName ?? 'mic'),
     updatedAt: Date.now(),
   };
-  await env.SFU_STATE.put(AUDIO_PUBLISHER_KEY, JSON.stringify(record));
+  await env.SFU_STATE.put(audioPublisherKey(room), JSON.stringify(record));
   return json(200, { ok: true });
 }
 
 async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Response> {
   const sfuConfigured = Boolean(env.CF_REALTIME_APP_ID && env.CF_REALTIME_APP_SECRET);
+  const room = normalizeRoom(url.searchParams.get('room'));
 
   if (request.method === 'GET' && url.pathname === '/api/sfu/status') {
-    const audio = await readAudioPublisher(env);
+    const audio = await readAudioPublisher(env, room);
     return json(200, {
       enabled: sfuConfigured,
-      publisherReady: (await readPublisher(env)) !== null,
+      room,
+      publisherReady: (await readPublisher(env, room)) !== null,
       audio: audio ? { sessionId: audio.sessionId, trackName: audio.trackName } : null,
     });
   }
 
-  // 音声パブリッシャーの登録/解除(配信者コンソールから。要BROADCAST_KEY)
+  // 音声パブリッシャーの登録/解除(配信者コンソールから。要配信者キー)
   if (
     request.method === 'POST' &&
     (url.pathname === '/api/sfu/audio-publisher' || url.pathname === '/api/sfu/audio-publisher-beacon')
   ) {
-    if (!isBroadcaster(env, request, url)) return json(403, { error: 'forbidden' });
-    return handleAudioPublisherUpdate(request, env);
+    if (!(await isBroadcaster(env, request, url, room))) return json(403, { error: 'forbidden' });
+    return handleAudioPublisherUpdate(request, env, room);
   }
 
-  // ブリッジからのパブリッシャーセッションID登録(Bearer認証必須)
+  /**
+   * DataChannelの作成。
+   * location:'local' はポーズの配信そのものなので配信者キーが要る
+   * (HMDから直接配信する場合にブラウザから使う)。
+   * location:'remote' は視聴側の購読なので誰でも可
+   */
+  if (request.method === 'POST' && url.pathname === '/api/sfu/datachannels/new') {
+    const body = (await request.json()) as {
+      sessionId?: string;
+      dataChannels?: { location?: string; dataChannelName?: string; sessionId?: string }[];
+    };
+    if (!body.sessionId || !Array.isArray(body.dataChannels)) {
+      return json(400, { error: 'sessionId / dataChannels がありません' });
+    }
+    const publishesLocal = body.dataChannels.some((c) => c.location === 'local');
+    if (publishesLocal && !(await isBroadcaster(env, request, url, room))) {
+      return json(403, { error: 'forbidden(配信には配信者キーが必要です)' });
+    }
+    const result = await cfApi(env, `/sessions/${String(body.sessionId)}/datachannels/new`, {
+      dataChannels: body.dataChannels,
+    });
+    return json(200, result);
+  }
+
+  // パブリッシャーのセッションID登録。ブリッジ(BRIDGE_TOKEN)か配信者(BROADCAST_KEY)
   if (request.method === 'POST' && url.pathname === '/api/sfu/publisher') {
-    if (!env.BRIDGE_TOKEN || request.headers.get('Authorization') !== `Bearer ${env.BRIDGE_TOKEN}`) {
+    const fromBridge =
+      Boolean(env.BRIDGE_TOKEN) &&
+      request.headers.get('Authorization') === `Bearer ${env.BRIDGE_TOKEN}`;
+    if (!fromBridge && !(await isBroadcaster(env, request, url, room))) {
       return json(403, { error: 'forbidden' });
     }
     const body = (await request.json()) as { sessionId?: string };
     if (!body.sessionId) return json(400, { error: 'sessionIdがありません' });
     const record: PublisherRecord = { sessionId: body.sessionId, updatedAt: Date.now() };
-    await env.SFU_STATE.put(PUBLISHER_KEY, JSON.stringify(record));
-    return json(200, { ok: true });
+    await env.SFU_STATE.put(publisherKey(room), JSON.stringify(record));
+    return json(200, { ok: true, room });
   }
 
   if (!sfuConfigured) {
@@ -175,8 +351,8 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
       return json(400, { error: 'sessionId / tracks がありません' });
     }
     const publishesLocal = body.tracks.some((t) => t.location === 'local');
-    if (publishesLocal && !isBroadcaster(env, request, url)) {
-      return json(403, { error: 'forbidden(トラック公開にはBROADCAST_KEYが必要です)' });
+    if (publishesLocal && !(await isBroadcaster(env, request, url, room))) {
+      return json(403, { error: 'forbidden(トラック公開には配信者キーが必要です)' });
     }
     const payload: Record<string, unknown> = { tracks: body.tracks };
     if (body.sessionDescription) payload.sessionDescription = body.sessionDescription;
@@ -198,9 +374,11 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
   }
 
   if (request.method === 'POST' && url.pathname === '/api/sfu/subscribe') {
-    const publisher = await readPublisher(env);
+    const publisher = await readPublisher(env, room);
     if (!publisher) {
-      return json(503, { error: 'パブリッシャーが未登録です(ブリッジが起動しているか確認)' });
+      return json(503, {
+        error: `パブリッシャーが未登録です(ルーム「${room}」のブリッジが起動しているか確認)`,
+      });
     }
     const body = (await request.json()) as { sessionId?: string };
     const result = await cfApi(env, `/sessions/${String(body.sessionId)}/datachannels/new`, {
@@ -219,6 +397,119 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
   return json(404, { error: 'not found' });
 }
 
+interface AvatarRecord {
+  /** R2キー */
+  key: string;
+  /** 表示名(ファイル名) */
+  name: string;
+  /** 視聴ページがそのままロードできるURL(配信トークン入り) */
+  url: string;
+  ts: number;
+}
+
+/**
+ * ルームのVRM管理API(すべて配信者キーが必要)。
+ * - POST /api/vrm/upload?room=&name= : R2へアップロード(ボディがVRM本体)
+ * - GET  /api/vrm/list?room=         : そのルームにあるVRM一覧
+ * - POST /api/vrm/delete?room=&name= : 削除
+ */
+async function handleVrmApi(request: Request, env: Env, url: URL): Promise<Response> {
+  const room = normalizeRoom(url.searchParams.get('room'));
+  if (!(await isBroadcaster(env, request, url, room))) {
+    return json(403, { error: 'forbidden(配信者キーが必要です)' });
+  }
+  const prefix = roomVrmPrefix(room);
+
+  if (request.method === 'POST' && url.pathname === '/api/vrm/upload') {
+    const name = sanitizeVrmName(url.searchParams.get('name') ?? '');
+    if (!name) return json(400, { error: 'ファイル名が不正です(.vrm・100文字以内)' });
+    // R2へストリームで渡すには長さが確定している必要がある
+    const declared = Number(request.headers.get('Content-Length') ?? '');
+    if (!Number.isFinite(declared) || declared <= 0) {
+      return json(411, { error: 'Content-Lengthが必要です' });
+    }
+    if (declared > MAX_VRM_BYTES) {
+      const limit = Math.floor(MAX_VRM_BYTES / 1024 / 1024);
+      return json(413, { error: `ファイルが大きすぎます(上限 ${limit}MB)` });
+    }
+    if (!request.body) return json(400, { error: 'ボディがありません' });
+    const key = `${prefix}${name}`;
+    await env.VRM_BUCKET.put(key, request.body);
+    return json(200, { ok: true, key, name, size: declared });
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/vrm/list') {
+    const listed = await env.VRM_BUCKET.list({ prefix });
+    const items = listed.objects.map((object) => ({
+      key: object.key,
+      name: object.key.slice(prefix.length),
+      size: object.size,
+      uploaded: object.uploaded.getTime(),
+    }));
+    return json(200, { room, items, defaultKey: env.DEFAULT_VRM_KEY ?? null });
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/vrm/delete') {
+    const name = sanitizeVrmName(url.searchParams.get('name') ?? '');
+    if (!name) return json(400, { error: 'ファイル名が不正です' });
+    await env.VRM_BUCKET.delete(`${prefix}${name}`);
+    return json(200, { ok: true });
+  }
+
+  return json(404, { error: 'not found' });
+}
+
+/**
+ * 現在のアバターの切り替え(配信者キー必須)。
+ * Presence DOへ渡し、接続中の視聴者全員へ即時ブロードキャストしたうえで
+ * 保存する(あとから入室した視聴者にも同じアバターが配られる)。
+ */
+async function handleAvatarApi(request: Request, env: Env, url: URL): Promise<Response> {
+  const room = normalizeRoom(url.searchParams.get('room'));
+  if (!(await isBroadcaster(env, request, url, room))) {
+    return json(403, { error: 'forbidden(配信者キーが必要です)' });
+  }
+
+  // 現在のアバター(配信者コンソールが起動時に読む)
+  if (request.method === 'GET') {
+    const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
+    const current = await stub.fetch('https://presence.internal/avatar');
+    return json(200, (await current.json()) as unknown);
+  }
+
+  if (request.method !== 'POST') return json(405, { error: 'method not allowed' });
+  if (!env.VRM_TOKEN) {
+    return json(503, { error: 'VRM_TOKEN未設定のため配信URLを組み立てられません' });
+  }
+
+  const body = (await request.json()) as { key?: string };
+  const key = String(body.key ?? '');
+  const prefix = roomVrmPrefix(room);
+  const localName = key.startsWith(prefix) ? key.slice(prefix.length) : null;
+  // 自ルームにアップロードしたVRMか、共有の既定VRMだけを許可する
+  const allowed =
+    (localName !== null && sanitizeVrmName(localName) === localName) ||
+    (Boolean(env.DEFAULT_VRM_KEY) && key === env.DEFAULT_VRM_KEY);
+  if (!allowed) return json(400, { error: 'このルームでは使えないキーです' });
+  if (!(await env.VRM_BUCKET.head(key))) {
+    return json(404, { error: 'R2にそのVRMがありません' });
+  }
+
+  const record: AvatarRecord = {
+    key,
+    name: key.slice(key.lastIndexOf('/') + 1),
+    url: vrmUrlFor(key, env.VRM_TOKEN),
+    ts: Date.now(),
+  };
+  const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
+  const result = await stub.fetch('https://presence.internal/avatar', {
+    method: 'POST',
+    body: JSON.stringify(record),
+  });
+  if (!result.ok) return json(502, { error: 'アバターの配信に失敗しました' });
+  return json(200, { ok: true, ...record });
+}
+
 interface ChatItem {
   text: string;
   ts: number;
@@ -228,9 +519,24 @@ const CHAT_HISTORY_KEY = 'chat-history';
 const CHAT_HISTORY_MAX = 50;
 const CHAT_TEXT_MAX = 200;
 const CHAT_MIN_INTERVAL_MS = 1000;
+/** 視聴者の気配(位置)の最短送信間隔。クライアントは10Hz送信なので余裕を持たせる */
+const PEER_MIN_INTERVAL_MS = 60;
+/** WebSocketで受け付ける1メッセージの上限(位置データでも数百バイト) */
+const MESSAGE_MAX_BYTES = 2048;
+/** 現在のアバター(接続時に配り、切り替え時にブロードキャストする) */
+const AVATAR_KEY = 'avatar';
+/** 視聴者の気配の公開範囲 */
+const PEER_MODE_KEY = 'peer-mode';
+/**
+ * - all: 視聴者どうしもお互いが見える(少人数のミーティング向け)
+ * - broadcaster: 配信者だけに見せる。中継がN×1になるので大人数でも耐えられる
+ * - off: 送受信しない
+ */
+type PeerMode = 'all' | 'broadcaster' | 'off';
+const DEFAULT_PEER_MODE: PeerMode = 'all';
 
 /**
- * 同接カウント+匿名コメント用のDurable Object。
+ * 同接カウント+匿名コメント用のDurable Object(ルームごとに1インスタンス)。
  * 視聴ページがWebSocketで接続し、
  * - 同接: 開いているソケット数を増減のたびに全員へ配信
  * - コメント: 受信を検証(長さ・1秒レート制限)して全員へ配信。
@@ -238,6 +544,9 @@ const CHAT_MIN_INTERVAL_MS = 1000;
  * ハイバネーションAPIを使うので接続が張りっぱなしでもアイドルコストはほぼゼロ。
  */
 export class Presence extends DurableObject<Env> {
+  /** 視聴者の気配メッセージのレート制限(接続ID → 最終受信時刻) */
+  private readonly lastPeerAt = new Map<string, number>();
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // クライアントの生存確認ping/pongはDOを起こさずランタイムが自動応答する
@@ -245,25 +554,86 @@ export class Presence extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+
+    // 視聴者の気配の公開範囲(Worker本体が配信者キーを検証したうえで呼ぶ内部API)
+    if (path === '/peer-mode') {
+      if (request.method === 'POST') {
+        const body = (await request.json()) as { mode?: string };
+        const mode: PeerMode =
+          body.mode === 'broadcaster' || body.mode === 'off' || body.mode === 'all'
+            ? body.mode
+            : DEFAULT_PEER_MODE;
+        await this.ctx.storage.put(PEER_MODE_KEY, mode);
+        this.broadcastJson({ type: 'peerMode', mode });
+        return Response.json({ ok: true, mode });
+      }
+      return Response.json({ mode: await this.peerMode() });
+    }
+
+    // アバターの取得/切り替え(Worker本体が配信者キーを検証したうえで呼ぶ内部API)
+    if (path === '/avatar') {
+      if (request.method === 'GET') {
+        const current = (await this.ctx.storage.get<AvatarRecord>(AVATAR_KEY)) ?? null;
+        return Response.json({ avatar: current });
+      }
+      const record = (await request.json()) as AvatarRecord;
+      await this.ctx.storage.put(AVATAR_KEY, record);
+      this.broadcastJson({ type: 'avatar', ...record });
+      return new Response(null, { status: 204 });
+    }
+
     if (request.headers.get('Upgrade') !== 'websocket') {
       return new Response('expected websocket', { status: 426 });
     }
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
+    // 視聴者の気配(位置の中継)に使う接続ごとのIDと役割。
+    // ハイバネーションから復帰しても残るようattachmentへ入れる。
+    // broadcaster フラグはWorker本体が検証済み(クライアントは書き換えられない)
+    pair[1].serializeAttachment({
+      id: crypto.randomUUID().slice(0, 8),
+      role: new URL(request.url).searchParams.get('broadcaster') === '1' ? 'broadcaster' : 'viewer',
+    });
     this.broadcastCount();
     const history = (await this.ctx.storage.get<ChatItem[]>(CHAT_HISTORY_KEY)) ?? [];
     pair[1].send(JSON.stringify({ type: 'history', items: history }));
+    pair[1].send(JSON.stringify({ type: 'peerMode', mode: await this.peerMode() }));
+    // 途中入室者にも現在のアバターを配る(配信者が切り替えた状態に追いつける)
+    const avatar = await this.ctx.storage.get<AvatarRecord>(AVATAR_KEY);
+    if (avatar) pair[1].send(JSON.stringify({ type: 'avatar', ...avatar }));
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== 'string') return;
+    if (message.length > MESSAGE_MAX_BYTES) return;
     let data: { type?: string; text?: string };
     try {
       data = JSON.parse(message) as { type?: string; text?: string };
     } catch {
       return;
     }
+
+    // 視聴者の気配: 位置は保存せず、送信者以外へそのまま中継するだけ。
+    // 座標はアバター基準の相対値なので、各自の空間が違っても意味が通る
+    if (data.type === 'peer') {
+      const attachment = (ws.deserializeAttachment() ?? {}) as { id?: string };
+      if (!attachment.id) return;
+      const mode = await this.peerMode();
+      if (mode === 'off') return;
+      const now = Date.now();
+      const last = this.lastPeerAt.get(attachment.id) ?? 0;
+      // 濫用防止のレート制限(ハイバネーションで消えても実害がないためメモリ上で持つ)
+      if (now - last < PEER_MIN_INTERVAL_MS) return;
+      this.lastPeerAt.set(attachment.id, now);
+      const payload = { ...data, id: attachment.id };
+      // 'broadcaster' は配信者の接続にだけ送る。中継量がN×1で済む
+      if (mode === 'broadcaster') this.sendToBroadcasters(payload, ws);
+      else this.broadcastJson(payload, ws);
+      return;
+    }
+
     if (data.type !== 'chat' || typeof data.text !== 'string') return;
 
     const text = data.text.trim().slice(0, CHAT_TEXT_MAX);
@@ -286,10 +656,20 @@ export class Presence extends DurableObject<Env> {
   }
 
   override webSocketClose(ws: WebSocket): void {
-    this.broadcastCount(ws);
+    this.handleLeave(ws);
   }
 
   override webSocketError(ws: WebSocket): void {
+    this.handleLeave(ws);
+  }
+
+  /** 退場時: 同接を配り直し、視聴者の気配を消すよう伝える */
+  private handleLeave(ws: WebSocket): void {
+    const attachment = (ws.deserializeAttachment() ?? {}) as { id?: string };
+    if (attachment.id) {
+      this.lastPeerAt.delete(attachment.id);
+      this.broadcastJson({ type: 'peerLeft', id: attachment.id }, ws);
+    }
     this.broadcastCount(ws);
   }
 
@@ -297,6 +677,25 @@ export class Presence extends DurableObject<Env> {
     const count = this.ctx.getWebSockets().filter((s) => s !== closing).length;
     // 旧クライアント互換のため count フィールドはトップレベルに残す
     this.broadcastJson({ type: 'count', count }, closing);
+  }
+
+  private async peerMode(): Promise<PeerMode> {
+    return (await this.ctx.storage.get<PeerMode>(PEER_MODE_KEY)) ?? DEFAULT_PEER_MODE;
+  }
+
+  /** 配信者として接続しているソケットにだけ送る */
+  private sendToBroadcasters(payload: unknown, sender?: WebSocket): void {
+    const message = JSON.stringify(payload);
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket === sender) continue;
+      const attachment = (socket.deserializeAttachment() ?? {}) as { role?: string };
+      if (attachment.role !== 'broadcaster') continue;
+      try {
+        socket.send(message);
+      } catch {
+        // 送信失敗はclose側のハンドラに任せる
+      }
+    }
   }
 
   private broadcastJson(payload: unknown, closing?: WebSocket): void {
@@ -316,37 +715,76 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // 同接カウント(WebSocket)。単一ルーム'main'のDurable Objectへ委譲
+    // 同接カウント+コメント(WebSocket)。ルームごとのDurable Objectへ委譲する。
+    // 既定ルームは 'main' なので、ルーム導入前のインスタンス(履歴含む)を引き継ぐ
     if (url.pathname === '/api/presence') {
-      return env.PRESENCE.get(env.PRESENCE.idFromName('main')).fetch(request);
+      const room = normalizeRoom(url.searchParams.get('room'));
+      /**
+       * 配信者かどうかはここで検証してDOへ伝える。
+       * クライアントの自己申告を信じると、視聴者の位置を誰でも覗けてしまう
+       */
+      const broadcaster = await isBroadcaster(env, request, url, room);
+      const internal = new URL(request.url);
+      internal.searchParams.set('broadcaster', broadcaster ? '1' : '0');
+      return env.PRESENCE.get(env.PRESENCE.idFromName(room)).fetch(
+        new Request(internal, request),
+      );
     }
 
-    // 視聴用の短縮URL: /watch/<キー> を開くだけで、VRMトークン入りの
-    // 視聴パラメータ付きURLへリダイレクトする(秘密はすべてWorker側に置く)
-    if (url.pathname.startsWith('/watch/')) {
-      const key = decodeURIComponent(url.pathname.slice('/watch/'.length));
-      if (!env.WATCH_KEY || key !== env.WATCH_KEY) {
-        return new Response('not found', { status: 404 });
+    // 視聴者の気配の公開範囲(配信者が切り替える)
+    if (url.pathname === '/api/peer-mode') {
+      const room = normalizeRoom(url.searchParams.get('room'));
+      if (!(await isBroadcaster(env, request, url, room))) {
+        return json(403, { error: 'forbidden(配信者キーが必要です)' });
       }
-      const vrmKey = env.DEFAULT_VRM_KEY ?? 'Emo.vrm';
+      const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
+      const result = await stub.fetch(
+        new Request('https://presence.internal/peer-mode', {
+          method: request.method,
+          body: request.method === 'POST' ? await request.text() : undefined,
+        }),
+      );
+      return json(result.status, (await result.json()) as unknown);
+    }
+
+    // 視聴用の短縮URL: /watch/<ルーム>/<トークン>(または旧形式の /watch/<キー>)を
+    // 開くだけで、VRMトークン入りの視聴パラメータ付きURLへリダイレクトする
+    // (秘密はすべてWorker側に置く)
+    if (url.pathname.startsWith('/watch/')) {
+      const resolved = await resolveShortLink(env, 'watch', url.pathname, '/watch/');
+      if (!resolved) return new Response('not found', { status: 404 });
+      const vrmKey = env.DEFAULT_VRM_KEY ?? 'avatar.vrm';
       const vrmParam = encodeURIComponent(`/vrm/${vrmKey}?k=${env.VRM_TOKEN ?? ''}`);
-      return Response.redirect(`${url.origin}/?vrm=${vrmParam}&transport=sfu&watch=1`, 302);
+      const roomParam = encodeURIComponent(resolved.room);
+      return Response.redirect(
+        `${url.origin}/?vrm=${vrmParam}&transport=sfu&watch=1&room=${roomParam}`,
+        302,
+      );
     }
 
     // 配信者コンソール(音声)の短縮URL
     if (url.pathname.startsWith('/broadcast/')) {
-      const key = decodeURIComponent(url.pathname.slice('/broadcast/'.length));
-      if (!env.BROADCAST_KEY || key !== env.BROADCAST_KEY) {
-        return new Response('not found', { status: 404 });
-      }
-      return Response.redirect(`${url.origin}/broadcast.html?key=${encodeURIComponent(key)}`, 302);
+      const resolved = await resolveShortLink(env, 'broadcast', url.pathname, '/broadcast/');
+      if (!resolved) return new Response('not found', { status: 404 });
+      const keyParam = encodeURIComponent(resolved.key);
+      const roomParam = encodeURIComponent(resolved.room);
+      return Response.redirect(
+        `${url.origin}/broadcast.html?key=${keyParam}&room=${roomParam}`,
+        302,
+      );
     }
 
-    if (url.pathname.startsWith('/api/sfu/')) {
+    if (
+      url.pathname.startsWith('/api/sfu/') ||
+      url.pathname.startsWith('/api/vrm/') ||
+      url.pathname === '/api/avatar'
+    ) {
       if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: CORS_HEADERS });
       }
       try {
+        if (url.pathname.startsWith('/api/vrm/')) return await handleVrmApi(request, env, url);
+        if (url.pathname === '/api/avatar') return await handleAvatarApi(request, env, url);
         return await handleSfuApi(request, env, url);
       } catch (error) {
         return json(500, { error: String(error) });

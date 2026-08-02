@@ -1,8 +1,34 @@
-# VRMSyncWeb — Web VRMアバター配信ビューア
+# XRoomCast — VRMアバターのマルチ環境ライブ配信
 
-VSeeFaceのトラッキングをポーズデータ(数KB/s)としてWebブラウザへストリーミングし、
-視聴者がURLを開くだけでVRMアバターの動きをリアルタイムに観られるシステムのプロトタイプ。
-詳細は [実装仕様書.md](./実装仕様書.md) を参照。
+モーションを**数KB/sのポーズデータ**としてWebブラウザへストリーミングし、
+視聴者がURLを開くだけでVRMアバターの動きをリアルタイムに観られるシステム。
+動画を流さずポーズだけを送るため、帯域は動画配信の1/100以下で済む。
+
+- **視聴はブラウザだけ** — PC / スマホ / HMD(Quest・PICO等)。インストール不要
+- **AR/MR対応** — 現実の部屋にアバターを等身大や1/10のミニサイズで置ける
+- **配信は2通り** — VSeeFace等のVMCトラッキング(PC)か、**HMD単体**(VSeeFace不要)
+- **ルーム単位** — 同時に複数の配信を立てられる。URLを知っている人だけが入れる
+- **配信中にアバターを切り替え** — アップロードして切り替えると視聴者全員へ同期される
+
+<img src="./docs/ar-demo.gif" alt="スマホのARで机の上にミニサイズのアバターを置き、配信中に衣装を切り替えている様子" width="260" align="right" />
+
+**スマホのARで実際に動かしているところ。**
+ノートPCのキーボードの上に1/10サイズのアバターを設置し、
+モーションを受けながら配信中にアバターを切り替えている。
+
+奥のPC画面が先に切り替わり、AR側が少し遅れて追いつくのは仕様どおりで、
+**視聴者ごとにダウンロードが完了した時点で差し替わる**ため。
+それまでは元のアバターを表示し続けるので、切り替えの瞬間に何も居なくなることはない。
+
+[フル版の動画(28秒)](./docs/ar-demo-full.mp4)
+
+<br clear="right" />
+
+## はじめに読むもの
+
+- **[構築手順 (SETUP.md)](./SETUP.md)** — 動かすまでの手順。まずこちら
+- このREADME — 機能の詳細と実装メモ
+- [実装仕様書.md](./実装仕様書.md) — 初期の設計方針(現在の実装は仕様書より先行している)
 
 ## リポジトリ構成
 
@@ -20,7 +46,7 @@ npm install
 ```
 
 VRMファイルをリポジトリにはコミットしないため、各自で用意して
-`apps/viewer/public/Emo.vrm` として配置する(`fixtures/README.md` 参照)。
+`apps/viewer/public/avatar.vrm` として配置する(`fixtures/README.md` 参照)。
 
 ## Phase 0: 静的VRM表示
 
@@ -29,7 +55,7 @@ npm run dev
 ```
 
 ターミナルに表示されたURL(既定は http://localhost:5173 。使用中なら自動で別ポートになる)を
-ブラウザで開くと、`apps/viewer/public/Emo.vrm` がTポーズで表示される。マウスドラッグで回転、ホイールでズーム、右ドラッグでパン。
+ブラウザで開くと、`apps/viewer/public/avatar.vrm` がTポーズで表示される。マウスドラッグで回転、ホイールでズーム、右ドラッグでパン。
 
 ## Phase 1: 動的VRMロード
 
@@ -46,7 +72,7 @@ VRMを実行時にロードできる。
 
 - 配信元がCORSを許可している必要がある。ローカルで試す場合の例:
   `npx http-server apps/viewer/public -p 8081 --cors`
-  → `http://localhost:8081/Seed-san.vrm` を入力欄に指定
+  → `http://localhost:8081/<VRMのファイル名>` を入力欄に指定
 - **Cloudflare R2で配信する場合は、バケットにCORSルール(`GET` メソッド、対象Origin)の
   設定が必要**。設定がないとブラウザがフェッチをブロックする。
 
@@ -173,12 +199,22 @@ npm run dev -- -- --host   # ビューアをLANに公開
 
 ## ビューアの公開(Cloudflare Workers 静的アセット)
 
+Cloudflareの設定ファイルは**アカウント固有のIDを含むためコミットしていない**。
+テンプレートをコピーして自分の値を入れる。
+
+```sh
+cd apps/viewer
+cp wrangler.example.jsonc wrangler.jsonc
+npx wrangler kv namespace create SFU_STATE   # 出力されたIDを wrangler.jsonc の <KVネームスペースのID> に貼る
+```
+
 ```sh
 npx wrangler login        # 初回のみ(+ workers.devサブドメインの登録が必要)
 npm run deploy:viewer     # ビルド → distからVRM除去 → デプロイ
 ```
 
-公開URL: https://vrmsync-viewer.ishiki-emo.workers.dev
+公開URL: `https://<Worker名>.<workers.devサブドメイン>.workers.dev`
+(初回デプロイ時にwranglerが実際のURLを表示する)
 
 - **VRMファイルはデプロイに含めない**(ライセンス・DL抑制の方針+25MB上限)。
   公開ページでは `?vrm=<CORS許可済みURL>` か入力欄でVRMを指定する
@@ -194,17 +230,16 @@ npx wrangler secret put BRIDGE_TOKEN           # ブリッジ登録用(ランダ
 ```
 
 ブリッジ側の `.env` にも `BRIDGE_TOKEN=<同じ値>` と
-`VIEWER_ORIGIN=https://vrmsync-viewer.ishiki-emo.workers.dev` を書く。
-KVネームスペース(`SFU_STATE`)は `wrangler kv namespace create SFU_STATE` で
-作成し、IDを `wrangler.jsonc` に設定する。
+`VIEWER_ORIGIN=https://<デプロイ先のURL>` を書く。
+KVネームスペース(`SFU_STATE`)の作成とIDの設定は上記のセットアップ手順を参照。
 
 `cloudflared tunnel --url http://localhost:8080` によるブリッジの直接公開は
 Worker登録を使わない場合の代替手段として残る(WS視聴をインターネットへ
 出したい場合もこちら)。
 
-カスタムドメイン(例: stream.ishiki-emo.com)を使う場合は、ドメインのDNSを
+カスタムドメイン(例: stream.example.com)を使う場合は、ドメインのDNSを
 Cloudflareへ移管したうえで `apps/viewer/wrangler.jsonc` に
-`"routes": [{ "pattern": "stream.ishiki-emo.com", "custom_domain": true }]`
+`"routes": [{ "pattern": "stream.example.com", "custom_domain": true }]`
 を追加して再デプロイする。
 
 ### VRMのR2ホスティング(トークン付き同一オリジン配信)
@@ -214,8 +249,8 @@ Cloudflareへ移管したうえで `apps/viewer/wrangler.jsonc` に
 バケットは非公開のまま・同一オリジンなのでCORS不要・URLは恒久。
 
 ```sh
-npx wrangler r2 bucket create vrmsync-assets                     # 初回のみ
-npx wrangler r2 object put vrmsync-assets/Emo.vrm --file <path> --remote
+npx wrangler r2 bucket create <バケット名>                          # 初回のみ
+npx wrangler r2 object put <バケット名>/avatar.vrm --file <VRMのパス> --remote
 npx wrangler secret put VRM_TOKEN                                # 配信トークン(照合用)
 ```
 
@@ -223,11 +258,46 @@ npx wrangler secret put VRM_TOKEN                                # 配信トー�
 - ワンリンク共有の組み立て(**固定リンク**。`<>`を実値に置換):
 
 ```
-https://vrmsync-viewer.ishiki-emo.workers.dev/?vrm=<urlencode(/vrm/Emo.vrm?k=トークン)>&transport=sfu
+https://<デプロイ先のURL>/?vrm=<urlencode(/vrm/avatar.vrm?k=トークン)>&transport=sfu
 ```
 
 SFUプロキシが同一オリジンにあるため `server=` は不要。配信の手順は
 「VSeeFace起動 → `npm run bridge`」だけで、リンクは毎回同じものが使える。
+
+### アバターのアップロードと配信中の切り替え
+
+配信者コンソール(`/broadcast/...`)からVRMをアップロードし、「切り替え」を
+押すと**視聴中の全員がそのVRMを読み込み直す**。R2のキーはルームごとに
+`rooms/<ルーム>/<ファイル名>` へ分かれる。
+
+- `POST /api/vrm/upload?room=&name=` : R2へアップロード(ボディがVRM本体)
+- `GET  /api/vrm/list?room=`         : そのルームのVRM一覧
+- `POST /api/vrm/delete?room=&name=` : 削除
+- `GET  /api/avatar?room=`           : 現在のアバター
+- `POST /api/avatar?room=`           : 切り替え(全視聴者へ同期)
+
+すべて配信者キー(BROADCAST_KEY またはルームの配信トークン)が必要。
+
+切り替えは Presence Durable Object 経由で配られ、**現在のアバターはDOに
+保存される**ため、あとから入室した視聴者も同じアバターで表示される。
+
+視聴側の挙動:
+
+- 各視聴者は通知を受け取った時点でダウンロードを始める。完了するまでは
+  **それまでのアバターを表示し続ける**ので、切り替えの瞬間に何も居なくなる
+  ことはない(切り替わるタイミングは視聴者ごとにばらつく)
+- まだ何も表示できていない初回ロード中は、**クリスタルの仮アバター**
+  (`src/placeholderAvatar.ts`。プリミティブのみで外部ファイル不要)を立てる
+- ロードに失敗した場合は元のアバターを維持する
+
+制約と注意:
+
+- アップロードの上限は80MB(Workersのリクエストボディ上限100MBの手前で弾く)。
+  視聴者は切り替えのたびにこのサイズをダウンロードするため、
+  **イベントで使うVRMは軽いほどよい**
+- ファイル名は日本語も使えるが、パス区切り・相対参照・制御文字は拒否される
+- 切り替え先に指定できるのは**自ルームにアップロードしたVRMか既定VRM**のみ
+- R2に残り続けるので、イベント後は配信者コンソールから削除する
 
 ### 視聴用の短縮URL(/watch/<キー>)
 
@@ -242,6 +312,39 @@ npx wrangler secret put WATCH_KEY   # 視聴キー(ランダム文字列)
 - 既定VRMは `wrangler.jsonc` の `vars.DEFAULT_VRM_KEY`(R2のキー名)で変更
 - キー不一致は404。WATCH_KEYをローテートすれば出回った視聴URLだけを
   無効化できる(VRM_TOKENとは独立)
+- この形式は**既定ルーム(`main`)専用**。複数のルームを使い分ける場合は次節へ
+
+### ルーム(同時に複数の配信を成立させる)
+
+SFUのパブリッシャー・同接・コメントはすべて**ルームごとに分かれる**。
+ルームは `?room=<名前>` で指定し、未指定なら `main`(ルーム導入前と同じ
+Durable Objectインスタンスを引き継ぐので、既存の配信URLはそのまま動く)。
+
+ルーム一覧はサーバーに保存せず、**マスターシークレットからHMACで
+トークンを導出する**。これによりルームをいくつ作っても状態管理が要らず、
+ルームごとに異なる鍵を配れる。
+
+```sh
+npx wrangler secret put ROOM_SECRET   # ルームトークン導出用(ランダム文字列)
+```
+
+同じ値をリポジトリルートの `.env` にも書き、URLを生成する:
+
+```sh
+npm run room -- event-2026 https://<デプロイ先のURL>
+# 視聴URL   : .../watch/event-2026/<22文字のトークン>
+# 配信者URL : .../broadcast/event-2026/<22文字のトークン>
+```
+
+- ルーム名は英数字・ハイフン・アンダースコアの1〜64文字
+  (Durable Objectの名前とKVキーになるため文字種を制限している)
+- 視聴トークンと配信トークンは用途ごとに別導出。視聴URLが漏れても
+  マイク配信やトラック公開はできない
+- `BROADCAST_KEY` は全ルームに通用する**マスターキー**として残る
+- ブリッジは配信するルームを `.env` の `ROOM=` で指定する
+  (視聴URLのルームと一致していないとパブリッシャーが見つからない)
+- ルームを無効化したいときは `ROOM_SECRET` をローテートする
+  (全ルームのURLが一斉に無効になる点に注意)
 
 ### 視聴ページ(?watch=1)と同接カウント
 
@@ -254,16 +357,33 @@ npx wrangler secret put WATCH_KEY   # 視聴キー(ランダム文字列)
 (VSeeFace)からのボーン受信が2秒途絶えたら送信を止める**(止めないと
 最後のポーズを送り続けてしまい、視聴側で停止を検知できない)。
 
+### 待機モーション(クライアント側生成)
+
+配信が届いていない間(接続前・停止中)は、**ビューア側だけで生成した待機
+モーション**を再生する(`src/idleMotion.ts`)。サーバーからは何も送られない。
+
+- 呼吸・体重移動・ゆっくりした見回し・まばたきを、周期の違うサイン波の
+  合成で作る(時刻の純関数。同じ時刻なら常に同じ姿勢)
+- 出力は受信ストリームと同じ `SampledFrame` なので、PoseApplierのIK・
+  足接地・AR設置/卓上スケールへの追従がそのまま効く
+- 基準位置はモデルごとのレスト姿勢(`Avatar.restPose`)から測る。頭の高さと
+  腕の長さから「腕を下ろした自然な姿勢」を求めるので、身長や体型が違っても
+  沈んだり腕が伸びきったりしない
+- パケットが届くと0.7秒かけて配信側へクロスフェードし、5秒途絶えると
+  待機モーションへ戻る(デモ再生中は常に配信側扱い)
+
 同接はWorkerの**Durable Object(`Presence`)**が数える。視聴ページが
-`/api/presence` へWebSocket接続し、DOが開いているソケット数を増減のたびに
-全員へブロードキャストする(ハイバネーションAPI使用でアイドルコストほぼゼロ。
-単一ルーム。部屋分けはPhase 3の部屋管理で拡張する)。
+`/api/presence?room=<ルーム>` へWebSocket接続し、DOが開いているソケット数を
+増減のたびに全員へブロードキャストする(ハイバネーションAPI使用でアイドル
+コストほぼゼロ)。DOはルームごとに1インスタンスなので、同接もコメントも
+ルーム間で混ざらない。
 
 ### 音声配信(配信者コンソール)
 
-`/broadcast/<BROADCAST_KEY>` を開き「マイク配信を開始」を押すと、マイクが
-Opus音声トラックとしてSFUへパブリッシュされ、視聴ページで再生できる
-(ページを開いている間だけ配信)。
+`/broadcast/<BROADCAST_KEY>`(既定ルーム)または
+`/broadcast/<ルーム>/<トークン>` を開き「マイク配信を開始」を押すと、マイクが
+Opus音声トラックとしてSFUへパブリッシュされ、同じルームの視聴ページで
+再生できる(ページを開いている間だけ配信)。
 
 ```sh
 npx wrangler secret put BROADCAST_KEY   # 配信者キー(ランダム文字列)
@@ -293,3 +413,28 @@ npx wrangler secret put BROADCAST_KEY   # 配信者キー(ランダム文字列)
   原理的に取得もできる)。本気の抑制は署名付き期限トークン+メモリ上復号
   (Phase 3以降)で強化する
 - ブリッジの `/vrm/` ルート(トンネル経由配信)はLAN・開発用として残してある
+
+## ライセンス
+
+**現在検討中です。** 詳細は [LICENSE](./LICENSE) を参照してください。
+
+現時点では、閲覧・学習を目的とした参照以外の利用(複製・改変・再配布・商用利用)を
+許諾していません。利用をご希望の場合は X のDM([@ishiki_emo](https://x.com/ishiki_emo))
+までご連絡ください。
+
+### 使用している主なオープンソース
+
+いずれも各自のライセンスに従います(本リポジトリのライセンスとは別)。
+
+| パッケージ | ライセンス | 用途 |
+|---|---|---|
+| [three.js](https://github.com/mrdoob/three.js) | MIT | 3D描画・WebXR |
+| [@pixiv/three-vrm](https://github.com/pixiv/three-vrm) | MIT | VRMの読み込み・表情・揺れもの |
+| [ws](https://github.com/websockets/ws) | MIT | ブリッジのWebSocketサーバー |
+| [osc-min](https://github.com/russellmcc/node-osc-min) | Zlib | VMC(OSC)のパース |
+| [node-datachannel](https://github.com/murat-dogan/node-datachannel) | MPL-2.0 | ブリッジのWebRTC |
+| [Vite](https://vitejs.dev/) / [TypeScript](https://www.typescriptlang.org/) / [Wrangler](https://developers.cloudflare.com/workers/wrangler/) | MIT / Apache-2.0 / MIT | ビルド・デプロイ |
+
+## 作者
+
+癒色えも (ISHIKI Emo) — [X (Twitter) @ishiki_emo](https://x.com/ishiki_emo)
