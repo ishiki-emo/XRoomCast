@@ -3,26 +3,51 @@ All rights reserved.
 
 ## 日本語
 
-このソフトウェアのライセンス形態は現在検討中です。
+このソフトウェアの正式なライセンス形態は現在検討中です。
+決まり次第このファイルを差し替えます。
 
-現時点では、閲覧および学習を目的とした参照以外の利用
-(複製・改変・再配布・商用利用など)を許諾していません。
-利用をご希望の場合はご連絡ください。
+### 現時点で許諾していること
 
-正式なライセンスを定めた時点で、このファイルを差し替えます。
+- **個人が非商用で試すこと**
+  (リポジトリの複製、ローカル環境での実行、
+  ご自身のCloudflareアカウントでの動作確認を含みます)
+- **試している様子を撮影・録画し、SNS等で公開すること**
+- **本ソフトウェアを用いて作成した映像・配信などの成果物を公開・利用すること**
+  成果物の権利は、それを作成した利用者に帰属します。
+  本ソフトウェアのライセンスが成果物に及ぶことはありません。
+
+### 現時点で許諾していないこと
+
+- 改変版・派生物の再配布
+- 商用サービスとしての提供
+- 企業・団体の業務における利用
+
+これらをご希望の場合、また判断に迷う場合はご連絡ください。
 
 連絡先: X (Twitter) のDM — https://x.com/ishiki_emo
 
 ## English
 
-The license for this software is currently under consideration.
+The formal license for this software is currently under consideration.
+This file will be replaced once it is decided.
 
-At this time, no permission is granted for any use beyond viewing and study
-for reference purposes. This includes, but is not limited to, copying,
-modification, redistribution, and commercial use.
-Please contact the author if you wish to use this software.
+### Currently permitted
 
-This file will be replaced once a formal license is decided.
+- **Personal, non-commercial evaluation**
+  (including cloning this repository, running it locally, and deploying it
+  to your own Cloudflare account for testing)
+- **Recording and sharing footage of you trying it out**, e.g. on social media
+- **Publishing and using any output created with this software**
+  (videos, live streams, etc.). Such output belongs to you, its creator.
+  This license does not extend to it.
+
+### Not currently permitted
+
+- Redistribution of modified versions or derivative works
+- Offering it as a commercial service
+- Use by companies or organizations for business purposes
+
+Please contact the author for these cases, or if you are unsure.
 
 Contact: DM on X (Twitter) — https://x.com/ishiki_emo
 
