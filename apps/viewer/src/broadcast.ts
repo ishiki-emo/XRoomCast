@@ -217,6 +217,10 @@ function setupWristTuner(preview?: PreviewHandle): void {
   row.hidden = false;
 }
 
+// 不具合報告のときに「どのバージョンを動かしているか」が分かるように出す
+const versionLabel = document.getElementById('app-version');
+if (versionLabel) versionLabel.textContent = `XRoomCast v${__APP_VERSION__}`;
+
 const roomLabel = document.getElementById('b-room');
 if (roomLabel) {
   roomLabel.textContent = `ルーム「${config.room}」の配信者コンソールです`;

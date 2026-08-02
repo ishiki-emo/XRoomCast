@@ -305,7 +305,8 @@ window.setInterval(() => {
   const kbps = (netStats.bytes / 1024).toFixed(1);
   const total = (netStats.totalBytes / 1024 / 1024).toFixed(2);
   const presence = presenceCount !== null ? `👀 同接 ${presenceCount}人 ・ ` : '';
-  statsEl.textContent = `${presence}受信 ${kbps} KB/s ・ ${netStats.packets} pkt/s ・ 累計 ${total} MB ・ 描画 ${netStats.frames} fps`;
+  // 末尾にバージョンを添える(不具合報告のときにどの版か分かるように)
+  statsEl.textContent = `${presence}受信 ${kbps} KB/s ・ ${netStats.packets} pkt/s ・ 累計 ${total} MB ・ 描画 ${netStats.frames} fps ・ v${__APP_VERSION__}`;
   netStats.bytes = 0;
   netStats.packets = 0;
   netStats.frames = 0;
