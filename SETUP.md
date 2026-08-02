@@ -20,7 +20,12 @@ XRoomCast を自分の環境で動かすまでの手順。
 | モダンブラウザ | 視聴 | Chrome / Edge / Safari。AR/MRはWebXR対応が必要 |
 | Cloudflareアカウント | 公開時のみ | R2を使うためクレジットカード登録が必要 |
 | VMC対応ソフト | PC配信時のみ | VSeeFace, VMagicMirror, Waidayo など |
-| HMD | HMD配信・AR視聴時のみ | Quest, PICO など。**iOSはWebXR非対応でARが使えない** |
+| HMD | HMD配信・AR視聴時のみ | Quest, PICO など |
+
+> **iOSでARを見る場合:** iOS Safari は WebXR に対応していないが、
+> [EyeJack X](https://play.eyejack.xyz/)(App Clipで動くWebXRポリフィル)を通せば
+> **AR表示できることを実機で確認済み**。アプリのインストールは不要。
+> ただしポリフィル経由のため**表示解像度が落ちる**。
 
 ---
 
@@ -283,7 +288,8 @@ npm run room -- event-2026 https://<デプロイ先のURL>
 
 ### イベント前のチェック
 
-- [ ] 参加者の端末を確認(**iOSはARが使えない**。通常の3D表示にはなる)
+- [ ] 参加者の端末を確認(iPhone/iPadで**そのままではARにならない**。
+      通常の3D表示になるので、ARで見せたい場合は[EyeJack X](https://play.eyejack.xyz/)を案内する)
 - [ ] 使うVRMを事前にアップロードして表示を確認
 - [ ] ルームURLを作って参加者に配布
 - [ ] 本番と同じ人数規模で公開範囲の設定を決めておく
@@ -317,8 +323,14 @@ npm run room -- event-2026 https://<デプロイ先のURL>
 
 ### ARボタンが出ない
 
-WebXRに対応していない端末・ブラウザ。**iOS Safariは未対応**なので、
-iPhone/iPadでは通常の3D表示になる。
+WebXRに対応していない端末・ブラウザ。ARボタンは対応端末でのみ表示される
+(非対応でも通常の3D表示は問題なく動く)。
+
+**iPhone/iPad の場合**: iOS Safari は WebXR に対応していないためARボタンが出ない。
+[EyeJack X](https://play.eyejack.xyz/) 経由で視聴URLを開くとAR表示できる
+(App Clipで起動するのでアプリのインストールは不要)。**実機で動作確認済み**。
+
+ポリフィルを挟むぶん**表示解像度がネイティブより落ちる**。原因が分かれば追記する。
 
 ---
 
