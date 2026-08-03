@@ -155,7 +155,7 @@ npx wrangler secret put ROOM_SECRET              # ルーム別URLを作る場�
 |---|---|---|
 | `CF_REALTIME_APP_ID` / `CF_REALTIME_APP_SECRET` | SFUの認証 | 不可(モーション配信に必須) |
 | `VRM_TOKEN` | R2のVRM配信の照合 | 不可(未設定だとVRM配信が無効) |
-| `WATCH_KEY` | `/watch/<キー>` の照合 | 可(短縮URLを使わないなら) |
+| `WATCH_KEY` | `/watch/<キー>` の照合と視聴の認可 | 可(短縮URLを使わないなら) |
 | `BROADCAST_KEY` | 配信者コンソール・アップロード・HMD配信の認可 | 不可 |
 | `BRIDGE_TOKEN` | ブリッジのパブリッシャー登録 | HMD配信のみなら不要 |
 | `ROOM_SECRET` | ルーム別URLの生成 | 可(既定ルームだけなら不要) |
@@ -205,7 +205,26 @@ ROOM=main
 https://<デプロイ先のURL>/watch/<WATCH_KEY>
 ```
 
-開くと視聴専用のレイアウトになり、SFUへ自動接続する。**このURLを知っている人だけが視聴できる。**
+開くと視聴専用のレイアウトになり、SFUへ自動接続する。
+
+> ⚠️ **既定では、この鍵は「URLの短縮」でしかない。**
+> 鍵を知らなくても、**ルーム名(既定は `main`)を知っていれば視聴APIに直接繋げる。**
+> 匿名で気軽に見てもらうための既定なので、限定公開にしたい場合は次を設定する。
+>
+> ```jsonc
+> // apps/viewer/wrangler.jsonc の vars
+> "REQUIRE_VIEWER_TOKEN": "1"
+> ```
+>
+> こうすると視聴API(`/api/presence` とSFU)もトークンを検証するようになり、
+> `/watch/...` を経由して開いた人だけが視聴できる。
+> ルーム名を推測しただけでは繋げない。
+>
+> 独自の会員認証(ログイン必須にする等)を載せる場合は
+> [apps/viewer/worker/auth.ts](./apps/viewer/worker/auth.ts) の `authorize()` と
+> [apps/viewer/src/auth.ts](./apps/viewer/src/auth.ts) の `createAuth()` を
+> 差し替える。詳細は [docs/実装メモ.md](./docs/実装メモ.md) の
+> 「認証・認可の差し替え点」を参照。
 
 ### 3-2. 配信者コンソールを開く
 
@@ -253,7 +272,9 @@ npm run room -- event-2026 https://<デプロイ先のURL>
 ```
 
 視聴URLと配信者URLが出力される。ルームごとに鍵が違うので、
-**あるルームのURLで他のルームは覗けない**。
+**あるルームの配信者URLで他のルームを操作することはできない**。
+視聴側も分けたい場合は、前述の `REQUIRE_VIEWER_TOKEN` を併せて設定する
+(未設定だと、ルーム名を知っていれば視聴だけはできてしまう)。
 
 ブリッジ側は `.env` の `ROOM=event-2026` を合わせる。
 
