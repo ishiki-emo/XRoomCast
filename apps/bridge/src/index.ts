@@ -225,6 +225,8 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
         enabled: sfuApi !== null,
         room: ROOM,
         publisherReady: publisher?.ready ?? false,
+        // 視聴側が配信元の変化を検知するために使う(Worker側と同じ形)
+        publisherSessionId: publisher?.ready ? (publisher.sessionId ?? null) : null,
       });
       return;
     }
@@ -252,7 +254,11 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
         sendJson(res, 502, { error: 'DataChannel IDが取得できませんでした' });
         return;
       }
-      sendJson(res, 200, { id: channelId, name: DATA_CHANNEL_NAME });
+      sendJson(res, 200, {
+        id: channelId,
+        name: DATA_CHANNEL_NAME,
+        publisherSessionId: publisher.sessionId,
+      });
       return;
     }
     // VRM配信: apps/viewer/public/ の .vrm をCORS付きで配る。

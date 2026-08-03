@@ -193,10 +193,18 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
 
   if (request.method === 'GET' && url.pathname === '/api/sfu/status') {
     const audio = await readAudioPublisher(env, room);
+    const publisher = await readPublisher(env, room);
     return json(200, {
       enabled: sfuConfigured,
       room,
-      publisherReady: (await readPublisher(env, room)) !== null,
+      publisherReady: publisher !== null,
+      /**
+       * 視聴側が「配信元が変わったか」を判定するために返す。
+       * これが無いと、モーションが来ないだけの状態と配信元の再起動を区別できず、
+       * セッションを作り直し続けることになる(Cloudflare APIへの発信が跳ね上がる)。
+       * 購読には元々このIDが使われるので、視聴者に対して新たな権限にはならない
+       */
+      publisherSessionId: publisher?.sessionId ?? null,
       audio: audio ? { sessionId: audio.sessionId, trackName: audio.trackName } : null,
     });
   }
@@ -313,7 +321,12 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
     if (channelId === undefined) {
       return json(502, { error: 'DataChannel IDが取得できませんでした' });
     }
-    return json(200, { id: channelId, name: DATA_CHANNEL_NAME });
+    // publisherSessionId は視聴側が「いまどの配信元を購読しているか」を覚えるために返す
+    return json(200, {
+      id: channelId,
+      name: DATA_CHANNEL_NAME,
+      publisherSessionId: publisher.sessionId,
+    });
   }
 
   return json(404, { error: 'not found' });
