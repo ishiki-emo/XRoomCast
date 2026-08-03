@@ -18,7 +18,7 @@ import { DemoController } from './demo';
 import { IdleMotion, blendPose } from '@xroomcast/viewer-core';
 import { PeerPresence, type PeerDevice, type PeerState } from '@xroomcast/viewer-core';
 import { PlaceholderAvatar } from '@xroomcast/viewer-core';
-import { SpatialAudio } from '@xroomcast/viewer-core';
+import { SpatialAudio, isSpatialAudioSupported } from '@xroomcast/viewer-core';
 import { SpatialChat } from './spatialChat';
 import { SpatialPanel } from './spatialUI';
 import { setupScenery } from '@xroomcast/viewer-core';
@@ -169,11 +169,14 @@ const settingsPanel = new SpatialPanel({
     },
     {
       title: '音声',
-      options: [
-        { label: '空間(頭から鳴る)', value: 'spatial' },
-        { label: '通常', value: 'flat' },
-      ],
-      initial: 'spatial',
+      // 空間が使えない端末(iOS)では選択肢に出さない。選んでも無音になるだけ
+      options: isSpatialAudioSupported()
+        ? [
+            { label: '空間(頭から鳴る)', value: 'spatial' },
+            { label: '通常', value: 'flat' },
+          ]
+        : [{ label: '通常(この端末は空間非対応)', value: 'flat' }],
+      initial: isSpatialAudioSupported() ? 'spatial' : 'flat',
       onSelect: (value) => setSpatialAudio(value === 'spatial'),
     },
     {
@@ -427,11 +430,27 @@ audioButton.addEventListener('click', () => {
 });
 
 function setSpatialAudio(on: boolean): void {
-  spatialAudio.setSpatial(on);
-  const value = on ? 'spatial' : 'flat';
+  // 使えない端末では選ばせない(選べても無音になるだけなので)
+  const effective = on && spatialAudio.spatialSupported;
+  spatialAudio.setSpatial(effective);
+  const value = effective ? 'spatial' : 'flat';
   settingsPanel.setActive(value);
   for (const button of audioButtons) {
     button.classList.toggle('active', button.dataset.audio === value);
+  }
+}
+
+/**
+ * iOS は WebRTC のリモート音声を Web Audio へ流せないため、空間オーディオが
+ * 無音になる。既定を通常再生にしたうえで、選択肢そのものを無効化して
+ * 「選んだのに聞こえない」を防ぐ
+ */
+if (!spatialAudio.spatialSupported) {
+  for (const button of audioButtons) {
+    if (button.dataset.audio !== 'spatial') continue;
+    button.disabled = true;
+    button.title = 'この端末では空間オーディオを利用できません';
+    button.textContent = '空間(非対応)';
   }
 }
 setSpatialAudio(spatialAudio.isSpatial);

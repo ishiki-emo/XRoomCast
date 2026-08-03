@@ -19,11 +19,35 @@ const BASE_REF_DISTANCE = 1.2;
 const ROLLOFF_FACTOR = 0.6;
 const MAX_DISTANCE = 40;
 
+/**
+ * 空間オーディオが使えるか。
+ *
+ * **iOS(WebKit)はWebRTCのリモート音声をWeb Audioへ流せない**という制約がある。
+ * 空間ONだと `<audio>` をミュートしてWeb Audio側で鳴らす作りなので、
+ * iOSでは**完全に無音になる**。しかも `<audio>.volume` はiOSでは変更できないため、
+ * 「鳴らしつつ音量を絞る」という逃げ道も無い。
+ *
+ * iOSのブラウザは中身がすべてWebKitなので、プラットフォームで判定してよい
+ * (iPadOSはUAがMacを名乗るため、タッチ点数と併せて見る)
+ */
+export function isSpatialAudioSupported(): boolean {
+  if (typeof navigator === 'undefined') return true;
+  const ua = navigator.userAgent;
+  const iOS =
+    /iPad|iPhone|iPod/.test(ua) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(ua));
+  return !iOS;
+}
+
 export class SpatialAudio {
   readonly listener: THREE.AudioListener;
   private readonly positional: THREE.PositionalAudio;
   /** Chrome対策 兼 空間OFF時の再生先 */
   private readonly sink = new Audio();
+  /**
+   * この端末で空間オーディオが使えるか。使えない端末では、設定に関わらず
+   * 通常再生へ回す(黙って無音になるより、鳴るほうがましなので)
+   */
+  readonly spatialSupported = isSpatialAudioSupported();
   private spatial = true;
   private muted = true;
   private hasTrack = false;
@@ -140,9 +164,11 @@ export class SpatialAudio {
 
   private applyRouting(): void {
     const audible = this.hasTrack && !this.muted;
-    this.positional.setVolume(audible && this.spatial ? 1 : 0);
+    // 使えない端末では空間ONでも通常再生へ回す(黙って無音にしない)
+    const spatial = this.spatial && this.spatialSupported;
+    this.positional.setVolume(audible && spatial ? 1 : 0);
     // 空間ONのときは <audio> を鳴らさない(二重再生を防ぐ)。
     // ただしstreamは繋いだままにする(Chromeでは外すとWeb Audioにも流れなくなる)
-    this.sink.muted = !audible || this.spatial;
+    this.sink.muted = !audible || spatial;
   }
 }

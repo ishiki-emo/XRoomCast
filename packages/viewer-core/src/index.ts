@@ -20,7 +20,7 @@ export { PoseApplier } from './poseApplier';
 export { IdleMotion, blendPose } from './idleMotion';
 export { PeerPresence, type PeerDevice, type PeerState } from './peers';
 export { PlaceholderAvatar } from './placeholderAvatar';
-export { SpatialAudio } from './spatialAudio';
+export { SpatialAudio, isSpatialAudioSupported } from './spatialAudio';
 export { setupScenery } from './scenery';
 export { ContactShadow, type ShadowMode } from './contactShadow';
 export { createTwoBoneChain, solveTwoBoneIK, type TwoBoneChain } from './twoBoneIK';
