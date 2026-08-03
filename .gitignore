@@ -3,6 +3,9 @@ dist/
 .env
 .env.local
 
+# wrangler dev のローカル用シークレット(本番は wrangler secret put で登録する)
+.dev.vars
+
 # wrangler dev のローカル状態(KV/R2/DOのエミュレーション)
 .wrangler/
 
