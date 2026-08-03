@@ -2,30 +2,34 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { decodePacket } from '@xroomcast/protocol';
 import { ArController } from './ar';
-import { Avatar } from './avatar';
+import { Avatar } from '@xroomcast/viewer-core';
+import { withAuth } from '@xroomcast/sync';
+import { createAuth } from './auth';
 import {
   DEFAULT_VRM_PATH,
   defaultServerUrls,
   readConfig,
-  withRoom,
+  sameOriginWebSocketUrl,
   type TransportKind,
 } from './config';
-import { ContactShadow, type ShadowMode } from './contactShadow';
+import { ContactShadow, type ShadowMode } from '@xroomcast/viewer-core';
 import { DemoController } from './demo';
-import { IdleMotion, blendPose } from './idleMotion';
-import { PeerPresence, type PeerDevice, type PeerState } from './peers';
-import { PlaceholderAvatar } from './placeholderAvatar';
-import { SpatialAudio } from './spatialAudio';
+import { IdleMotion, blendPose } from '@xroomcast/viewer-core';
+import { PeerPresence, type PeerDevice, type PeerState } from '@xroomcast/viewer-core';
+import { PlaceholderAvatar } from '@xroomcast/viewer-core';
+import { SpatialAudio } from '@xroomcast/viewer-core';
 import { SpatialChat } from './spatialChat';
 import { SpatialPanel } from './spatialUI';
-import { setupScenery } from './scenery';
-import { PoseStreamPlayer } from './poseStream';
-import type { Transport } from './transport';
-import { WebSocketTransport } from './wsTransport';
-import { SfuTransport } from './sfuTransport';
+import { setupScenery } from '@xroomcast/viewer-core';
+import { PoseStreamPlayer } from '@xroomcast/sync';
+import type { Transport } from '@xroomcast/sync';
+import { WebSocketTransport } from '@xroomcast/sync';
+import { SfuTransport } from '@xroomcast/sync';
 
 // URLクエリの解釈は config.ts に集約している(ルーム・ロール・接続先・VRM)
 const config = readConfig();
+// 資格情報の取り出しは auth.ts に集約している(差し替え点)
+const auth = createAuth(config);
 const watchMode = config.watchMode;
 
 const stage = document.getElementById('stage') as HTMLDivElement;
@@ -38,8 +42,15 @@ const loadButton = document.getElementById('load-button') as HTMLButtonElement;
 // レンダラのサイズ計算より先にクラスを付けておく必要がある
 if (watchMode) document.body.classList.add('watch');
 
-if (watchMode && location.protocol === 'https:') {
-  // 同接カウントはWorker配信の視聴ページのみ(ローカル開発では接続先がない)
+/**
+ * 同接カウント・コメントはWorkerが配信しているページでのみ使える。
+ * ビルド済みバンドルかどうか(= Workerが配信しているか)で判定する。
+ * vite開発サーバーはsrcを直接配信していて接続先が無いので繋ぎにいかない。
+ *
+ * 以前は `location.protocol === 'https:'` で判定していたが、それだと
+ * `wrangler dev`(http://127.0.0.1)でコメントも同接も動かなかった
+ */
+if (watchMode && import.meta.env.PROD) {
   window.addEventListener('DOMContentLoaded', () => connectPresence());
 }
 const demoButton = document.getElementById('demo-button') as HTMLButtonElement;
@@ -488,10 +499,10 @@ function applyRemoteAvatar(url: string, name?: string): void {
 // 同接・コメント用WebSocket。切断時は少し間を置いて張り直す
 function connectPresence(): void {
   setChatEnabled(false);
+  // WebSocketはヘッダを付けられないので資格情報はクエリで運ぶ。
   // 配信者キーを持って開いた場合は配信者として接続する(気配を受け取れる)
-  let path = withRoom('/api/presence', config.room);
-  if (config.broadcastKey) path += `&key=${encodeURIComponent(config.broadcastKey)}`;
-  const ws = new WebSocket(`wss://${location.host}${path}`);
+  const path = withAuth('/api/presence', config.room, auth);
+  const ws = new WebSocket(sameOriginWebSocketUrl(path));
   let pingTimer: number | null = null;
   ws.onopen = () => {
     presenceWs = ws;
@@ -556,7 +567,8 @@ function connectTransport(kind: string, url: string): void {
   stopDemo();
   disconnectTransport();
   livePlayer = new PoseStreamPlayer();
-  liveTransport = kind === 'sfu' ? new SfuTransport(url, config.room) : new WebSocketTransport(url);
+  liveTransport =
+    kind === 'sfu' ? new SfuTransport(url, config.room, auth) : new WebSocketTransport(url);
   if (liveTransport instanceof SfuTransport) {
     liveTransport.onAudioTrack = handleAudioTrack;
   }

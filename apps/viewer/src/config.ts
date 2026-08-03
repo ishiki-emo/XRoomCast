@@ -2,7 +2,12 @@
  * URLクエリから読む実行時設定の集約。
  * 以前は main.ts の冒頭と末尾にパースが散っていたため、ルーム・ロールを足す前に
  * ここへ一本化した。ページ(視聴ビューア/配信者コンソール)から共通で使う。
+ *
+ * ここは**このアプリ固有**の層。ライブラリ(@xroomcast/sync, viewer-core)は
+ * URLを読まず、設定を引数で受け取る。事業者が自社アプリに組み込む場合は
+ * このファイルに相当するものを自分で書くことになる。
  */
+import { normalizeRoom } from '@xroomcast/sync';
 
 export type TransportKind = 'ws' | 'sfu';
 
@@ -13,20 +18,8 @@ export type TransportKind = 'ws' | 'sfu';
  */
 export type Role = 'viewer' | 'studio';
 
-export const DEFAULT_ROOM = 'main';
 /** ローカル開発で読む既定VRM。apps/viewer/public/ に置く(コミット対象外) */
 export const DEFAULT_VRM_PATH = '/avatar.vrm';
-
-/**
- * ルーム名はDurable Objectの名前・KVキー・R2キーの一部になるため文字種を制限する。
- * Worker側(worker/index.ts)にも同じ規則の実装があり、両方を通過したものだけが有効。
- */
-const ROOM_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
-
-export function normalizeRoom(value: string | null | undefined): string {
-  const room = (value ?? '').trim();
-  return ROOM_PATTERN.test(room) ? room : DEFAULT_ROOM;
-}
 
 /**
  * 既定の接続先。SFUはHTTPS(=Worker配信)なら同一オリジンのプロキシAPIを使い、
@@ -35,8 +28,22 @@ export function normalizeRoom(value: string | null | undefined): string {
 export function defaultServerUrls(loc: Location = location): Record<TransportKind, string> {
   return {
     ws: `ws://${loc.hostname}:8080`,
-    sfu: loc.protocol === 'https:' ? loc.origin : `http://${loc.hostname}:8080`,
+    // SFUのプロキシAPIはWorkerが持つ。ビルド済みバンドル(= Workerが配信している
+    // ページ)なら同一オリジン、vite開発サーバーならブリッジのローカルAPIへ。
+    // ここをhttps判定にすると `wrangler dev`(http)で接続先がブリッジになり、
+    // 視聴ページだけモーションが来ない(配信者コンソールは location.origin 直指定
+    // なので動いてしまい、原因が分かりにくい)
+    sfu: import.meta.env.PROD ? loc.origin : `http://${loc.hostname}:8080`,
   };
+}
+
+/**
+ * 同一オリジンのWebSocket URLを組み立てる。
+ * ページがhttpsなら wss、httpなら ws。**決め打ちにすると
+ * `wrangler dev`(http)でpresenceに繋がらず、コメントも同接も動かない。**
+ */
+export function sameOriginWebSocketUrl(path: string, loc: Location = location): string {
+  return `${loc.protocol === 'https:' ? 'wss' : 'ws'}://${loc.host}${path}`;
 }
 
 export interface AppConfig {
@@ -54,6 +61,11 @@ export interface AppConfig {
   autoConnect: boolean;
   /** 配信者コンソールのキー(?key=)。視聴ページでは空 */
   broadcastKey: string;
+  /**
+   * 視聴トークン(?wt=)。/watch/<ルーム>/<トークン> から引き継がれる。
+   * Worker側が REQUIRE_VIEWER_TOKEN='1' のときだけ検証される(既定では素通し)
+   */
+  viewerToken: string;
 }
 
 export function readConfig(search: string = location.search, loc: Location = location): AppConfig {
@@ -85,11 +97,6 @@ export function readConfig(search: string = location.search, loc: Location = loc
     serverUrl: serverParam ?? defaults[transport],
     autoConnect: Boolean(serverParam || transportParam),
     broadcastKey: params.get('key') ?? '',
+    viewerToken: params.get('wt') ?? '',
   };
-}
-
-/** APIパスにルームを付ける(Worker側は ?room= で受ける) */
-export function withRoom(path: string, room: string): string {
-  const separator = path.includes('?') ? '&' : '?';
-  return `${path}${separator}room=${encodeURIComponent(room)}`;
 }

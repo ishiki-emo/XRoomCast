@@ -10,7 +10,7 @@
  */
 import * as THREE from 'three';
 import type { FingerCurls, PoseNode, Quat } from '@xroomcast/protocol';
-import type { SampledFrame } from './poseStream';
+import type { SampledFrame } from '@xroomcast/sync';
 import type { RestPose } from './avatar';
 
 const TWO_PI = Math.PI * 2;

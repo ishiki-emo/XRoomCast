@@ -9,7 +9,7 @@
 import * as THREE from 'three';
 import type { VRM, VRMHumanBoneName } from '@pixiv/three-vrm';
 import type { FingerSection, PoseSection } from '@xroomcast/protocol';
-import type { SampledFrame } from './poseStream';
+import type { SampledFrame } from '@xroomcast/sync';
 import { createTwoBoneChain, solveTwoBoneIK, type TwoBoneChain } from './twoBoneIK';
 
 type Side = 'left' | 'right';

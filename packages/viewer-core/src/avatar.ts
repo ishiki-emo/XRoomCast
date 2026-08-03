@@ -11,7 +11,7 @@ import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import { AvatarScaleAdapter } from './avatarScale';
 import { PoseApplier } from './poseApplier';
-import type { SampledFrame } from './poseStream';
+import type { SampledFrame } from '@xroomcast/sync';
 
 const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));

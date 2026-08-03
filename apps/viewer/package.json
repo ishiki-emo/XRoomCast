@@ -7,12 +7,16 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "//dev:worker": "Workerごとローカルで動かす。VRMを除去してから起動しないと、wranglerが25MiB上限で落ちる",
+    "dev:worker": "npm run build && node scripts/stripVrmFromDist.mjs && wrangler dev",
     "deploy": "npm run build && tsc --noEmit -p worker && node scripts/stripVrmFromDist.mjs && wrangler deploy"
   },
   "dependencies": {
     "@pixiv/three-vrm": "^3.4.0",
     "@xroomcast/fixtures": "*",
     "@xroomcast/protocol": "*",
+    "@xroomcast/sync": "*",
+    "@xroomcast/viewer-core": "*",
     "three": "^0.172.0"
   },
   "devDependencies": {

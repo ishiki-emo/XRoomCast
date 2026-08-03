@@ -3,16 +3,15 @@
  * 受信パケットをタイムスタンプ基準で目標遅延100msの位置で補間再生する。
  * 位置はlerp、回転はslerp。表情・手指は再生時刻までのイベントを畳み込んで保持する。
  */
-import * as THREE from 'three';
 import type {
   ExpressionEntry,
   FingerSection,
   Packet,
   PoseNode,
   PoseSection,
-  Quat,
   Vec3,
 } from '@xroomcast/protocol';
+import { slerpQuat } from './quaternion';
 
 export const TARGET_DELAY_MS = 100;
 /** 受信タイムスタンプがローカル再生クロックからこれ以上ずれたらストリーム再開とみなす */
@@ -38,12 +37,6 @@ function insertByTimestamp<T>(list: Timed<T>[], item: Timed<T>): void {
 
 function lerpVec3(a: Vec3, b: Vec3, t: number): Vec3 {
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-}
-
-function slerpQuat(a: Quat, b: Quat, t: number): Quat {
-  const out: number[] = [0, 0, 0, 1];
-  THREE.Quaternion.slerpFlat(out, 0, a as unknown as number[], 0, b as unknown as number[], 0, t);
-  return out as Quat;
 }
 
 function interpolateNode(a: PoseNode, b: PoseNode, t: number): PoseNode {

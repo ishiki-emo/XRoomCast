@@ -4,7 +4,8 @@
  * Presence Durable Objectへ通知され、視聴中の全員が読み込み直す。
  * (視聴者ごとにダウンロード完了時点で差し替わるため、切り替えは同時ではない)
  */
-import { withRoom } from './config';
+import type { AuthProvider } from '@xroomcast/sync';
+import { withRoom } from '@xroomcast/sync';
 
 interface VrmItem {
   key: string;
@@ -29,8 +30,8 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function setupAvatarConsole(options: { room: string; key: string }): void {
-  const { room, key } = options;
+export function setupAvatarConsole(options: { room: string; auth: AuthProvider }): void {
+  const { room, auth } = options;
 
   const statusEl = document.getElementById('a-status') as HTMLDivElement;
   const fileInput = document.getElementById('a-file') as HTMLInputElement;
@@ -65,7 +66,7 @@ export function setupAvatarConsole(options: { room: string; key: string }): void
   ): Promise<Record<string, unknown>> {
     const res = await fetch(withRoom(path, room), {
       ...init,
-      headers: { ...init.headers, Authorization: `Bearer ${key}` },
+      headers: { ...init.headers, ...(await auth.headers()) },
     });
     const data = (await res.json()) as Record<string, unknown>;
     if (!res.ok) throw new Error(String(data.error ?? `${path} が失敗 (${res.status})`));
@@ -167,12 +168,14 @@ export function setupAvatarConsole(options: { room: string; key: string }): void
   }
 
   /** 進捗を出したいので fetch ではなく XHR を使う(fetchは上りの進捗を取れない) */
-  function upload(file: File): Promise<void> {
+  async function upload(file: File): Promise<void> {
+    // XHRのヘッダは同期的に積むため、資格情報は open の前に解決しておく
+    const authHeaders = await auth.headers();
     return new Promise((resolve, reject) => {
       const path = withRoom(`/api/vrm/upload?name=${encodeURIComponent(file.name)}`, room);
       const xhr = new XMLHttpRequest();
       xhr.open('POST', path);
-      xhr.setRequestHeader('Authorization', `Bearer ${key}`);
+      for (const [name, value] of Object.entries(authHeaders)) xhr.setRequestHeader(name, value);
       xhr.setRequestHeader('Content-Type', 'application/octet-stream');
       xhr.upload.onprogress = (event) => {
         if (!event.lengthComputable) return;

@@ -5,7 +5,7 @@
  */
 import { decodePacket, encodePacket } from '@xroomcast/protocol';
 import { dummyPacketAt, POSE_INTERVAL_MS } from '@xroomcast/fixtures';
-import { PoseStreamPlayer } from './poseStream';
+import { PoseStreamPlayer } from '@xroomcast/sync';
 
 export class DemoController {
   active = false;

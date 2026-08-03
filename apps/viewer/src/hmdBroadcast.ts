@@ -11,7 +11,8 @@
  */
 import * as THREE from 'three';
 import { encodePacket, type Packet, type PoseNode, type Quat, type Vec3 } from '@xroomcast/protocol';
-import { withRoom } from './config';
+import type { AuthProvider } from '@xroomcast/sync';
+import { withRoom } from '@xroomcast/sync';
 
 const CF_STUN_URL = 'stun:stun.cloudflare.com:3478';
 const DATA_CHANNEL_NAME = 'pose';
@@ -123,7 +124,7 @@ export class HmdBroadcast {
 
   constructor(
     private readonly room: string,
-    private readonly key: string,
+    private readonly auth: AuthProvider,
   ) {}
 
   get active(): boolean {
@@ -133,7 +134,7 @@ export class HmdBroadcast {
   private async api(path: string, body: unknown): Promise<Record<string, unknown>> {
     const res = await fetch(withRoom(path, this.room), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.key}` },
+      headers: { 'Content-Type': 'application/json', ...(await this.auth.headers()) },
       body: JSON.stringify(body),
     });
     const data = (await res.json()) as Record<string, unknown>;

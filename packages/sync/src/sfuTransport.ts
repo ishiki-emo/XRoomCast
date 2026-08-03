@@ -5,7 +5,8 @@
  * DataChannelは一方向(publisher→subscribers)のため send() は何もしない。
  * 切断・失敗時は指数バックオフ(1s→最大16s)でセッションを張り直す。
  */
-import { DEFAULT_ROOM, withRoom } from './config';
+import { anonymousAuth, withAuth, type AuthProvider } from './auth';
+import { DEFAULT_ROOM } from './room';
 import type { Transport } from './transport';
 
 const CF_STUN_URL = 'stun:stun.cloudflare.com:3478';
@@ -43,6 +44,8 @@ export class SfuTransport implements Transport {
     private readonly baseUrl: string,
     /** 購読するルーム。Worker側はパブリッシャーをルームごとに保持する */
     private readonly room: string = DEFAULT_ROOM,
+    /** 視聴の資格情報。Worker側が視聴認可を有効にしている場合のみ必要 */
+    private readonly auth: AuthProvider = anonymousAuth,
   ) {}
 
   connect(): void {
@@ -51,9 +54,9 @@ export class SfuTransport implements Transport {
   }
 
   private async apiPost(path: string, body: unknown): Promise<Record<string, unknown>> {
-    const res = await fetch(`${this.baseUrl}${withRoom(path, this.room)}`, {
+    const res = await fetch(`${this.baseUrl}${withAuth(path, this.room, this.auth)}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(await this.auth.headers()) },
       body: JSON.stringify(body),
     });
     const data = (await res.json()) as Record<string, unknown>;
@@ -139,7 +142,10 @@ export class SfuTransport implements Transport {
     const check = async (): Promise<void> => {
       if (generation !== this.generation || !this.pc || !this.mySessionId) return;
       try {
-        const res = await fetch(`${this.baseUrl}${withRoom('/api/sfu/status', this.room)}`);
+        const res = await fetch(
+          `${this.baseUrl}${withAuth('/api/sfu/status', this.room, this.auth)}`,
+          { headers: await this.auth.headers() },
+        );
         const status = (await res.json()) as {
           audio: { sessionId: string; trackName: string } | null;
         };

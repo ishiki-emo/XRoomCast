@@ -163,7 +163,11 @@ describe('encodePacket / decodePacket', () => {
 
   it('Uint8Array と ArrayBuffer のどちらも受け付ける', () => {
     const bytes = encodePacket({ sequence: 9, timestamp: 9 });
-    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    // bytes.buffer は ArrayBufferLike のため SharedArrayBuffer を含む型になる
+    const buffer = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
     expect(decodePacket(buffer)).toEqual(decodePacket(bytes));
   });
 });

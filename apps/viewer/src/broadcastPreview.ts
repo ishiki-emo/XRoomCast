@@ -11,13 +11,14 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { decodePacket } from '@xroomcast/protocol';
-import { Avatar } from './avatar';
-import { withRoom } from './config';
+import { Avatar } from '@xroomcast/viewer-core';
+import type { AuthProvider } from '@xroomcast/sync';
+import { withRoom } from '@xroomcast/sync';
 import type { HmdBroadcast } from './hmdBroadcast';
-import { IdleMotion, blendPose } from './idleMotion';
-import { PeerPresence, type PeerState } from './peers';
-import { PoseStreamPlayer } from './poseStream';
-import { SfuTransport } from './sfuTransport';
+import { IdleMotion, blendPose } from '@xroomcast/viewer-core';
+import { PeerPresence, type PeerState } from '@xroomcast/viewer-core';
+import { PoseStreamPlayer } from '@xroomcast/sync';
+import { SfuTransport } from '@xroomcast/sync';
 import { SpatialPanel } from './spatialUI';
 import { XrPanelController } from './xrPanelController';
 
@@ -52,10 +53,12 @@ export function setupBroadcastPreview(options: {
   canvas: HTMLCanvasElement;
   statusEl: HTMLElement;
   room: string;
+  /** 配信者の資格情報。プレビューは自分の配信を視聴している状態なので視聴にも使う */
+  auth: AuthProvider;
   /** HMD配信。XRセッション中に頭・手の姿勢を送る */
   broadcast: HmdBroadcast;
 }): PreviewHandle {
-  const { canvas, statusEl, room, broadcast } = options;
+  const { canvas, statusEl, room, auth, broadcast } = options;
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -107,7 +110,7 @@ export function setupBroadcastPreview(options: {
   let lastPacketAt = 0;
 
   const player = new PoseStreamPlayer();
-  const transport = new SfuTransport(location.origin, room);
+  const transport = new SfuTransport(location.origin, room, auth);
   transport.onPacket = (bytes) => {
     lastPacketAt = performance.now();
     try {
@@ -153,7 +156,7 @@ export function setupBroadcastPreview(options: {
   void (async () => {
     try {
       const res = await fetch(withRoom('/api/avatar', room), {
-        headers: { Authorization: `Bearer ${new URLSearchParams(location.search).get('key') ?? ''}` },
+        headers: await auth.headers(),
       });
       const data = (await res.json()) as { avatar?: { url?: string } | null };
       if (data.avatar?.url) await loadAvatar(data.avatar.url);

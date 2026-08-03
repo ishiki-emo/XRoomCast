@@ -7,9 +7,12 @@
  */
 import { setupAvatarConsole } from './avatarConsole';
 import { setupBroadcastPreview, type PreviewHandle, type XrMode } from './broadcastPreview';
-import { readConfig, withRoom } from './config';
+import { withAuth } from '@xroomcast/sync';
+import { createAuth } from './auth';
+import { readConfig, sameOriginWebSocketUrl } from './config';
+import { withRoom } from '@xroomcast/sync';
 import { DEFAULT_WRIST_OFFSET, HmdBroadcast, setWristOffset } from './hmdBroadcast';
-import type { PeerState } from './peers';
+import type { PeerState } from '@xroomcast/viewer-core';
 
 const CF_STUN_URL = 'stun:stun.cloudflare.com:3478';
 const TRACK_NAME = 'mic';
@@ -20,6 +23,7 @@ const toggleButton = document.getElementById('b-toggle') as HTMLButtonElement;
 
 const config = readConfig();
 const key = config.broadcastKey;
+const auth = createAuth(config);
 
 function setStatus(text: string, kind: 'idle' | 'live' | 'error' = 'idle'): void {
   statusEl.textContent = text;
@@ -30,10 +34,7 @@ function setStatus(text: string, kind: 'idle' | 'live' | 'error' = 'idle'): void
 async function api(path: string, body: unknown): Promise<Record<string, unknown>> {
   const res = await fetch(withRoom(path, config.room), {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${key}`,
-    },
+    headers: { 'Content-Type': 'application/json', ...(await auth.headers()) },
     body: JSON.stringify(body),
   });
   const data = (await res.json()) as Record<string, unknown>;
@@ -151,8 +152,9 @@ toggleButton.addEventListener('click', () => {
 // タブを閉じるときに登録解除を試みる(失敗しても15分で自動失効)
 window.addEventListener('pagehide', () => {
   if (sessionId) {
+    // sendBeaconはヘッダを付けられないので資格情報はクエリで運ぶ
     navigator.sendBeacon?.(
-      withRoom('/api/sfu/audio-publisher-beacon?key=' + encodeURIComponent(key), config.room),
+      withAuth('/api/sfu/audio-publisher-beacon', config.room, auth),
       JSON.stringify({ sessionId: null }),
     );
   }
@@ -230,7 +232,7 @@ if (!key) {
   setStatus('URLにキーがありません(/broadcast/<キー> から開いてください)', 'error');
   toggleButton.disabled = true;
 } else {
-  setupAvatarConsole({ room: config.room, key });
+  setupAvatarConsole({ room: config.room, auth });
   setupPreview();
 }
 
@@ -240,13 +242,14 @@ if (!key) {
  */
 function setupPreview(): void {
   const previewStatus = document.getElementById('p-status') as HTMLElement;
-  const hmdBroadcast = new HmdBroadcast(config.room, key);
+  const hmdBroadcast = new HmdBroadcast(config.room, auth);
   hmdBroadcast.onStatus = (text) => (previewStatus.textContent = text);
 
   const preview = setupBroadcastPreview({
     canvas: document.getElementById('p-canvas') as HTMLCanvasElement,
     statusEl: previewStatus,
     room: config.room,
+    auth,
     broadcast: hmdBroadcast,
   });
 
@@ -310,17 +313,22 @@ function setupPreview(): void {
     button.addEventListener('click', () => {
       const mode = button.dataset.peermode ?? 'all';
       markMode(mode);
-      void fetch(withRoom('/api/peer-mode', config.room), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-        body: JSON.stringify({ mode }),
-      }).catch(() => setStatus('公開範囲の変更に失敗しました', 'error'));
+      void auth
+        .headers()
+        .then((headers) =>
+          fetch(withRoom('/api/peer-mode', config.room), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...headers },
+            body: JSON.stringify({ mode }),
+          }),
+        )
+        .catch(() => setStatus('公開範囲の変更に失敗しました', 'error'));
     });
   }
 
   const connect = (): void => {
-    const path = `${withRoom('/api/presence', config.room)}&key=${encodeURIComponent(key)}`;
-    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`);
+    const path = withAuth('/api/presence', config.room, auth);
+    const ws = new WebSocket(sameOriginWebSocketUrl(path));
     let pingTimer: number | null = null;
     ws.onopen = () => {
       pingTimer = window.setInterval(() => ws.send('ping'), 30000);

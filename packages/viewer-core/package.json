@@ -1,0 +1,23 @@
+{
+  "name": "@xroomcast/viewer-core",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@xroomcast/protocol": "*",
+    "@xroomcast/sync": "*"
+  },
+  "peerDependencies": {
+    "@pixiv/three-vrm": "^3.4.0",
+    "three": "^0.172.0"
+  },
+  "devDependencies": {
+    "@pixiv/three-vrm": "^3.4.0",
+    "@types/three": "^0.172.0",
+    "three": "^0.172.0",
+    "typescript": "^5.7.0"
+  }
+}
