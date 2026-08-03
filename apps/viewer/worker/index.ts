@@ -14,7 +14,14 @@
  * `authorize()` に集約してあるので、独自の会員認証を載せる場合はそちらを差し替える。
  */
 import { DurableObject } from 'cloudflare:workers';
-import { authorize, resolveShortLink, type AuthEnv, type AuthScope } from './auth';
+import {
+  authorize,
+  issueAdmission,
+  resolveShortLink,
+  verifyAdmission,
+  type AuthEnv,
+  type AuthScope,
+} from './auth';
 
 interface Env extends AuthEnv {
   ASSETS: Fetcher;
@@ -172,16 +179,39 @@ async function authorizeViewer(env: Env, request: Request, url: URL, room: strin
   });
 }
 
+/** 視聴できない理由。視聴側はこれを見て表示を出し分け、復帰も待つ */
+type Unavailable = 'full' | 'stopped';
+
+const UNAVAILABLE_TEXT: Record<Unavailable, string> = {
+  full: '満員です(同時に見られる人数の上限に達しています)',
+  stopped: '配信は一時停止中です',
+};
+
 /**
- * 満員のときに視聴を断る。配信者は対象外(自分の配信を確認できなくなるため)。
+ * いま視聴できるか。配信者は対象外(自分の配信を確認できなくなるため)。
  * presenceだけでなくSFUの購読も止めないと、映像と音声は見られたままになり
  * 課金の歯止めにならない
  */
-async function rejectIfFull(env: Env, request: Request, url: URL, room: string): Promise<Response | null> {
+async function viewingBlockedBy(
+  env: Env,
+  request: Request,
+  url: URL,
+  room: string,
+): Promise<Unavailable | null> {
   const guard = await readRoomGuard(env, room);
-  if (!guard.full) return null;
+  const reason: Unavailable | null = guard.stopped ? 'stopped' : guard.full ? 'full' : null;
+  if (!reason) return null;
+  // 配信者は自分の配信を確認できる必要がある
   if (await allows(env, request, url, 'broadcaster', room)) return null;
-  return json(503, { error: '満員です(同時に見られる人数の上限に達しています)' });
+  /**
+   * 入室済みの人は満員でも通す。人数の判定は入室のときに済んでいるので、
+   * ここで断ると**入室した本人が自分で作った満員に締め出される**。
+   * 停止中は配信者の意思なので入室証があっても止める
+   */
+  if (reason === 'full' && (await verifyAdmission(env, room, url.searchParams.get('adm')))) {
+    return null;
+  }
+  return reason;
 }
 
 /**
@@ -223,20 +253,31 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
     url.pathname === '/api/sfu/publisher' ||
     url.pathname === '/api/sfu/audio-publisher' ||
     url.pathname === '/api/sfu/audio-publisher-beacon';
+  const statusEndpoint = url.pathname === '/api/sfu/status';
   if (!publisherEndpoint) {
     if (!(await authorizeViewer(env, request, url, room)).ok) {
       return json(403, { error: 'forbidden(視聴トークンが必要です)' });
     }
-    const full = await rejectIfFull(env, request, url, room);
-    if (full) return full;
+    /**
+     * 状態APIだけは満員でも停止中でも答える。**理由を知り、復帰を待つための
+     * 唯一の窓口**なので、ここを塞ぐと視聴側は何も分からないまま
+     * 重いセッション作成を再試行し続けることになる(KV読みだけなので安い)
+     */
+    if (!statusEndpoint) {
+      const blocked = await viewingBlockedBy(env, request, url, room);
+      if (blocked) return json(503, { error: UNAVAILABLE_TEXT[blocked] });
+    }
   }
 
   if (request.method === 'GET' && url.pathname === '/api/sfu/status') {
     const audio = await readAudioPublisher(env, room);
     const publisher = await readPublisher(env, room);
+    const blocked = await viewingBlockedBy(env, request, url, room);
     return json(200, {
       enabled: sfuConfigured,
       room,
+      /** 満員・停止中の理由。視聴側はこれを見て表示を出し分け、解除を待つ */
+      unavailable: blocked,
       publisherReady: publisher !== null,
       /**
        * 視聴側が「配信元が変わったか」を判定するために返す。
@@ -537,6 +578,13 @@ interface RoomSettings {
   chat: boolean;
   /** 同時接続の上限(null で無制限)。URLが出回ったときの課金の歯止め */
   capacity: number | null;
+  /**
+   * 緊急停止。立てると新規の視聴を断り、視聴中のクライアントへも停止を伝える。
+   * **既に流れている購読をサーバーから切ることはできない**(視聴者のSFU
+   * セッションを追跡していないため)。止まるのは新規の受け入れと、
+   * 停止を受け取ったクライアントの自発的な切断
+   */
+  stopped: boolean;
   /** 視聴者の気配の公開範囲 */
   peerMode: PeerMode;
   /**
@@ -555,6 +603,7 @@ function defaultSettings(env: Env): RoomSettings {
     access: env.REQUIRE_VIEWER_TOKEN === '1' ? 'invite' : 'public',
     chat: true,
     capacity: null,
+    stopped: false,
     peerMode: DEFAULT_PEER_MODE,
     viewerVoice: false,
   };
@@ -572,6 +621,7 @@ function mergeSettings(current: RoomSettings, patch: Record<string, unknown>): R
   if (patch.peerMode === 'all' || patch.peerMode === 'broadcaster' || patch.peerMode === 'off') {
     next.peerMode = patch.peerMode;
   }
+  if (typeof patch.stopped === 'boolean') next.stopped = patch.stopped;
   if (typeof patch.viewerVoice === 'boolean') next.viewerVoice = patch.viewerVoice;
   return next;
 }
@@ -594,6 +644,8 @@ interface RoomGuard {
    * その値をDOがここへ写している(切り替わったときだけ書くのでKVの書き込みは増えない)
    */
   full?: boolean;
+  /** 緊急停止中か */
+  stopped?: boolean;
 }
 
 async function readRoomGuard(env: Env, room: string): Promise<RoomGuard> {
@@ -716,6 +768,13 @@ export class Presence extends DurableObject<Env> {
     const history = (await this.ctx.storage.get<ChatItem[]>(CHAT_HISTORY_KEY)) ?? [];
     pair[1].send(JSON.stringify({ type: 'history', items: history }));
     pair[1].send(JSON.stringify({ type: 'settings', settings }));
+    /**
+     * 入室証。ここまで来た＝人数の判定を通ったということなので、
+     * 以後のSFUリクエストで「入室済み」を示せるようにする
+     */
+    const roomName = (await this.ctx.storage.get<string>(ROOM_NAME_KEY)) ?? DEFAULT_ROOM;
+    const admission = await issueAdmission(this.env, roomName);
+    if (admission) pair[1].send(JSON.stringify({ type: 'admission', token: admission }));
     // 旧クライアント向け(設定メッセージを知らない版でも気配は動く)
     pair[1].send(JSON.stringify({ type: 'peerMode', mode: settings.peerMode }));
     // 途中入室者にも現在のアバターを配る(配信者が切り替えた状態に追いつける)
@@ -872,10 +931,20 @@ export class Presence extends DurableObject<Env> {
     const full = settings.capacity !== null && this.viewerCount(closing) >= settings.capacity;
     const room = (await this.ctx.storage.get<string>(ROOM_NAME_KEY)) ?? DEFAULT_ROOM;
     const current = await this.env.SFU_STATE.get<RoomGuard>(settingsKey(room), 'json');
-    if (current?.access === settings.access && Boolean(current?.full) === full) return;
+    if (
+      current?.access === settings.access &&
+      Boolean(current?.full) === full &&
+      Boolean(current?.stopped) === settings.stopped
+    ) {
+      return;
+    }
     await this.env.SFU_STATE.put(
       settingsKey(room),
-      JSON.stringify({ access: settings.access, full } satisfies RoomGuard),
+      JSON.stringify({
+        access: settings.access,
+        full,
+        stopped: settings.stopped,
+      } satisfies RoomGuard),
     );
   }
 

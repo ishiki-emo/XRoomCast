@@ -296,13 +296,48 @@ let presenceCount: number | null = null;
 
 // 配信停止中オーバーレイ: 最後のポーズパケットから5秒空いたら表示する
 const offlineOverlay = document.getElementById('offline-overlay') as HTMLDivElement;
+const offlineBadge = offlineOverlay.querySelector('.badge') as HTMLDivElement;
+const offlineHint = offlineOverlay.querySelector('.hint') as HTMLDivElement;
 const OFFLINE_AFTER_MS = 5000;
 let lastLivePacketAt = 0;
-if (watchMode) {
-  window.setInterval(() => {
-    offlineOverlay.hidden = performance.now() - lastLivePacketAt < OFFLINE_AFTER_MS;
-  }, 1000);
+
+/**
+ * 視聴できない理由。満員・停止中は「待てば戻る状態」なので、
+ * 配信が来ていないだけの状態とは区別して案内する
+ */
+const UNAVAILABLE_TEXT: Record<string, { badge: string; hint: string }> = {
+  full: {
+    badge: '🈵 満員です',
+    hint: '同時に見られる人数の上限に達しています。空きが出ると自動でつながります',
+  },
+  stopped: {
+    badge: '⏸ 配信は一時停止中です',
+    hint: '配信者が再開すると自動で動き出します',
+  },
+};
+let unavailableReason: string | null = null;
+
+function refreshOfflineOverlay(): void {
+  if (unavailableReason) {
+    const text = UNAVAILABLE_TEXT[unavailableReason];
+    offlineBadge.textContent = text?.badge ?? '視聴できません';
+    offlineHint.textContent = text?.hint ?? '';
+    offlineOverlay.hidden = false;
+    return;
+  }
+  offlineBadge.textContent = '⏸ 配信は停止中です';
+  offlineHint.textContent = '配信が始まると自動で動き出します';
+  offlineOverlay.hidden = performance.now() - lastLivePacketAt < OFFLINE_AFTER_MS;
 }
+
+/** 満員・停止中は視聴モードでなくても知らせる(理由が分からないと待てない) */
+function setUnavailable(reason: string | null): void {
+  unavailableReason = reason;
+  if (reason) setStatus(UNAVAILABLE_TEXT[reason]?.badge ?? '視聴できません', true);
+  refreshOfflineOverlay();
+}
+
+if (watchMode) window.setInterval(refreshOfflineOverlay, 1000);
 
 // ---- 待機モーション ----
 // 配信が届いていない間はクライアント側で生成した待機モーションを再生し、
@@ -434,7 +469,12 @@ interface PresenceMessage extends PeerState {
   audio?: { sessionId: string; trackName: string } | null;
   /** type==='settings': ルーム設定 */
   settings?: RoomSettings;
+  /** type==='admission': 入室証 */
+  token?: string;
 }
+
+/** 入室証。presence接続後に届く。トランスポートを作り直しても持ち回る */
+let admissionToken = '';
 
 /** 気配の公開範囲(サーバーが決める。配信者コンソールから変更できる) */
 let peerMode: 'all' | 'broadcaster' | 'off' = 'all';
@@ -570,6 +610,10 @@ function connectPresence(): void {
         peers.apply(data.id, data);
       } else if (data.type === 'peerLeft' && typeof data.id === 'string') {
         peers.remove(data.id);
+      } else if (data.type === 'admission' && typeof data.token === 'string') {
+        // 入室が許された証明。満員のルームでもSFUを使えるようにする
+        admissionToken = data.token;
+        if (liveTransport instanceof SfuTransport) liveTransport.setAdmission(admissionToken);
       } else if (data.type === 'settings' && data.settings) {
         applyRoomSettings(data.settings);
       } else if (data.type === 'peerMode') {
@@ -616,6 +660,8 @@ function connectTransport(kind: string, url: string): void {
     kind === 'sfu' ? new SfuTransport(url, config.room, auth) : new WebSocketTransport(url);
   if (liveTransport instanceof SfuTransport) {
     liveTransport.onAudioTrack = handleAudioTrack;
+    liveTransport.onUnavailable = setUnavailable;
+    if (admissionToken) liveTransport.setAdmission(admissionToken);
     // presenceで既に音声の開始を受け取っていれば、その状態から始める
     liveTransport.setAudioPublisher(remoteAudio);
   }

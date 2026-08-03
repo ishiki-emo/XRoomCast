@@ -274,6 +274,11 @@
         <button class="small" data-chat="off">止める</button>
       </div>
       <div class="row">
+        <span class="ar-label">配信を</span>
+        <button class="small" data-stopped="off">見せる</button>
+        <button class="small danger" data-stopped="on">緊急停止</button>
+      </div>
+      <div class="row">
         <span class="ar-label">同時に見られる人数</span>
         <input id="s-capacity" type="number" min="1" max="10000" placeholder="無制限" style="width: 7em" />
         <button class="small" id="s-capacity-apply">適用</button>
@@ -284,7 +289,10 @@
         ・「招待された人だけ」にすると、<strong>視聴URL経由で開いた人しか繋がりません</strong>。ルーム名を推測しただけでは入れません<br />
         ・<strong>人数の上限は課金の歯止めです。</strong>URLが出回ったときに視聴者数とともに費用が伸びるのを防げます<br />
         ・数えるのは<strong>視聴者だけ</strong>です。この配信者コンソールは含みません<br />
-        ・上限に達すると、以降の入室はモーションと音声ごと断られます(既に見ている人はそのままです)
+        ・上限に達すると、以降の入室はモーションと音声ごと断られます(既に見ている人はそのままです)<br />
+        ・<strong>緊急停止</strong>は新規の視聴を断り、視聴中の画面にも「一時停止中」を出します。
+        ただし<strong>既に流れている購読をサーバーから切ることはできません</strong>(視聴者の接続を追跡していないため)。
+        配信そのものを止めるには、マイクとブリッジ(またはHMD配信)も停止してください
       </p>
 
       <h2>🧍 アバター</h2>

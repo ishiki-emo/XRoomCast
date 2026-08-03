@@ -26,6 +26,7 @@ export function setupRoomSettings(options: {
   const capacityClear = document.getElementById('s-capacity-clear') as HTMLButtonElement;
   const accessButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-access]')];
   const chatButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-chat]')];
+  const stoppedButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-stopped]')];
   const peerButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-peermode]')];
 
   let current: RoomSettings | null = null;
@@ -37,6 +38,7 @@ export function setupRoomSettings(options: {
   }
 
   function describe(settings: RoomSettings): string {
+    if (settings.stopped) return '⏸ 緊急停止中(新規の視聴を断っています)';
     const access = settings.access === 'invite' ? '招待された人だけ' : '誰でも視聴できます';
     const capacity = settings.capacity === null ? '人数無制限' : `上限 ${settings.capacity} 人`;
     const chat = settings.chat ? 'コメントあり' : 'コメント停止中';
@@ -53,6 +55,9 @@ export function setupRoomSettings(options: {
     }
     for (const button of peerButtons) {
       button.classList.toggle('on', button.dataset.peermode === settings.peerMode);
+    }
+    for (const button of stoppedButtons) {
+      button.classList.toggle('on', (button.dataset.stopped === 'on') === settings.stopped);
     }
     // 入力中の値を上書きしないよう、フォーカスが無いときだけ反映する
     if (document.activeElement !== capacityInput) {
@@ -85,6 +90,9 @@ export function setupRoomSettings(options: {
   }
   for (const button of chatButtons) {
     button.addEventListener('click', () => void patch({ chat: button.dataset.chat === 'on' }));
+  }
+  for (const button of stoppedButtons) {
+    button.addEventListener('click', () => void patch({ stopped: button.dataset.stopped === 'on' }));
   }
   for (const button of peerButtons) {
     button.addEventListener('click', () => {

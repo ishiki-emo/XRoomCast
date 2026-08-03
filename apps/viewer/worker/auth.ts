@@ -178,6 +178,55 @@ export async function authorize(
 }
 
 /**
+ * 入室証。**「同時に見られる人数」の判定は入室のときに済んでいる**という事実を、
+ * あとから来るSFUのリクエストへ持ち回るためのもの。
+ *
+ * これが無いと、上限1のルームで1人目が入室した瞬間にそのルームは満員になり、
+ * **入室した本人がSFUを断られる**(自分で自分を締め出す)。かといって満員でも
+ * SFUを通すと、入室を断られた人が直接購読できてしまい課金の歯止めにならない。
+ * 「入室を許された人か」を判定できる必要がある。
+ *
+ * 形式は `<失効時刻>.<HMAC>`。サーバーは状態を持たない
+ */
+const ADMISSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+async function admissionSignature(secret: string, room: string, expiresAt: number): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    textEncoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    textEncoder.encode(`admit:${room}:${expiresAt}`),
+  );
+  return base64url(new Uint8Array(signature)).slice(0, TOKEN_LENGTH);
+}
+
+/** 入室を許した時点で発行する。ROOM_SECRETが無ければ発行しない(従来どおり) */
+export async function issueAdmission(env: AuthEnv, room: string, now = Date.now()): Promise<string | null> {
+  if (!env.ROOM_SECRET) return null;
+  const expiresAt = now + ADMISSION_TTL_MS;
+  return `${expiresAt}.${await admissionSignature(env.ROOM_SECRET, room, expiresAt)}`;
+}
+
+export async function verifyAdmission(
+  env: AuthEnv,
+  room: string,
+  token: string | null,
+  now = Date.now(),
+): Promise<boolean> {
+  if (!env.ROOM_SECRET || !token) return false;
+  const [rawExpiry, signature] = token.split('.');
+  const expiresAt = Number(rawExpiry);
+  if (!Number.isFinite(expiresAt) || expiresAt < now || !signature) return false;
+  return timingSafeEqual(await admissionSignature(env.ROOM_SECRET, room, expiresAt), signature);
+}
+
+/**
  * 短縮URLのルーム解決。
  * - /<用途>/<ルーム>/<トークン>: ROOM_SECRETから導出したトークンと照合する新形式
  * - /<用途>/<キー>: 既定ルーム専用の旧形式(WATCH_KEY / BROADCAST_KEY)

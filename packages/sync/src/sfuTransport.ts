@@ -53,8 +53,13 @@ const FORCE_RECONNECT_MS = 120000;
  */
 const AUDIO_JITTER_TARGET_MS = 100;
 
+/** 視聴できない理由。満員・停止中はエラーではなく「待てば戻る状態」として扱う */
+export type UnavailableReason = 'full' | 'stopped';
+
 interface SfuStatus {
   enabled: boolean;
+  /** 満員・停止中の理由。null なら視聴できる */
+  unavailable?: UnavailableReason | null;
   publisherReady: boolean;
   /** 配信元の識別子。古いサーバーは返さないため null/undefined を許容する */
   publisherSessionId?: string | null;
@@ -64,6 +69,11 @@ interface SfuStatus {
 export class SfuTransport implements Transport {
   onPacket: ((bytes: Uint8Array) => void) | null = null;
   onStatus: ((text: string, isError?: boolean) => void) | null = null;
+  /**
+   * 視聴できない理由の変化(満員・停止中・解除でnull)。
+   * エラーではなく「待てば戻る状態」なので、画面はこれを見て案内を出す
+   */
+  onUnavailable: ((reason: UnavailableReason | null) => void) | null = null;
   /** 配信者の音声トラックを購読できたとき(track)と配信終了時(null)に呼ばれる */
   onAudioTrack: ((track: MediaStreamTrack | null) => void) | null = null;
 
@@ -86,6 +96,12 @@ export class SfuTransport implements Transport {
   private channelOpen = false;
   /** 最後に通知した音声トラック。同じものを重複して通知しないために持つ */
   private lastAudioTrack: MediaStreamTrack | null = null;
+  /** 最後に通知した「視聴できない理由」。変化したときだけ伝える */
+  private lastUnavailable: UnavailableReason | null = null;
+  /** 入室証(presenceで入室が許された証明) */
+  private admission = '';
+  /** connect() が呼ばれたか。入室証の到着で勝手に接続を始めないための番人 */
+  private started = false;
   private mySessionId: string | null = null;
   /** いま購読している配信元。これが変わったときだけ張り直す必要がある */
   private subscribedPublisher: string | null = null;
@@ -108,11 +124,37 @@ export class SfuTransport implements Transport {
 
   connect(): void {
     this.closedByUser = false;
+    this.started = true;
     void this.open();
   }
 
+  /**
+   * 入室証。presenceで入室が許された時点でサーバーから渡される。
+   * 満員のルームでも「自分は入室済み」を示すのに使う
+   * (これが無いと、上限1のルームで入室した本人が締め出される)
+   */
+  setAdmission(token: string): void {
+    if (token === this.admission) return;
+    this.admission = token;
+    /**
+     * 入室証は presence 経由で届くため、**SFUの接続開始に間に合わないことがある。**
+     * その場合いったん満員と判定されてしまうので、届いた時点で待たずに再確認する
+     * (でないと次のポーリングまで最大2分、満員表示のままになる)
+     */
+    if (this.started && !this.closedByUser && !this.channelOpen) {
+      this.stopIdlePoll();
+      void this.open();
+    }
+  }
+
+  /** 入室証を付けたパス。ヘッダを使えない経路もあるのでクエリで運ぶ */
+  private path(path: string): string {
+    const base = withAuth(path, this.room, this.auth);
+    return this.admission ? `${base}&adm=${encodeURIComponent(this.admission)}` : base;
+  }
+
   private async apiPost(path: string, body: unknown): Promise<Record<string, unknown>> {
-    const res = await fetch(`${this.baseUrl}${withAuth(path, this.room, this.auth)}`, {
+    const res = await fetch(`${this.baseUrl}${this.path(path)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(await this.auth.headers()) },
       body: JSON.stringify(body),
@@ -142,7 +184,14 @@ export class SfuTransport implements Transport {
      */
     const precheck = await this.fetchStatus();
     if (generation !== this.generation) return;
+    if (precheck?.unavailable) {
+      // 満員・停止中。セッションは作らず、解除されるのを状態APIで待つ
+      this.reportUnavailable(precheck.unavailable);
+      this.startIdlePoll(generation);
+      return;
+    }
     if (precheck && !precheck.publisherReady) {
+      this.reportUnavailable(null);
       this.onStatus?.('配信の開始を待っています');
       this.startIdlePoll(generation);
       return;
@@ -375,6 +424,23 @@ export class SfuTransport implements Transport {
     }
   }
 
+  /** 接続だけを畳む(再開の余地は残す)。購読の記録も一緒に消す */
+  private teardownPeer(): void {
+    this.pc?.close();
+    this.pc = null;
+    this.channelOpen = false;
+    this.reportAudioTrack(null);
+    this.audioSubscribedSession = null;
+    this.subscribedPublisher = null;
+  }
+
+  /** 視聴できない理由の変化だけを通知する(同じ理由を繰り返し伝えない) */
+  private reportUnavailable(reason: UnavailableReason | null): void {
+    if (reason === this.lastUnavailable) return;
+    this.lastUnavailable = reason;
+    this.onUnavailable?.(reason);
+  }
+
   private startWatchdog(generation: number): void {
     this.stopWatchdog();
     this.watchdogTimer = window.setInterval(() => {
@@ -401,7 +467,7 @@ export class SfuTransport implements Transport {
   /** 状態API(KV読みのみ)。取得できなければ null */
   private async fetchStatus(): Promise<SfuStatus | null> {
     try {
-      const res = await fetch(`${this.baseUrl}${withAuth('/api/sfu/status', this.room, this.auth)}`, {
+      const res = await fetch(`${this.baseUrl}${this.path('/api/sfu/status')}`, {
         headers: await this.auth.headers(),
       });
       if (!res.ok) return null;
@@ -436,16 +502,32 @@ export class SfuTransport implements Transport {
         return;
       }
 
+      /**
+       * 満員・停止中。**セッションは作らずここで待つ。**
+       * 以前は満員をエラー扱いして指数バックオフに入れていたため、枠は1秒で
+       * 空くのに復帰まで最大16秒かかっていた。状態APIはKV読みだけなので、
+       * ここで短い間隔で待つほうが軽く、しかも速い。
+       *
+       * ただし**既に繋がっているなら無視する。** 満員は「新しく入れない」で
+       * あって「いま見ている人が見られない」ではない。ここで畳むと、
+       * 満員になった瞬間に視聴者全員が追い出されてしまう
+       * (停止中は配信者の意思なので、繋がっていても畳む)
+       */
+      const blocking =
+        status.unavailable === 'stopped' || Boolean(status.unavailable && !this.channelOpen);
+      if (blocking) {
+        this.reportUnavailable(status.unavailable ?? null);
+        if (this.pc) this.teardownPeer();
+        // 解除は数秒で起きうるので、間隔は伸ばさず最短のまま待つ
+        this.idlePollMs = IDLE_POLL_MS;
+        schedule();
+        return;
+      }
+      this.reportUnavailable(null);
+
       if (!status.publisherReady) {
         // 配信していないだけ。ここでセッションを作り直していたのが浪費の原因だった
-        if (this.pc) {
-          this.pc.close();
-          this.pc = null;
-          this.channelOpen = false;
-          this.reportAudioTrack(null);
-          this.audioSubscribedSession = null;
-          this.subscribedPublisher = null;
-        }
+        if (this.pc) this.teardownPeer();
         this.onStatus?.('配信の開始を待っています');
         schedule();
         return;

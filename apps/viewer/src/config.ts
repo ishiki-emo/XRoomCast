@@ -58,6 +58,8 @@ export interface RoomSettings {
   chat: boolean;
   /** 同時接続の上限(null で無制限) */
   capacity: number | null;
+  /** 緊急停止。新規の視聴を断り、視聴中の画面にも停止中を出す */
+  stopped: boolean;
   /** 視聴者の気配の公開範囲 */
   peerMode: 'all' | 'broadcaster' | 'off';
   /** 視聴者の発話(プッシュトゥトーク)。未実装のため常に false */
