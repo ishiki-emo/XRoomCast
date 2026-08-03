@@ -45,16 +45,75 @@ async function api(path: string, body: unknown): Promise<Record<string, unknown>
 let pc: RTCPeerConnection | null = null;
 let stream: MediaStream | null = null;
 let sessionId: string | null = null;
+/** 送信中のトラックを差し替えるための送信者。セッションを作り直さないために保つ */
+let sender: RTCRtpSender | null = null;
 let heartbeatTimer: number | null = null;
 
-async function start(): Promise<void> {
-  setStatus('マイクを取得中...');
+async function acquireMic(): Promise<MediaStreamTrack> {
   stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
   const track = stream.getAudioTracks()[0];
   if (!track) throw new Error('マイクが見つかりません');
+  return track;
+}
 
+/** マイクのデバイスを解放する(録音インジケータを消すため、停止時は必ず呼ぶ) */
+function releaseMic(): void {
+  stream?.getTracks().forEach((t) => t.stop());
+  stream = null;
+}
+
+function startHeartbeat(): void {
+  if (heartbeatTimer !== null) window.clearInterval(heartbeatTimer);
+  heartbeatTimer = window.setInterval(() => void register(), HEARTBEAT_MS);
+}
+
+/** セッションごと破棄する(接続が壊れたときと、タブを閉じるとき) */
+function teardown(): void {
+  if (heartbeatTimer !== null) {
+    window.clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+  releaseMic();
+  pc?.close();
+  pc = null;
+  sender = null;
+  sessionId = null;
+}
+
+/**
+ * マイク配信の開始。
+ *
+ * **2回目以降はセッションを作り直さない。** 作り直すと配信セッションIDが変わり、
+ * 視聴側は新しいIDを購読し直すことになる。古いトラックのトランシーバは
+ * 閉じられないまま残るため、ON/OFFのたびに視聴側へ積み上がっていく
+ * (先頭を拾うと死んだトラックを掴んで無音になる、という不具合の温床でもあった)。
+ * セッションと送信者を保ったまま、送るトラックだけを差し替える。
+ */
+async function start(): Promise<void> {
+  setStatus('マイクを取得中...');
+  const track = await acquireMic();
+
+  if (pc && sender && sessionId) {
+    try {
+      await sender.replaceTrack(track);
+      await register();
+      startHeartbeat();
+      setStatus('🔴 音声配信中(このタブを閉じると停止します)', 'live');
+      return;
+    } catch (error) {
+      // 再利用できなければ作り直す(セッションが失効している場合など)
+      console.warn('[broadcast] 既存セッションの再利用に失敗。作り直します:', error);
+      teardown();
+      await createSession(await acquireMic());
+      return;
+    }
+  }
+  await createSession(track);
+}
+
+async function createSession(track: MediaStreamTrack): Promise<void> {
   setStatus('SFUセッションを作成中...');
   pc = new RTCPeerConnection({ iceServers: [{ urls: CF_STUN_URL }], bundlePolicy: 'max-bundle' });
 
@@ -65,12 +124,16 @@ async function start(): Promise<void> {
     if (connection.connectionState === 'connected') {
       setStatus('🔴 音声配信中(このタブを閉じると停止します)', 'live');
     } else if (connection.connectionState === 'failed' || connection.connectionState === 'disconnected') {
-      setStatus(`WebRTC接続が${connection.connectionState}になりました。停止して再開してください`, 'error');
+      // 壊れた接続を再利用しないよう捨てる(次の開始で作り直される)
+      teardown();
+      markMic(false);
+      setStatus(`WebRTC接続が${connection.connectionState}になりました。もう一度開始してください`, 'error');
     }
   };
   connection.onconnectionstatechange = updateConnectionStatus;
 
   const transceiver = pc.addTransceiver(track, { direction: 'sendonly' });
+  sender = transceiver.sender;
 
   const session = await api('/api/sfu/sessions/new', {});
   sessionId = String(session.sessionId);
@@ -88,7 +151,7 @@ async function start(): Promise<void> {
   await pc.setRemoteDescription(answer);
 
   await register();
-  heartbeatTimer = window.setInterval(() => void register(), HEARTBEAT_MS);
+  startHeartbeat();
 
   setStatus('接続中...', 'live');
   updateConnectionStatus();
@@ -99,6 +162,12 @@ async function register(): Promise<void> {
   await api('/api/sfu/audio-publisher', { sessionId, trackName: TRACK_NAME });
 }
 
+/**
+ * マイク配信の停止。
+ * **セッションは残したまま**送信トラックだけ外す(再開時に作り直さないため)。
+ * マイクのデバイスは解放するので、ブラウザの録音インジケータは消える。
+ * セッションごと畳むのはタブを閉じるときと接続が壊れたときだけ
+ */
 async function stop(silent = false): Promise<void> {
   if (heartbeatTimer !== null) {
     window.clearInterval(heartbeatTimer);
@@ -109,11 +178,12 @@ async function stop(silent = false): Promise<void> {
   } catch {
     // 登録解除の失敗は無視(15分で自動失効する)
   }
-  stream?.getTracks().forEach((t) => t.stop());
-  stream = null;
-  pc?.close();
-  pc = null;
-  sessionId = null;
+  try {
+    await sender?.replaceTrack(null);
+  } catch {
+    // 外せなくてもマイクは解放するので送信は止まる
+  }
+  releaseMic();
   if (!silent) setStatus('停止しました');
 }
 
@@ -149,7 +219,8 @@ toggleButton.addEventListener('click', () => {
     });
 });
 
-// タブを閉じるときに登録解除を試みる(失敗しても15分で自動失効)
+// タブを閉じるときに登録解除を試みる(失敗しても15分で自動失効)。
+// ここではセッションごと畳む(停止ボタンと違い、再開の余地がないため)
 window.addEventListener('pagehide', () => {
   if (sessionId) {
     // sendBeaconはヘッダを付けられないので資格情報はクエリで運ぶ
@@ -157,6 +228,7 @@ window.addEventListener('pagehide', () => {
       withAuth('/api/sfu/audio-publisher-beacon', config.room, auth),
       JSON.stringify({ sessionId: null }),
     );
+    teardown();
   }
 });
 

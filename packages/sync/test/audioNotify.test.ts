@@ -103,6 +103,37 @@ describe('マイクの入れ直しと音声トラックの通知', () => {
     expect(h.notified).toEqual(['first', null, 'second']);
   });
 
+  it('同じ配信元の入れ直しでは購読をやり直さない(トランシーバが増えないこと)', async () => {
+    const track = makeTrack('mic');
+    h.receivers = [track];
+    h.ontrackTrack = track;
+
+    let subscribeCount = 0;
+    const internals = h.transport as unknown as {
+      apiPost: (path: string, body: unknown) => Promise<Record<string, unknown>>;
+    };
+    const inner = internals.apiPost.bind(h.transport);
+    internals.apiPost = (path, body) => {
+      if (path === '/api/sfu/tracks/new') subscribeCount += 1;
+      return inner(path, body);
+    };
+
+    h.transport.setAudioPublisher({ sessionId: 'mic-session', trackName: 'mic' });
+    await settle();
+
+    // 配信者はセッションを作り直さないので、入れ直しても sessionId は同じ
+    for (let i = 0; i < 3; i += 1) {
+      h.transport.setAudioPublisher(null);
+      await settle();
+      h.transport.setAudioPublisher({ sessionId: 'mic-session', trackName: 'mic' });
+      await settle();
+    }
+
+    // 購読は最初の1回だけ。以降は通知だけ
+    expect(subscribeCount).toBe(1);
+    expect(h.notified).toEqual(['mic', null, 'mic', null, 'mic', null, 'mic']);
+  });
+
   it('再ネゴシエーションが起きない回でも、生きているトラックを通知する', async () => {
     const only = makeTrack('reused');
     h.receivers = [only];

@@ -42,6 +42,17 @@ const IDLE_POLL_MAX_MS = 120000;
  */
 const FORCE_RECONNECT_MS = 120000;
 
+/**
+ * 音声受信のバッファ目標(ミリ秒)。
+ *
+ * 配信者がマイクを入れ直しても購読を作り直さない方針にしたため、送信が
+ * 途切れて再開したときのバッファの厚みがそのまま残り、遅延として出る
+ * (受信側は途切れを検知すると安全側に倒してバッファを厚くする)。
+ * 再開のたびに目標値を入れ直して詰める。小さくするほど遅延は減るが、
+ * 回線が不安定なときに途切れやすくなるため、ポーズの目標遅延と同程度にしている
+ */
+const AUDIO_JITTER_TARGET_MS = 100;
+
 interface SfuStatus {
   enabled: boolean;
   publisherReady: boolean;
@@ -241,19 +252,35 @@ export class SfuTransport implements Transport {
     if (!audio) {
       /**
        * 配信者が音声を止めた。
-       * ここを `audioSubscribedSession !== null` で囲ってはいけない。
-       * 購読が一度でも失敗するとその条件が成立せず、通知済みトラックの記録
-       * (lastAudioTrack)が残り続け、**以後のマイク入れ直しが全て
-       * 「同じトラック」と見なされて通知されなくなる**
+       *
+       * **audioSubscribedSession は消さない。** これは「どの配信元をSFUで
+       * 購読しているか」であって、配信者がマイクを切ってもSFU側の購読
+       * (トランシーバ)は残っている。ここで消すと再開時に購読をやり直し、
+       * トランシーバがON/OFFのたびに増えていく。
+       *
+       * 一方、通知の記録は必ず消す。条件を付けて囲うと、購読に失敗した回に
+       * 記録が残り、以後の入れ直しが全て「同じトラック」と見なされて
+       * 通知されなくなる
        */
-      this.audioSubscribedSession = null;
       this.reportAudioTrack(null);
       return;
     }
     // DataChannel開通前に購読を始めると再ネゴシエーションが衝突する。
     // 開通後に channel.onopen から改めて適用されるので、ここでは待つだけでよい
     if (!this.channelOpen || !this.pc || !this.mySessionId) return;
-    if (audio.sessionId === this.audioSubscribedSession) return;
+
+    if (audio.sessionId === this.audioSubscribedSession) {
+      /**
+       * 同じ配信元を購読済み。配信者がマイクを入れ直しただけなので、
+       * **購読をやり直さない。** やり直すとSFUがトランシーバを追加し、
+       * ON/OFFのたびに視聴側へ積み上がっていく。
+       * 停止時に通知を消しているので、いま来ているトラックを拾い直して
+       * 「また鳴り始めた」ことだけ伝える(再生側は繋ぎ直さず音量を戻すだけ)
+       */
+      const live = this.liveAudioTrack();
+      if (live) this.reportAudioTrack(live);
+      return;
+    }
 
     // ontrack が発火したかどうかを見るため、購読前の通知内容を控えておく
     const beforeTrack = this.lastAudioTrack;
@@ -286,17 +313,49 @@ export class SfuTransport implements Transport {
        * 拾うときも readyState を見て、生きているものの最新を選ぶ
        */
       if (this.lastAudioTrack === beforeTrack) {
-        const received =
-          this.pc
-            .getReceivers()
-            .map((r) => r.track)
-            .filter((t): t is MediaStreamTrack => t?.kind === 'audio' && t.readyState === 'live')
-            .at(-1) ?? null;
+        const received = this.liveAudioTrack();
         if (received) this.reportAudioTrack(received);
       }
     } catch (error) {
       console.warn('[sfu] 音声トラックの購読に失敗:', error);
     }
+  }
+
+  /**
+   * 音声受信のバッファ目標を明示して、再開時に残った遅延を詰める。
+   * 対応していない環境では何も起こらない(既定の適応制御のまま)
+   */
+  private tuneAudioLatency(): void {
+    if (!this.pc) return;
+    for (const receiver of this.pc.getReceivers()) {
+      if (receiver.track?.kind !== 'audio') continue;
+      // 型定義に無い/環境によって有無が変わるプロパティなので緩く扱う
+      const tunable = receiver as unknown as Record<string, unknown>;
+      try {
+        if ('jitterBufferTarget' in tunable) {
+          tunable.jitterBufferTarget = AUDIO_JITTER_TARGET_MS; // 標準API(ミリ秒)
+        } else if ('playoutDelayHint' in tunable) {
+          tunable.playoutDelayHint = AUDIO_JITTER_TARGET_MS / 1000; // 旧Chrome(秒)
+        }
+      } catch {
+        // 設定できない環境では既定のまま
+      }
+    }
+  }
+
+  /**
+   * いま受け取れている音声トラック。
+   * 配信元が入れ替わると古い(終了した)トラックが残るため、生きているものの
+   * 最新を選ぶ。先頭を拾うと死んだトラックを掴んで無音になる
+   */
+  private liveAudioTrack(): MediaStreamTrack | null {
+    return (
+      this.pc
+        ?.getReceivers()
+        .map((r) => r.track)
+        .filter((t): t is MediaStreamTrack => t?.kind === 'audio' && t.readyState === 'live')
+        .at(-1) ?? null
+    );
   }
 
   /**
@@ -306,6 +365,7 @@ export class SfuTransport implements Transport {
   private reportAudioTrack(track: MediaStreamTrack | null): void {
     if (track === this.lastAudioTrack) return;
     this.lastAudioTrack = track;
+    if (track) this.tuneAudioLatency();
     // 再生側で例外が出ても購読処理は続ける。両者は独立した関心事で、
     // 実際に再生側の例外が ontrack と購読処理の両方を巻き込んで止めていた
     try {
