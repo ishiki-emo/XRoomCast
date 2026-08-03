@@ -48,9 +48,12 @@ if (watchMode) document.body.classList.add('watch');
  * vite開発サーバーはsrcを直接配信していて接続先が無いので繋ぎにいかない。
  *
  * 以前は `location.protocol === 'https:'` で判定していたが、それだと
- * `wrangler dev`(http://127.0.0.1)でコメントも同接も動かなかった
+ * `wrangler dev`(http://127.0.0.1)でコメントも同接も動かなかった。
+ *
+ * 視聴モードでなくてもSFUを使うなら繋ぐ。**配信者の音声の開始/停止は
+ * presence経由で届く**ため、繋がっていないと音声が一切鳴らなくなる
  */
-if (watchMode && import.meta.env.PROD) {
+if (import.meta.env.PROD && (watchMode || config.transport === 'sfu')) {
   window.addEventListener('DOMContentLoaded', () => connectPresence());
 }
 const demoButton = document.getElementById('demo-button') as HTMLButtonElement;
@@ -333,12 +336,10 @@ let currentAudioTrack: MediaStreamTrack | null = null;
 
 function handleAudioTrack(track: MediaStreamTrack | null): void {
   currentAudioTrack = track;
+  // ボタンの表示を先に決める。再生側で例外が出ても操作手段だけは残す
+  audioButton.hidden = track === null;
   spatialAudio.setTrack(track);
-  if (!track) {
-    audioButton.hidden = true;
-    return;
-  }
-  audioButton.hidden = false;
+  if (!track) return;
   // 配信者側が停止するとリモートトラックはmuteになる(endedは飛んでこない)
   const hideIfCurrent = (): void => {
     if (currentAudioTrack === track) audioButton.hidden = true;
@@ -425,6 +426,8 @@ interface PresenceMessage extends PeerState {
   id?: string;
   /** type==='peerMode': 気配の公開範囲 */
   mode?: string;
+  /** type==='audio': 配信者の音声パブリッシャー(停止時はnull) */
+  audio?: { sessionId: string; trackName: string } | null;
 }
 
 /** 気配の公開範囲(サーバーが決める。配信者コンソールから変更できる) */
@@ -496,6 +499,18 @@ function applyRemoteAvatar(url: string, name?: string): void {
   void loadVRM(url);
 }
 
+/**
+ * 配信者の音声パブリッシャー。presenceから届く最新値を保持する。
+ * トランスポートより先に届くことも、張り直しでトランスポートが差し替わることも
+ * あるため、状態はここに持ってトランスポート生成時に流し込む
+ */
+let remoteAudio: { sessionId: string; trackName: string } | null = null;
+
+function applyRemoteAudio(audio: { sessionId: string; trackName: string } | null): void {
+  remoteAudio = audio;
+  if (liveTransport instanceof SfuTransport) liveTransport.setAudioPublisher(audio);
+}
+
 // 同接・コメント用WebSocket。切断時は少し間を置いて張り直す
 function connectPresence(): void {
   setChatEnabled(false);
@@ -523,6 +538,10 @@ function connectPresence(): void {
         spatialChat.setHistory(data.items.map((it) => it.text));
       } else if (data.type === 'avatar' && typeof data.url === 'string') {
         applyRemoteAvatar(data.url, data.name);
+      } else if (data.type === 'audio') {
+        // 配信者のマイクの開始/停止。以前は視聴側が30秒ごとに問い合わせていたが、
+        // サーバーからの押し出しに変えた(視聴者×1日2,880回のリクエストが消える)
+        applyRemoteAudio(data.audio ?? null);
       } else if (data.type === 'peer' && typeof data.id === 'string') {
         peers.apply(data.id, data);
       } else if (data.type === 'peerLeft' && typeof data.id === 'string') {
@@ -571,6 +590,8 @@ function connectTransport(kind: string, url: string): void {
     kind === 'sfu' ? new SfuTransport(url, config.room, auth) : new WebSocketTransport(url);
   if (liveTransport instanceof SfuTransport) {
     liveTransport.onAudioTrack = handleAudioTrack;
+    // presenceで既に音声の開始を受け取っていれば、その状態から始める
+    liveTransport.setAudioPublisher(remoteAudio);
   }
   liveTransport.onStatus = (text, isError) => setStatus(text, isError);
   liveTransport.onPacket = (bytes) => {

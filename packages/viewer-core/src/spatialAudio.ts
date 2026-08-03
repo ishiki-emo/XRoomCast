@@ -27,6 +27,8 @@ export class SpatialAudio {
   private spatial = true;
   private muted = true;
   private hasTrack = false;
+  /** いまWebAudioへ繋いでいるトラック。同じものを繋ぎ直さないために持つ */
+  private currentTrack: MediaStreamTrack | null = null;
 
   constructor(camera: THREE.Camera, scene: THREE.Scene) {
     this.listener = new THREE.AudioListener();
@@ -48,18 +50,55 @@ export class SpatialAudio {
     return this.spatial;
   }
 
-  /** 音声トラックの差し替え(nullで解除) */
+  /**
+   * 前のソースを切り離す(繋ぎっぱなしにするとノードが積み上がる)。
+   *
+   * `positional.source` は一度設定されると切断しても残るため、
+   * 「解除 → 再設定」と続けて呼ぶと**既に切れているノードをもう一度切ろうとして**
+   * WebAudioが InvalidAccessError を投げる。切れていること自体が目的なので握り潰す。
+   * これを放置すると setTrack の呼び出し元まで例外が伝播し、
+   * 音声ONボタンの表示や購読処理そのものが巻き添えで止まる
+   */
+  private detachSource(): void {
+    if (!this.positional.source) return;
+    try {
+      this.positional.disconnect();
+    } catch {
+      // 既に切断済み。何もしなくてよい
+    }
+  }
+
+  /**
+   * 音声トラックの差し替え(nullで解除)。
+   *
+   * **同じトラックに対してノードを作り直してはいけない。** WebRTCのリモート
+   * トラックから MediaStreamAudioSourceNode を作り直すと、Chromeでは以降
+   * 無音になる(1つのトラックを複数のソースノードで受けられない)。
+   * 配信者がマイクを入れ直すとSFUはトランシーバを使い回すため、
+   * ここには**前回と同一のトラックオブジェクト**が渡ってくる。
+   *
+   * そのため解除時もノードは残したままにし、音の開始/停止は
+   * ルーティング(音量とミュート)だけで行う。ノードを作り直すのは
+   * 本当に別のトラックへ変わったときだけ。
+   */
   setTrack(track: MediaStreamTrack | null): void {
-    // 前のソースを切り離す(繋ぎっぱなしにするとノードが積み上がる)
-    if (this.positional.source) this.positional.disconnect();
+    if (track !== null && track === this.currentTrack) {
+      // 同じ配信が戻ってきた。繋ぎ直さずに鳴らし直すだけでよい
+      this.hasTrack = true;
+      this.applyRouting();
+      return;
+    }
 
     if (!track) {
-      this.sink.srcObject = null;
+      // ノードとstreamは繋いだまま残す(同じトラックの復帰に備える)
       this.hasTrack = false;
       this.applyRouting();
       return;
     }
 
+    // 別のトラックに変わった(再接続などでPeerConnectionごと入れ替わった場合)
+    this.detachSource();
+    this.currentTrack = track;
     const stream = new MediaStream([track]);
     this.sink.srcObject = stream;
     void this.sink.play().catch(() => {});

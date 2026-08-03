@@ -42,9 +42,6 @@ const IDLE_POLL_MAX_MS = 120000;
  */
 const FORCE_RECONNECT_MS = 120000;
 
-/** 音声トラック購読の確認間隔(配信者が後から音声を開始しても拾えるように) */
-const AUDIO_CHECK_INTERVAL_MS = 30000;
-
 interface SfuStatus {
   enabled: boolean;
   publisherReady: boolean;
@@ -65,8 +62,19 @@ export class SfuTransport implements Transport {
   private retryTimer: number | null = null;
   private watchdogTimer: number | null = null;
   private lastPacketAt = 0;
-  private audioTimer: number | null = null;
+  /** サーバーから届いた最新の音声パブリッシャー(未接続時はここで保留する) */
+  private pendingAudio: { sessionId: string; trackName: string } | null = null;
   private audioSubscribedSession: string | null = null;
+  /**
+   * 音声の購読処理を直列化する。押し出しの受信と接続完了が同時に走ると、
+   * 同じトラックへ tracks/new を二重に投げ、再ネゴシエーションが衝突して
+   * ontrack が発火しないことがある(音声ONボタンが出たり出なかったりする)
+   */
+  private audioQueue: Promise<void> = Promise.resolve();
+  /** DataChannelが開通しているか。開通前に購読を始めると上記の衝突を招く */
+  private channelOpen = false;
+  /** 最後に通知した音声トラック。同じものを重複して通知しないために持つ */
+  private lastAudioTrack: MediaStreamTrack | null = null;
   private mySessionId: string | null = null;
   /** いま購読している配信元。これが変わったときだけ張り直す必要がある */
   private subscribedPublisher: string | null = null;
@@ -110,6 +118,10 @@ export class SfuTransport implements Transport {
     this.stopIdlePoll();
     this.pc?.close();
     this.pc = null;
+    this.channelOpen = false;
+    // 新しいセッションではトラックの購読もやり直しになる
+    this.audioSubscribedSession = null;
+    this.lastAudioTrack = null;
 
     /**
      * セッションを作る前に配信元の有無を確認する。
@@ -146,7 +158,7 @@ export class SfuTransport implements Transport {
       // 配信者の音声トラックが届いたら通知する
       pc.ontrack = (event) => {
         if (generation !== this.generation) return;
-        if (event.track.kind === 'audio') this.onAudioTrack?.(event.track);
+        if (event.track.kind === 'audio') this.reportAudioTrack(event.track);
       };
 
       const sub = await this.apiPost('/api/sfu/subscribe', { sessionId: session.sessionId });
@@ -166,8 +178,10 @@ export class SfuTransport implements Transport {
         // あり、そこで戻すとバックオフが伸びず、短い周期でセッションを
         // 作り直し続けることになる(実際に無料枠を使い切る原因になっていた)
         this.lastPacketAt = performance.now();
+        this.channelOpen = true;
         this.startWatchdog(generation);
-        this.startAudioCheck(generation);
+        // 接続前にサーバーから届いていた音声の状態をここで適用する
+        this.queueAudioApply();
         this.onStatus?.('SFU接続完了(DataChannel購読中)');
       };
       channel.onmessage = (event) => {
@@ -203,53 +217,101 @@ export class SfuTransport implements Transport {
   }
 
   /**
-   * 音声トラックの購読。ステータスAPIで音声パブリッシャーの有無を確認し、
-   * 居れば同じPeerConnectionにトラックを追加購読する(サーバー主導の再ネゴシエーション)。
-   * 配信者が途中から音声を始めるケースに備えて定期的に確認する
+   * 音声パブリッシャーの変化を伝える。
+   *
+   * 以前はここを30秒間隔のポーリングで賄っていたが、視聴者1人あたり1日2,880回に
+   * なるうえ反応も遅かった。いまはサーバーが presence WebSocket で押し出し、
+   * 呼び出し側(視聴ページ)がそれをこのメソッドへ渡す。
+   * 接続前に呼ばれた場合は状態だけ覚えておき、接続後に適用する。
    */
-  private startAudioCheck(generation: number): void {
-    this.stopAudioCheck();
-    const check = async (): Promise<void> => {
-      if (generation !== this.generation || !this.pc || !this.mySessionId) return;
-      try {
-        const status = await this.fetchStatus();
-        if (!status) return;
-        const audio = status.audio;
-        if (!audio) {
-          // 配信者が音声を止めた(登録解除された)
-          if (this.audioSubscribedSession !== null) {
-            this.audioSubscribedSession = null;
-            this.onAudioTrack?.(null);
-          }
-          return;
-        }
-        if (audio.sessionId === this.audioSubscribedSession) return;
-        if (generation !== this.generation || !this.pc) return;
-
-        const result = await this.apiPost('/api/sfu/tracks/new', {
-          sessionId: this.mySessionId,
-          tracks: [{ location: 'remote', sessionId: audio.sessionId, trackName: audio.trackName }],
-        });
-        const desc = result.sessionDescription as { type: string; sdp: string } | undefined;
-        if (result.requiresImmediateRenegotiation && desc) {
-          await this.pc.setRemoteDescription({ type: 'offer', sdp: desc.sdp });
-          const answer = await this.pc.createAnswer();
-          await this.pc.setLocalDescription(answer);
-          await this.apiPost('/api/sfu/renegotiate', { sessionId: this.mySessionId, sdp: answer.sdp });
-        }
-        this.audioSubscribedSession = audio.sessionId;
-      } catch (error) {
-        console.warn('[sfu] 音声トラックの購読確認に失敗:', error);
-      }
-    };
-    void check();
-    this.audioTimer = window.setInterval(() => void check(), AUDIO_CHECK_INTERVAL_MS);
+  setAudioPublisher(audio: { sessionId: string; trackName: string } | null): void {
+    this.pendingAudio = audio;
+    this.queueAudioApply();
   }
 
-  private stopAudioCheck(): void {
-    if (this.audioTimer !== null) {
-      window.clearInterval(this.audioTimer);
-      this.audioTimer = null;
+  /** 購読処理を直列に積む(同時に走らせない) */
+  private queueAudioApply(): void {
+    this.audioQueue = this.audioQueue.then(() => this.applyAudioPublisher()).catch(() => {});
+  }
+
+  private async applyAudioPublisher(): Promise<void> {
+    const generation = this.generation;
+    const audio = this.pendingAudio;
+
+    if (!audio) {
+      /**
+       * 配信者が音声を止めた。
+       * ここを `audioSubscribedSession !== null` で囲ってはいけない。
+       * 購読が一度でも失敗するとその条件が成立せず、通知済みトラックの記録
+       * (lastAudioTrack)が残り続け、**以後のマイク入れ直しが全て
+       * 「同じトラック」と見なされて通知されなくなる**
+       */
+      this.audioSubscribedSession = null;
+      this.reportAudioTrack(null);
+      return;
+    }
+    // DataChannel開通前に購読を始めると再ネゴシエーションが衝突する。
+    // 開通後に channel.onopen から改めて適用されるので、ここでは待つだけでよい
+    if (!this.channelOpen || !this.pc || !this.mySessionId) return;
+    if (audio.sessionId === this.audioSubscribedSession) return;
+
+    // ontrack が発火したかどうかを見るため、購読前の通知内容を控えておく
+    const beforeTrack = this.lastAudioTrack;
+    try {
+      const result = await this.apiPost('/api/sfu/tracks/new', {
+        sessionId: this.mySessionId,
+        tracks: [{ location: 'remote', sessionId: audio.sessionId, trackName: audio.trackName }],
+      });
+      if (generation !== this.generation || !this.pc) return;
+      const desc = result.sessionDescription as { type: string; sdp: string } | undefined;
+      if (result.requiresImmediateRenegotiation && desc) {
+        await this.pc.setRemoteDescription({ type: 'offer', sdp: desc.sdp });
+        const answer = await this.pc.createAnswer();
+        await this.pc.setLocalDescription(answer);
+        await this.apiPost('/api/sfu/renegotiate', { sessionId: this.mySessionId, sdp: answer.sdp });
+      }
+      this.audioSubscribedSession = audio.sessionId;
+
+      /**
+       * 再ネゴシエーションが起きた回は ontrack が正しいトラックを通知済みなので、
+       * ここでは何もしない。**上書きすると壊れる。**
+       *
+       * 配信者がマイクを入れ直すと新しい配信セッションになるため、視聴側の
+       * セッションには**古い(死んだ)トラックのトランシーバが残ったまま**
+       * 新しいものが増える。そこで `getReceivers()` の先頭を拾うと、
+       * 1本目=死んだトラックを掴んでしまい、無音になる。
+       *
+       * 再ネゴシエーションが起きなかった回(SFUがトランシーバを使い回した回)は
+       * ontrack が発火しないので、そのときだけ受信側から拾う。
+       * 拾うときも readyState を見て、生きているものの最新を選ぶ
+       */
+      if (this.lastAudioTrack === beforeTrack) {
+        const received =
+          this.pc
+            .getReceivers()
+            .map((r) => r.track)
+            .filter((t): t is MediaStreamTrack => t?.kind === 'audio' && t.readyState === 'live')
+            .at(-1) ?? null;
+        if (received) this.reportAudioTrack(received);
+      }
+    } catch (error) {
+      console.warn('[sfu] 音声トラックの購読に失敗:', error);
+    }
+  }
+
+  /**
+   * 音声トラックの通知。ontrack と購読完了の両方から呼ばれるため、
+   * 同じトラックを二度通知しない(再生側でノードを繋ぎ直す無駄を避ける)
+   */
+  private reportAudioTrack(track: MediaStreamTrack | null): void {
+    if (track === this.lastAudioTrack) return;
+    this.lastAudioTrack = track;
+    // 再生側で例外が出ても購読処理は続ける。両者は独立した関心事で、
+    // 実際に再生側の例外が ontrack と購読処理の両方を巻き込んで止めていた
+    try {
+      this.onAudioTrack?.(track);
+    } catch (error) {
+      console.warn('[sfu] 音声トラックの受け渡しで例外:', error);
     }
   }
 
@@ -319,8 +381,8 @@ export class SfuTransport implements Transport {
         if (this.pc) {
           this.pc.close();
           this.pc = null;
-          this.stopAudioCheck();
-          this.onAudioTrack?.(null);
+          this.channelOpen = false;
+          this.reportAudioTrack(null);
           this.audioSubscribedSession = null;
           this.subscribedPublisher = null;
         }
@@ -334,7 +396,14 @@ export class SfuTransport implements Transport {
       const changed =
         typeof status.publisherSessionId === 'string' &&
         status.publisherSessionId !== this.subscribedPublisher;
-      const stalledTooLong = performance.now() - this.lastPacketAt > FORCE_RECONNECT_MS;
+      /**
+       * 保険の張り直し。ただし音声を購読できているならセッションは生きている
+       * 証拠なので張り直さない。**張り直すと音声が途切れる**ため、
+       * 「モーションだけ止まっている配信」で2分ごとに音が切れることになる
+       */
+      const stalledTooLong =
+        this.audioSubscribedSession === null &&
+        performance.now() - this.lastPacketAt > FORCE_RECONNECT_MS;
 
       if (!this.pc || changed || stalledTooLong) {
         this.stopIdlePoll();
@@ -383,9 +452,12 @@ export class SfuTransport implements Transport {
     if (this.closedByUser) return;
     this.stopWatchdog();
     this.stopIdlePoll();
-    this.stopAudioCheck();
     this.pc?.close();
     this.pc = null;
+    this.channelOpen = false;
+    // 張り直すと同じトラックを購読し直す必要がある
+    this.audioSubscribedSession = null;
+    this.lastAudioTrack = null;
     const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** this.retryCount);
     this.retryCount += 1;
     this.onStatus?.(
@@ -403,7 +475,9 @@ export class SfuTransport implements Transport {
     this.generation += 1;
     this.stopWatchdog();
     this.stopIdlePoll();
-    this.stopAudioCheck();
+    this.channelOpen = false;
+    this.audioSubscribedSession = null;
+    this.lastAudioTrack = null;
     if (this.retryTimer !== null) {
       window.clearTimeout(this.retryTimer);
       this.retryTimer = null;

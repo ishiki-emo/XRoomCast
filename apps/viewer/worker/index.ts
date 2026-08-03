@@ -158,11 +158,17 @@ async function allows(
   return (await authorize(env, request, url, { scope, room })).ok;
 }
 
-/** 音声パブリッシャーの登録/解除(bodyのsessionIdがnullなら解除) */
+/**
+ * 音声パブリッシャーの登録/解除(bodyのsessionIdがnullなら解除)。
+ * KVに保存したうえでPresence DOへ渡し、接続中の視聴者へ即座に配る。
+ * KVは途中入室者の状態APIのため、DOは押し出しのために保つ
+ */
 async function handleAudioPublisherUpdate(request: Request, env: Env, room: string): Promise<Response> {
   const body = (await request.json()) as { sessionId?: string | null; trackName?: string };
+  const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
   if (!body.sessionId) {
     await env.SFU_STATE.delete(audioPublisherKey(room));
+    await stub.fetch('https://presence.internal/audio', { method: 'POST', body: 'null' });
     return json(200, { ok: true, cleared: true });
   }
   const record: AudioPublisherRecord = {
@@ -171,6 +177,10 @@ async function handleAudioPublisherUpdate(request: Request, env: Env, room: stri
     updatedAt: Date.now(),
   };
   await env.SFU_STATE.put(audioPublisherKey(room), JSON.stringify(record));
+  await stub.fetch('https://presence.internal/audio', {
+    method: 'POST',
+    body: JSON.stringify(record),
+  });
   return json(200, { ok: true });
 }
 
@@ -460,6 +470,12 @@ const PEER_MIN_INTERVAL_MS = 60;
 const MESSAGE_MAX_BYTES = 2048;
 /** 現在のアバター(接続時に配り、切り替え時にブロードキャストする) */
 const AVATAR_KEY = 'avatar';
+/**
+ * 現在の音声パブリッシャー。アバターと同じく接続時に配り、変化時に配信する。
+ * 以前は視聴側が30秒ごとに状態APIを叩いて確認していたが、視聴者×1日2,880回に
+ * なるため押し出しに変えた。応答も速くなる(配信者がマイクを入れた瞬間に届く)
+ */
+const AUDIO_KEY = 'audio';
 /** 視聴者の気配の公開範囲 */
 const PEER_MODE_KEY = 'peer-mode';
 /**
@@ -518,6 +534,30 @@ export class Presence extends DurableObject<Env> {
       return new Response(null, { status: 204 });
     }
 
+    /**
+     * 音声パブリッシャーの更新(Worker本体が配信者キーを検証したうえで呼ぶ内部API)。
+     * 変化があったときだけ配る。配信者は4分ごとにハートビートを送ってくるので、
+     * 毎回配ると無意味な再購読を誘発する
+     */
+    if (path === '/audio') {
+      const next = (await request.json()) as AudioPublisherRecord | null;
+      const current = (await this.ctx.storage.get<AudioPublisherRecord>(AUDIO_KEY)) ?? null;
+      if (!next) {
+        if (current) {
+          await this.ctx.storage.delete(AUDIO_KEY);
+          this.broadcastJson({ type: 'audio', audio: null });
+        }
+        return new Response(null, { status: 204 });
+      }
+      await this.ctx.storage.put(AUDIO_KEY, next);
+      // 登録が途絶えたまま配信者が落ちた場合に備え、失効時刻に自分で気づく
+      await this.ctx.storage.setAlarm(next.updatedAt + PUBLISHER_FRESH_MS);
+      if (current?.sessionId !== next.sessionId || current?.trackName !== next.trackName) {
+        this.broadcastJson({ type: 'audio', audio: { sessionId: next.sessionId, trackName: next.trackName } });
+      }
+      return new Response(null, { status: 204 });
+    }
+
     if (request.headers.get('Upgrade') !== 'websocket') {
       return new Response('expected websocket', { status: 426 });
     }
@@ -540,7 +580,38 @@ export class Presence extends DurableObject<Env> {
     // 途中入室者にも現在のアバターを配る(配信者が切り替えた状態に追いつける)
     const avatar = await this.ctx.storage.get<AvatarRecord>(AVATAR_KEY);
     if (avatar) pair[1].send(JSON.stringify({ type: 'avatar', ...avatar }));
+    // 音声も同様。既に配信中なら入室した時点で購読できる
+    const audio = await this.freshAudio();
+    if (audio) {
+      pair[1].send(
+        JSON.stringify({ type: 'audio', audio: { sessionId: audio.sessionId, trackName: audio.trackName } }),
+      );
+    }
     return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  /** 保存済みの音声パブリッシャー。失効していれば null */
+  private async freshAudio(): Promise<AudioPublisherRecord | null> {
+    const record = (await this.ctx.storage.get<AudioPublisherRecord>(AUDIO_KEY)) ?? null;
+    if (!record || Date.now() - record.updatedAt > PUBLISHER_FRESH_MS) return null;
+    return record;
+  }
+
+  /**
+   * 音声パブリッシャーの失効。
+   * 配信者のタブが登録解除を送れずに閉じた場合、これが唯一の終了通知になる
+   * (視聴側のポーリングを廃止したため、サーバーから知らせる必要がある)
+   */
+  override async alarm(): Promise<void> {
+    const record = (await this.ctx.storage.get<AudioPublisherRecord>(AUDIO_KEY)) ?? null;
+    if (!record) return;
+    if (Date.now() - record.updatedAt <= PUBLISHER_FRESH_MS) {
+      // ハートビートで更新されていた。次の失効時刻へ繰り延べる
+      await this.ctx.storage.setAlarm(record.updatedAt + PUBLISHER_FRESH_MS);
+      return;
+    }
+    await this.ctx.storage.delete(AUDIO_KEY);
+    this.broadcastJson({ type: 'audio', audio: null });
   }
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
