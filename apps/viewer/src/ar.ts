@@ -233,13 +233,33 @@ export class ArController {
       await this.renderer.xr.setSession(session);
       this.refSpace = this.renderer.xr.getReferenceSpace();
       console.log(`[ar] 参照空間: ${this.floorSpace ? 'local-floor(床が原点)' : 'local(頭が原点)'}`);
-      // 最初のフレームで正面へ仮置きする(掴んで引き寄せる手間をなくす)
-      this.initialPlacementPending = true;
+      /**
+       * HMDは最初のフレームで正面へ仮置きする(掴んで引き寄せる手間をなくす)。
+       *
+       * **スマホでは仮置きしない。** 画面いっぱいに等身大のアバターが
+       * いきなり現れると、どこに何が起きたのか分からず戸惑う。
+       * 床をタップして自分で置いてもらうほうが、AR であることが伝わる
+       */
+      const phone = this.domOverlayActive;
+      this.initialPlacementPending = !phone;
+      if (phone) {
+        this.placed = false;
+        this.setAvatarVisible(false);
+        this.elements.hint.textContent = '床にカメラを向けて、丸が出たらタップして置いてください';
+      }
 
       const viewerSpace = await session.requestReferenceSpace('viewer');
       this.hitTestSource = (await session.requestHitTestSource?.({ space: viewerSpace })) ?? null;
       if (!this.hitTestSource) {
-        this.elements.hint.textContent = 'この端末はヒットテスト(床検知)に未対応です';
+        /**
+         * 床検知が無いと「タップして置く」ができない。
+         * スマホで隠したままにすると**永久にアバターが出てこない**ので、
+         * 正面への仮置きへ切り替える
+         */
+        this.initialPlacementPending = true;
+        this.setAvatarVisible(true);
+        this.elements.hint.textContent =
+          'この端末は床検知に未対応です(正面に置きます)';
       }
 
       session.addEventListener('end', () => this.cleanup());
@@ -642,7 +662,16 @@ export class ArController {
     this.avatarRoot.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
     this.placed = true;
     this.reticle.visible = false;
-    this.elements.hint.textContent = '設置しました(つかんで移動できます)';
+    this.setAvatarVisible(true);
+    this.elements.hint.textContent = '設置しました(ドラッグで移動・ピンチで拡大縮小)';
+  }
+
+  /**
+   * 設置前にアバターを隠す。
+   * スマホでは「置く」操作を挟むので、置くまでは見せない
+   */
+  private setAvatarVisible(visible: boolean): void {
+    this.avatarRoot.visible = visible;
   }
 
   /** AR中のヒント表示を差し替える(AR外では何もしない) */
@@ -676,6 +705,8 @@ export class ArController {
   requestPlacement(): void {
     if (!this.session) return;
     this.placed = false;
+    // スマホは置くまで隠す(初回と同じ流れにする)。HMDは掴んで動かせるので出したまま
+    if (this.domOverlayActive) this.setAvatarVisible(false);
     this.elements.hint.textContent = '床にかざして、タップ/トリガーで置き直し';
   }
 
@@ -694,6 +725,8 @@ export class ArController {
     this.floorSpace = false;
     this.initialPlacementPending = false;
     this.reticle.visible = false;
+    // AR中に隠していた場合があるので、通常表示へ必ず戻す
+    this.setAvatarVisible(true);
     this.heldTarget[0] = null;
     this.heldTarget[1] = null;
     this.twoHand = null;

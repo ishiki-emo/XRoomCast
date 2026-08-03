@@ -68,7 +68,8 @@ export function setupBroadcastPreview(options: {
   const backgroundColor = new THREE.Color(0x1b1b22);
   scene.background = backgroundColor;
 
-  const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 50);
+  // ニアクリップは視聴ページと揃える(HMD配信中はこのカメラがXRで使われる)
+  const camera = new THREE.PerspectiveCamera(35, 1, 0.02, 30);
   camera.position.set(0, 1.35, 2.6);
 
   const controls = new OrbitControls(camera, canvas);

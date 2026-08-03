@@ -86,11 +86,22 @@ const renderer = createRenderer();
 
 const scene = new THREE.Scene();
 
+/**
+ * ニアクリップは短いほど、アバターに顔を近づけても中が透けない。
+ * 既定の0.1(10cm)はARでは長く、**そこまで寄っていないつもりでも
+ * 顔や体の内側が見えてしまう**(WebXRのdepthNearにもこの値が渡る)。
+ *
+ * 代わりにファーを詰めて深度バッファの精度を確保する。ARで50mも要らないうえ、
+ * near/farの比が広いほど接地影などでZファイティングが出やすい
+ */
+const CAMERA_NEAR = 0.02;
+const CAMERA_FAR = 30;
+
 const camera = new THREE.PerspectiveCamera(
   30,
   stage.clientWidth / Math.max(1, stage.clientHeight),
-  0.1,
-  50,
+  CAMERA_NEAR,
+  CAMERA_FAR,
 );
 camera.position.set(0, 1.3, 2.5);
 
