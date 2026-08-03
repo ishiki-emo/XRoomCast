@@ -21,7 +21,7 @@ import { PlaceholderAvatar } from '@xroomcast/viewer-core';
 import { SpatialAudio, isSpatialAudioSupported } from '@xroomcast/viewer-core';
 import { SpatialChat } from './spatialChat';
 import { SpatialPanel } from './spatialUI';
-import { setupScenery } from '@xroomcast/viewer-core';
+import { createStage, setupScenery } from '@xroomcast/viewer-core';
 import { PoseStreamPlayer } from '@xroomcast/sync';
 import type { Transport } from '@xroomcast/sync';
 import { WebSocketTransport } from '@xroomcast/sync';
@@ -133,6 +133,25 @@ scene.add(avatarRoot);
 const contactShadow = new ContactShadow(avatarRoot);
 
 /**
+ * AR中のステージ(足元の台と浮遊装飾)。
+ * **avatarRoot にぶら下げる**ので、設置した場所へステージごと乗り、
+ * ミニ 1/10 にすれば卓上サイズのジオラマになる
+ */
+const arStage = createStage();
+avatarRoot.add(arStage.object);
+/** ステージを出すか(AR中のみ意味を持つ。ARを抜けたら常に隠す) */
+let stageEnabled = true;
+
+function setStageEnabled(on: boolean): void {
+  stageEnabled = on;
+  arStage.setVisible(on && arController.isPresenting);
+  settingsPanel.setActive(on ? 'stage-on' : 'stage-off');
+  for (const button of stageButtons) {
+    button.classList.toggle('active', (button.dataset.stage === 'on') === on);
+  }
+}
+
+/**
  * AR中のアバターサイズのプリセット。等身大と、卓上に置ける1/10のミニサイズ。
  * ピンチ/両手グリップによる無段階の伸縮とは併用でき、ボタンはそこへジャンプする
  */
@@ -180,6 +199,15 @@ const settingsPanel = new SpatialPanel({
       onSelect: (value) => setSpatialAudio(value === 'spatial'),
     },
     {
+      title: 'ステージ',
+      options: [
+        { label: '出す', value: 'stage-on' },
+        { label: '隠す', value: 'stage-off' },
+      ],
+      initial: 'stage-on',
+      onSelect: (value) => setStageEnabled(value === 'stage-on'),
+    },
+    {
       title: '他の視聴者',
       options: [
         { label: '表示する', value: 'peers-on' },
@@ -210,6 +238,8 @@ const arController = new ArController(
   (arActive) => {
     scenery.setARMode(arActive);
     contactShadow.setARActive(arActive);
+    // ステージはAR専用(PC表示には scenery.ts の装飾があるので出さない)
+    arStage.setVisible(arActive && stageEnabled);
   },
 );
 // ピンチ/両手グリップで無段階に変えたときもUIの選択状態を追従させる
@@ -225,6 +255,7 @@ const sizeButtons = [...arControls.querySelectorAll<HTMLButtonElement>('[data-si
 const shadowButtons = [...arControls.querySelectorAll<HTMLButtonElement>('[data-shadow]')];
 const audioButtons = [...arControls.querySelectorAll<HTMLButtonElement>('[data-audio]')];
 const peerButtons = [...arControls.querySelectorAll<HTMLButtonElement>('[data-peers]')];
+const stageButtons = [...arControls.querySelectorAll<HTMLButtonElement>('[data-stage]')];
 
 /** スケールに最も近いプリセット(離れていればnull=どのボタンも選択されない) */
 function nearestSizeMode(scale: number): AvatarSizeMode | null {
@@ -279,6 +310,12 @@ for (const button of peerButtons) {
   button.addEventListener('beforexrselect', (event) => event.preventDefault());
   button.addEventListener('click', () => setPeersVisible(button.dataset.peers === 'on'));
 }
+
+for (const button of stageButtons) {
+  button.addEventListener('beforexrselect', (event) => event.preventDefault());
+  button.addEventListener('click', () => setStageEnabled(button.dataset.stage === 'on'));
+}
+setStageEnabled(stageEnabled);
 
 const replaceButton = document.getElementById('ar-replace') as HTMLButtonElement;
 replaceButton.addEventListener('beforexrselect', (event) => event.preventDefault());
@@ -866,6 +903,7 @@ renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
   netStats.frames += 1;
   const delta = clock.getDelta();
   scenery.update(clock.elapsedTime);
+  arStage.update(clock.elapsedTime);
   placeholder.update(clock.elapsedTime);
   contactShadow.update();
   arController.onFrame(frame);
