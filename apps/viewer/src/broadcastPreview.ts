@@ -63,6 +63,8 @@ export function setupBroadcastPreview(options: {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.xr.enabled = true;
+  // 視聴ページと揃える(threeの既定1.0だと周辺の解像度が落ちてボケる)
+  renderer.xr.setFoveation(0);
 
   const scene = new THREE.Scene();
   const backgroundColor = new THREE.Color(0x1b1b22);

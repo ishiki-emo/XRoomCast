@@ -2,7 +2,15 @@
 <html lang="ja">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      viewport-fit=cover はノッチ端末で画面いっぱいに描くため。
+      拡大したままARに入ると、実装によっては描画解像度が落ちて位置もずれるので
+      ピンチ拡大は抑止する(3Dの拡大縮小はAR中のピンチ操作で行う)
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎭</text></svg>" />
     <title>XRoomCast</title>
     <style>
@@ -473,6 +481,8 @@
           <button class="ar-chip" data-size="life">等身大</button>
           <button class="ar-chip" data-size="mini">ミニ 1/10</button>
           <button class="ar-chip" id="ar-replace">置き直す</button>
+          <!-- ボケの原因切り分け用。実際の描画解像度をヒント欄に出す -->
+          <button class="ar-chip" id="ar-resolution">解像度</button>
         </div>
         <div class="ar-group">
           <span class="ar-label">影</span>

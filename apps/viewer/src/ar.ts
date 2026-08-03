@@ -26,6 +26,51 @@ const SCALE_MAX = 2.5;
 const LASER_DEFAULT_LEN = 1.5;
 /** AR開始時にアバターを置く距離(視線の前方・メートル) */
 const INITIAL_PLACE_DISTANCE = 1.2;
+/**
+ * 描画バッファ倍率の上限。負荷は倍率の二乗で効くので、上げすぎると
+ * 発熱とフレーム落ちを招く
+ */
+const MAX_FRAMEBUFFER_SCALE = 4;
+/** 初回の倍率。端末の「推奨」が極端に低い環境があるので、控えめに上げて始める */
+const INITIAL_FRAMEBUFFER_SCALE = 2;
+/** 次回に使う倍率の保存先(倍率はセッション開始時にしか変えられないため) */
+const SCALE_STORAGE_KEY = 'xroomcast.xrFramebufferScale';
+
+const clampScale = (value: number): number =>
+  Math.min(Math.max(value, 1), MAX_FRAMEBUFFER_SCALE);
+
+/**
+ * 次の描画フレームまで待つ(レイアウトの反映待ち)。
+ * requestAnimationFrame が来ない状況で固まらないよう、時間でも打ち切る
+ */
+function nextLayoutFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    requestAnimationFrame(() => finish());
+    window.setTimeout(finish, 100);
+  });
+}
+
+/**
+ * 使う描画バッファ倍率。`?xrscale=` があればそれを優先する(検証用)。
+ * 無ければ前回セッションで算出した値、それも無ければ初期値
+ */
+function preferredFramebufferScale(): number {
+  const param = Number(new URLSearchParams(location.search).get('xrscale'));
+  if (Number.isFinite(param) && param > 0) return clampScale(param);
+  try {
+    const stored = Number(localStorage.getItem(SCALE_STORAGE_KEY));
+    if (Number.isFinite(stored) && stored > 0) return clampScale(stored);
+  } catch {
+    // localStorageが使えない環境では初期値のまま
+  }
+  return INITIAL_FRAMEBUFFER_SCALE;
+}
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
 
 const _m1 = new THREE.Matrix4();
@@ -101,6 +146,13 @@ export class ArController {
   private initialPlacementPending = false;
   /** スマホAR(コントローラ無し端末)向けのタッチ操作 */
   private readonly touchAR: TouchAR;
+  /** 実際に使った描画バッファ倍率(解像度の診断に出す) */
+  private framebufferScale = 1;
+  /** 実測から算出した、次回に使う倍率 */
+  private suggestedScale = 1;
+  /** AR前のキャンバスの大きさ(終了時に戻す) */
+  private savedSize: { width: number; height: number } | null = null;
+  private savedPixelRatio = 1;
   /** AR機能の探りボード(初回フレームで判定して表示) */
   private probePending = false;
   private probeBoard: THREE.Mesh | null = null;
@@ -230,7 +282,44 @@ export class ArController {
         .then(() => true)
         .catch(() => false);
       this.renderer.xr.setReferenceSpaceType(this.floorSpace ? 'local-floor' : 'local');
+      /**
+       * 描画バッファの倍率。
+       *
+       * WebXRの既定(1.0)は端末の「推奨」解像度で、**画面の物理解像度より
+       * かなり低いことが多い**。3Dだけがボケる原因はたいていこれ。
+       * `getNativeFramebufferScaleFactor` が画面と等倍になる値を返すので、
+       * それを使う(負荷が上がりすぎないよう上限は設ける)。
+       *
+       * **setSession の前に呼ぶ必要がある**(バッファはそこで作られるため)
+       */
+      const nativeScale =
+        (
+          XRWebGLLayer as unknown as {
+            getNativeFramebufferScaleFactor?: (s: XRSession) => number;
+          }
+        ).getNativeFramebufferScaleFactor?.(session) ?? 1;
+      this.framebufferScale = clampScale(Math.max(preferredFramebufferScale(), nativeScale));
+      this.renderer.xr.setFramebufferScaleFactor(this.framebufferScale);
+      /**
+       * **キャンバスを画面いっぱい・フル解像度にしてからセッションを張る。**
+       *
+       * 一部の実装(iOSのARランチャー等)は、XRの描画バッファを
+       * `framebufferScaleFactor` ではなく**キャンバスのCSSサイズ**から決める。
+       * 視聴ページのステージは16:9の小さめの箱なので、そのまま入ると
+       * 極端に低い解像度になる(実測 408x230 = 画面の0.31倍)。
+       * ページを拡大したままARに入るとさらに荒くなるのも同じ理由
+       */
+      this.enterFullResolution();
+      /**
+       * **レイアウトの反映を待ってからセッションを張る。**
+       * 上記のとおり描画バッファがキャンバスのCSSサイズから決まる実装があり、
+       * 広げた直後にセッションを張ると**初回だけ**古い大きさが読まれる
+       * (2回目以降は前回の状態が残っているため成立してしまい、
+       * 「最初の一回だけボケる」という分かりにくい形で出る)
+       */
+      await nextLayoutFrame();
       await this.renderer.xr.setSession(session);
+      this.tuneFramebufferScale(session);
       this.refSpace = this.renderer.xr.getReferenceSpace();
       console.log(`[ar] 参照空間: ${this.floorSpace ? 'local-floor(床が原点)' : 'local(頭が原点)'}`);
       /**
@@ -674,6 +763,74 @@ export class ArController {
     this.avatarRoot.visible = visible;
   }
 
+  /**
+   * キャンバスを画面いっぱい・端末のフル解像度にする。
+   * AR中はカメラ映像の上に描くので、ページ内のレイアウトは関係なくなる
+   */
+  private enterFullResolution(): void {
+    this.savedPixelRatio = this.renderer.getPixelRatio();
+    const size = this.renderer.getSize(new THREE.Vector2());
+    this.savedSize = { width: size.x, height: size.y };
+    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.setSize(window.innerWidth, window.innerHeight, true);
+    // 大きさを読んでレイアウトを同期的に確定させる(反映前に読まれるのを防ぐ)
+    void this.renderer.domElement.offsetWidth;
+  }
+
+  /** AR前のキャンバスの大きさに戻す */
+  private exitFullResolution(): void {
+    if (!this.savedSize) return;
+    this.renderer.setPixelRatio(this.savedPixelRatio);
+    this.renderer.setSize(this.savedSize.width, this.savedSize.height, true);
+    this.savedSize = null;
+  }
+
+  /**
+   * 実際に得られた解像度を測り、次回のセッションで使う倍率を決める。
+   *
+   * **倍率はセッション開始時にしか変えられない**(バッファがそこで作られる)。
+   * 端末が返す「推奨」解像度は環境によって画面の1/3ほどしかないことがあり、
+   * その値は事前には分からない。そこで実測して次回へ持ち越す
+   */
+  private tuneFramebufferScale(session: XRSession): void {
+    const layer = session.renderState.baseLayer;
+    if (!layer) return;
+    const screenWidth = window.innerWidth * window.devicePixelRatio;
+    const ratio = layer.framebufferWidth / Math.max(1, screenWidth);
+    if (!Number.isFinite(ratio) || ratio <= 0) return;
+    // 画面と等倍(ratio=1)になる倍率へ寄せる
+    this.suggestedScale = clampScale(this.framebufferScale / ratio);
+    if (Math.abs(this.suggestedScale - this.framebufferScale) < 0.1) return;
+    try {
+      localStorage.setItem(SCALE_STORAGE_KEY, String(this.suggestedScale));
+    } catch {
+      // 保存できない環境では毎回初期値のまま(実害はない)
+    }
+  }
+
+  /**
+   * 解像度の診断。**ボケの原因が「描画バッファが小さい」のか
+   * 「アプリ側が画面ごと縮小している」のかを切り分ける**ために、
+   * 実測値をそのまま出す(コンソールを見られない端末で確認するため)。
+   *
+   * 3D と画面の比が 1 に近ければ、こちら側で詰められる余地は無い
+   */
+  get resolutionReport(): string {
+    const layer = this.session?.renderState.baseLayer;
+    if (!layer) return 'AR中ではありません';
+    const screenW = Math.round(window.innerWidth * window.devicePixelRatio);
+    const screenH = Math.round(window.innerHeight * window.devicePixelRatio);
+    const ratio = (layer.framebufferWidth / Math.max(1, screenW)).toFixed(2);
+    const canvas = this.renderer.domElement;
+    return [
+      `3D描画 ${layer.framebufferWidth}x${layer.framebufferHeight}`,
+      `画面 ${screenW}x${screenH}(dpr ${window.devicePixelRatio})`,
+      // キャンバスと3Dの大きさが一致するなら、倍率指定は効いていない
+      `キャンバス CSS ${canvas.clientWidth}x${canvas.clientHeight} / 実 ${canvas.width}x${canvas.height}`,
+      `比 ${ratio} / 倍率 ${this.framebufferScale.toFixed(2)}`,
+    ].join(' / ');
+  }
+
   /** AR中のヒント表示を差し替える(AR外では何もしない) */
   showHint(text: string): void {
     if (!this.session) return;
@@ -714,6 +871,7 @@ export class ArController {
     this.removeProbeBoard();
     this.probePending = false;
     this.frameErrorShown = false;
+    this.exitFullResolution();
     this.touchAR.setEnabled(false);
     for (const entry of this.planeOccluders.values()) this.disposeOccluder(entry.mesh);
     this.planeOccluders.clear();

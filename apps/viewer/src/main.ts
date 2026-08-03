@@ -78,6 +78,17 @@ function createRenderer(): THREE.WebGLRenderer {
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.xr.enabled = true;
+  /**
+   * フォービエーションを切る。
+   *
+   * **three の既定は 1.0(最大)** で、視野の中心から離れるほど解像度を落とす。
+   * HMDでは視線が中心にあるので効果的だが、**スマホARでは画面全体を見るので
+   * ただのボケになる**(端末や描画負荷によって効き方が変わるため、
+   * 「きれいなときと落ちるときがある」という見え方になる)。
+   *
+   * 0 = フォービエーションなし(全面フル解像度)
+   */
+  renderer.xr.setFoveation(0);
   stage.appendChild(renderer.domElement);
   return renderer;
 }
@@ -269,6 +280,15 @@ for (const button of peerButtons) {
 const replaceButton = document.getElementById('ar-replace') as HTMLButtonElement;
 replaceButton.addEventListener('beforexrselect', (event) => event.preventDefault());
 replaceButton.addEventListener('click', () => arController.requestPlacement());
+
+/**
+ * 解像度の診断。AR中はコンソールを見られないので、実測値をヒント欄へ出す。
+ * ボケが「描画バッファが小さい」のか「アプリが画面ごと縮小している」のかで
+ * 対処がまったく変わるため、まず測る
+ */
+const resolutionButton = document.getElementById('ar-resolution') as HTMLButtonElement;
+resolutionButton.addEventListener('beforexrselect', (event) => event.preventDefault());
+resolutionButton.addEventListener('click', () => arController.showHint(arController.resolutionReport));
 
 // 設定パネルの開閉(項目が増えて視界を塞ぐため、既定は閉じておく)
 const settingsToggle = document.getElementById('ar-settings-toggle') as HTMLButtonElement;
