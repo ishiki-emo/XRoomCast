@@ -9,7 +9,8 @@ import { setupAvatarConsole } from './avatarConsole';
 import { setupBroadcastPreview, type PreviewHandle, type XrMode } from './broadcastPreview';
 import { withAuth } from '@xroomcast/sync';
 import { createAuth } from './auth';
-import { readConfig, sameOriginWebSocketUrl } from './config';
+import { readConfig, sameOriginWebSocketUrl, type RoomSettings } from './config';
+import { setupRoomSettings } from './roomSettings';
 import { withRoom } from '@xroomcast/sync';
 import { DEFAULT_WRIST_OFFSET, HmdBroadcast, setWristOffset } from './hmdBroadcast';
 import type { PeerState } from '@xroomcast/viewer-core';
@@ -375,28 +376,8 @@ function setupPreview(): void {
 
   setupWristTuner(preview);
 
-  const modeButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-peermode]')];
-  const markMode = (mode: string): void => {
-    for (const button of modeButtons) {
-      button.classList.toggle('on', button.dataset.peermode === mode);
-    }
-  };
-  for (const button of modeButtons) {
-    button.addEventListener('click', () => {
-      const mode = button.dataset.peermode ?? 'all';
-      markMode(mode);
-      void auth
-        .headers()
-        .then((headers) =>
-          fetch(withRoom('/api/peer-mode', config.room), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...headers },
-            body: JSON.stringify({ mode }),
-          }),
-        )
-        .catch(() => setStatus('公開範囲の変更に失敗しました', 'error'));
-    });
-  }
+  // 気配の公開範囲もルーム設定の一部として、まとめてこちらが受け持つ
+  const roomSettings = setupRoomSettings({ room: config.room, auth });
 
   const connect = (): void => {
     const path = withAuth('/api/presence', config.room, auth);
@@ -410,12 +391,13 @@ function setupPreview(): void {
         const data = JSON.parse(String(event.data)) as PeerState & {
           type?: string;
           id?: string;
-          mode?: string;
           url?: string;
+          settings?: RoomSettings;
         };
         if (data.type === 'peer' && data.id) preview.applyPeer(data.id, data);
         else if (data.type === 'peerLeft' && data.id) preview.removePeer(data.id);
-        else if (data.type === 'peerMode' && data.mode) markMode(data.mode);
+        // 別のコンソールから変更された場合もこちらへ反映される
+        else if (data.type === 'settings' && data.settings) roomSettings.apply(data.settings);
         else if (data.type === 'avatar' && data.url) preview.setAvatarUrl(data.url);
       } catch {
         // pong等は無視

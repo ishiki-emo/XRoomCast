@@ -46,6 +46,24 @@ export function sameOriginWebSocketUrl(path: string, loc: Location = location): 
   return `${loc.protocol === 'https:' ? 'wss' : 'ws'}://${loc.host}${path}`;
 }
 
+/**
+ * ルームごとの設定。サーバー(Presence Durable Object)が真の値を持ち、
+ * 接続時と変更時に押し出してくる。**公開配信・非公開配信・イベント会場を
+ * 別物として作らず、ここの切り替えだけで賄う**のが方針
+ */
+export interface RoomSettings {
+  /** public: 誰でも視聴できる / invite: 視聴トークンが要る */
+  access: 'public' | 'invite';
+  /** 匿名コメントの可否 */
+  chat: boolean;
+  /** 同時接続の上限(null で無制限) */
+  capacity: number | null;
+  /** 視聴者の気配の公開範囲 */
+  peerMode: 'all' | 'broadcaster' | 'off';
+  /** 視聴者の発話(プッシュトゥトーク)。未実装のため常に false */
+  viewerVoice: boolean;
+}
+
 export interface AppConfig {
   /** 参加するルーム。SFU・同接・コメントの分離単位 */
   room: string;

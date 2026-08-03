@@ -159,6 +159,32 @@ async function allows(
 }
 
 /**
+ * 視聴の認可。ルーム設定(公開/招待制)を見たうえで判定する。
+ * 設定はKVの写しから読む(認可のたびにDurable Objectを起こさないため)。
+ * 設定が無いルームは REQUIRE_VIEWER_TOKEN の既定に落ちる
+ */
+async function authorizeViewer(env: Env, request: Request, url: URL, room: string) {
+  const guard = await readRoomGuard(env, room);
+  return authorize(env, request, url, {
+    scope: 'viewer',
+    room,
+    requireViewerToken: guard.access === undefined ? undefined : guard.access === 'invite',
+  });
+}
+
+/**
+ * 満員のときに視聴を断る。配信者は対象外(自分の配信を確認できなくなるため)。
+ * presenceだけでなくSFUの購読も止めないと、映像と音声は見られたままになり
+ * 課金の歯止めにならない
+ */
+async function rejectIfFull(env: Env, request: Request, url: URL, room: string): Promise<Response | null> {
+  const guard = await readRoomGuard(env, room);
+  if (!guard.full) return null;
+  if (await allows(env, request, url, 'broadcaster', room)) return null;
+  return json(503, { error: '満員です(同時に見られる人数の上限に達しています)' });
+}
+
+/**
  * 音声パブリッシャーの登録/解除(bodyのsessionIdがnullなら解除)。
  * KVに保存したうえでPresence DOへ渡し、接続中の視聴者へ即座に配る。
  * KVは途中入室者の状態APIのため、DOは押し出しのために保つ
@@ -197,8 +223,12 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
     url.pathname === '/api/sfu/publisher' ||
     url.pathname === '/api/sfu/audio-publisher' ||
     url.pathname === '/api/sfu/audio-publisher-beacon';
-  if (!publisherEndpoint && !(await allows(env, request, url, 'viewer', room))) {
-    return json(403, { error: 'forbidden(視聴トークンが必要です)' });
+  if (!publisherEndpoint) {
+    if (!(await authorizeViewer(env, request, url, room)).ok) {
+      return json(403, { error: 'forbidden(視聴トークンが必要です)' });
+    }
+    const full = await rejectIfFull(env, request, url, room);
+    if (full) return full;
   }
 
   if (request.method === 'GET' && url.pathname === '/api/sfu/status') {
@@ -486,6 +516,90 @@ const PEER_MODE_KEY = 'peer-mode';
 type PeerMode = 'all' | 'broadcaster' | 'off';
 const DEFAULT_PEER_MODE: PeerMode = 'all';
 
+/** ルーム設定の保存キー(Durable Object内) */
+const SETTINGS_KEY = 'settings';
+/**
+ * 自分のルーム名(Durable Object内)。
+ * idFromName で作ったDOは自分の名前を知れないが、KVへ写しを書くのに要るため、
+ * 最初に受け取ったリクエストから覚えておく
+ */
+const ROOM_NAME_KEY = 'room-name';
+
+/**
+ * ルームごとの設定。**公開配信・非公開配信・イベント会場を別物として作らず、
+ * ここの切り替えだけで賄う**のが方針(docs/アーキテクチャ.md)。
+ * 配信者コンソールから実行時に変更でき、デプロイし直す必要はない。
+ */
+interface RoomSettings {
+  /** public: 誰でも視聴できる / invite: 視聴トークンが要る */
+  access: 'public' | 'invite';
+  /** 匿名コメントの可否 */
+  chat: boolean;
+  /** 同時接続の上限(null で無制限)。URLが出回ったときの課金の歯止め */
+  capacity: number | null;
+  /** 視聴者の気配の公開範囲 */
+  peerMode: PeerMode;
+  /**
+   * 視聴者の発話(プッシュトゥトーク)。**まだ未実装なので常に false。**
+   * 設定の枠だけ先に用意しておき、実装時はここを立てるだけで済むようにする
+   */
+  viewerVoice: boolean;
+}
+
+/** 上限の上限。設定ミスで青天井にならないよう、受け付ける値自体を制限する */
+const MAX_CAPACITY = 10000;
+
+function defaultSettings(env: Env): RoomSettings {
+  return {
+    // 従来の環境変数は「設定を持たないルームの既定値」として残す
+    access: env.REQUIRE_VIEWER_TOKEN === '1' ? 'invite' : 'public',
+    chat: true,
+    capacity: null,
+    peerMode: DEFAULT_PEER_MODE,
+    viewerVoice: false,
+  };
+}
+
+/** 受け取った値を検証して設定へ畳み込む(未知のキーと不正な値は無視する) */
+function mergeSettings(current: RoomSettings, patch: Record<string, unknown>): RoomSettings {
+  const next: RoomSettings = { ...current };
+  if (patch.access === 'public' || patch.access === 'invite') next.access = patch.access;
+  if (typeof patch.chat === 'boolean') next.chat = patch.chat;
+  if (patch.capacity === null) next.capacity = null;
+  else if (typeof patch.capacity === 'number' && Number.isFinite(patch.capacity)) {
+    next.capacity = Math.max(1, Math.min(MAX_CAPACITY, Math.floor(patch.capacity)));
+  }
+  if (patch.peerMode === 'all' || patch.peerMode === 'broadcaster' || patch.peerMode === 'off') {
+    next.peerMode = patch.peerMode;
+  }
+  if (typeof patch.viewerVoice === 'boolean') next.viewerVoice = patch.viewerVoice;
+  return next;
+}
+
+/**
+ * Worker本体が視聴の認可時に読む、ルーム設定の写し。
+ * 認可のたびにDurable Objectを起こすのは高くつくため、KVに写しておく
+ * (真の値はDO側。KVは読み取り専用の索引として扱う)
+ */
+function settingsKey(room: string): string {
+  return `settings:${room}`;
+}
+
+/** KVに写している内容。認可のたびにDurable Objectを起こさないための索引 */
+interface RoomGuard {
+  access?: 'public' | 'invite';
+  /**
+   * 満員かどうか。**課金されるのはSFUのエグレス**なので、presenceだけ塞いでも
+   * 歯止めにならない。SFUの購読を止めるにはWorker側で判定する必要があり、
+   * その値をDOがここへ写している(切り替わったときだけ書くのでKVの書き込みは増えない)
+   */
+  full?: boolean;
+}
+
+async function readRoomGuard(env: Env, room: string): Promise<RoomGuard> {
+  return (await env.SFU_STATE.get<RoomGuard>(settingsKey(room), 'json')) ?? {};
+}
+
 /**
  * 同接カウント+匿名コメント用のDurable Object(ルームごとに1インスタンス)。
  * 視聴ページがWebSocketで接続し、
@@ -505,21 +619,32 @@ export class Presence extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
-    const path = new URL(request.url).pathname;
+    const requestUrl = new URL(request.url);
+    const path = requestUrl.pathname;
+    // KVへ写しを書くのに自分のルーム名が要る。Worker本体が付けてくる
+    const roomParam = requestUrl.searchParams.get('room');
+    if (roomParam && (await this.ctx.storage.get<string>(ROOM_NAME_KEY)) !== roomParam) {
+      await this.ctx.storage.put(ROOM_NAME_KEY, roomParam);
+    }
 
-    // 視聴者の気配の公開範囲(Worker本体が配信者キーを検証したうえで呼ぶ内部API)
+    // ルーム設定(Worker本体が配信者キーを検証したうえで呼ぶ内部API)
+    if (path === '/settings') {
+      if (request.method === 'POST') {
+        const patch = (await request.json()) as Record<string, unknown>;
+        const settings = await this.applySettings(patch);
+        return Response.json({ settings });
+      }
+      return Response.json({ settings: await this.settings() });
+    }
+
+    // 視聴者の気配の公開範囲。ルーム設定へ統合したので、こちらは旧APIの別名
     if (path === '/peer-mode') {
       if (request.method === 'POST') {
         const body = (await request.json()) as { mode?: string };
-        const mode: PeerMode =
-          body.mode === 'broadcaster' || body.mode === 'off' || body.mode === 'all'
-            ? body.mode
-            : DEFAULT_PEER_MODE;
-        await this.ctx.storage.put(PEER_MODE_KEY, mode);
-        this.broadcastJson({ type: 'peerMode', mode });
-        return Response.json({ ok: true, mode });
+        const settings = await this.applySettings({ peerMode: body.mode });
+        return Response.json({ ok: true, mode: settings.peerMode });
       }
-      return Response.json({ mode: await this.peerMode() });
+      return Response.json({ mode: (await this.settings()).peerMode });
     }
 
     // アバターの取得/切り替え(Worker本体が配信者キーを検証したうえで呼ぶ内部API)
@@ -561,6 +686,18 @@ export class Presence extends DurableObject<Env> {
     if (request.headers.get('Upgrade') !== 'websocket') {
       return new Response('expected websocket', { status: 426 });
     }
+
+    const settings = await this.settings();
+    const isBroadcaster = new URL(request.url).searchParams.get('broadcaster') === '1';
+    // 同時接続の上限。配信者は数えないし、締め出しもしない
+    if (
+      !isBroadcaster &&
+      settings.capacity !== null &&
+      this.viewerCount() >= settings.capacity
+    ) {
+      return new Response('room is full', { status: 503 });
+    }
+
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
     // 視聴者の気配(位置の中継)に使う接続ごとのIDと役割、および利用者ID。
@@ -569,14 +706,18 @@ export class Presence extends DurableObject<Env> {
     const params = new URL(request.url).searchParams;
     pair[1].serializeAttachment({
       id: crypto.randomUUID().slice(0, 8),
-      role: params.get('broadcaster') === '1' ? 'broadcaster' : 'viewer',
+      role: isBroadcaster ? 'broadcaster' : 'viewer',
       // 独自認証を入れた場合の利用者ID(既定の鍵方式では常に無い)
       userId: params.get('uid') ?? undefined,
     });
     this.broadcastCount();
+    // 満員になったらSFUの購読も断るようKVへ写す
+    await this.syncGuard(settings);
     const history = (await this.ctx.storage.get<ChatItem[]>(CHAT_HISTORY_KEY)) ?? [];
     pair[1].send(JSON.stringify({ type: 'history', items: history }));
-    pair[1].send(JSON.stringify({ type: 'peerMode', mode: await this.peerMode() }));
+    pair[1].send(JSON.stringify({ type: 'settings', settings }));
+    // 旧クライアント向け(設定メッセージを知らない版でも気配は動く)
+    pair[1].send(JSON.stringify({ type: 'peerMode', mode: settings.peerMode }));
     // 途中入室者にも現在のアバターを配る(配信者が切り替えた状態に追いつける)
     const avatar = await this.ctx.storage.get<AvatarRecord>(AVATAR_KEY);
     if (avatar) pair[1].send(JSON.stringify({ type: 'avatar', ...avatar }));
@@ -629,7 +770,7 @@ export class Presence extends DurableObject<Env> {
     if (data.type === 'peer') {
       const attachment = (ws.deserializeAttachment() ?? {}) as { id?: string };
       if (!attachment.id) return;
-      const mode = await this.peerMode();
+      const mode = (await this.settings()).peerMode;
       if (mode === 'off') return;
       const now = Date.now();
       const last = this.lastPeerAt.get(attachment.id) ?? 0;
@@ -644,6 +785,9 @@ export class Presence extends DurableObject<Env> {
     }
 
     if (data.type !== 'chat' || typeof data.text !== 'string') return;
+    // コメントを止めているルームでは受け付けない(クライアント側でも入力を塞ぐが、
+    // 直接WebSocketへ送られる可能性があるのでサーバーでも弾く)
+    if (!(await this.settings()).chat) return;
 
     const text = data.text.trim().slice(0, CHAT_TEXT_MAX);
     if (text.length === 0) return;
@@ -664,12 +808,15 @@ export class Presence extends DurableObject<Env> {
     this.broadcastJson({ type: 'chat', ...item });
   }
 
-  override webSocketClose(ws: WebSocket): void {
+  override async webSocketClose(ws: WebSocket): Promise<void> {
     this.handleLeave(ws);
+    // 空きが出たらSFU側の受け入れも再開する
+    await this.syncGuard(await this.settings(), ws);
   }
 
-  override webSocketError(ws: WebSocket): void {
+  override async webSocketError(ws: WebSocket): Promise<void> {
     this.handleLeave(ws);
+    await this.syncGuard(await this.settings(), ws);
   }
 
   /** 退場時: 同接を配り直し、視聴者の気配を消すよう伝える */
@@ -688,8 +835,59 @@ export class Presence extends DurableObject<Env> {
     this.broadcastJson({ type: 'count', count }, closing);
   }
 
-  private async peerMode(): Promise<PeerMode> {
-    return (await this.ctx.storage.get<PeerMode>(PEER_MODE_KEY)) ?? DEFAULT_PEER_MODE;
+  /**
+   * 同時接続の上限に数える人数。
+   *
+   * **配信者コンソールは数えない。** 「同時に見られる人数」は視聴者を指すので、
+   * 配信者が枠を1つ占めると上限1のルームが最初から満員になってしまう。
+   * 切断処理中のソケットはまだ getWebSockets() に含まれるため除く
+   * (数え違えると、空きが出ても満員のままになる)
+   */
+  private viewerCount(closing?: WebSocket): number {
+    return this.ctx.getWebSockets().filter((socket) => {
+      if (socket === closing) return false;
+      const attachment = (socket.deserializeAttachment() ?? {}) as { role?: string };
+      return attachment.role !== 'broadcaster';
+    }).length;
+  }
+
+  /**
+   * ルーム設定。まだ保存されていなければ既定値を組み立てる。
+   * 旧方式で保存されていた気配の公開範囲は、ここで引き継ぐ
+   * (設定を統合する前に作られたルームでも、設定し直さずに済むように)
+   */
+  private async settings(): Promise<RoomSettings> {
+    const stored = await this.ctx.storage.get<RoomSettings>(SETTINGS_KEY);
+    if (stored) return { ...defaultSettings(this.env), ...stored };
+    const legacyPeerMode = await this.ctx.storage.get<PeerMode>(PEER_MODE_KEY);
+    const base = defaultSettings(this.env);
+    return legacyPeerMode ? { ...base, peerMode: legacyPeerMode } : base;
+  }
+
+  /**
+   * 満員かどうかをKVへ写す。Worker本体はここを見てSFUの購読を断る。
+   * **切り替わったときだけ書く**(入退室のたびに書くとKVの書き込み上限に当たる)
+   */
+  private async syncGuard(settings: RoomSettings, closing?: WebSocket): Promise<void> {
+    const full = settings.capacity !== null && this.viewerCount(closing) >= settings.capacity;
+    const room = (await this.ctx.storage.get<string>(ROOM_NAME_KEY)) ?? DEFAULT_ROOM;
+    const current = await this.env.SFU_STATE.get<RoomGuard>(settingsKey(room), 'json');
+    if (current?.access === settings.access && Boolean(current?.full) === full) return;
+    await this.env.SFU_STATE.put(
+      settingsKey(room),
+      JSON.stringify({ access: settings.access, full } satisfies RoomGuard),
+    );
+  }
+
+  /** 設定を更新して保存し、接続中の全員へ配る */
+  private async applySettings(patch: Record<string, unknown>): Promise<RoomSettings> {
+    const settings = mergeSettings(await this.settings(), patch);
+    await this.ctx.storage.put(SETTINGS_KEY, settings);
+    await this.syncGuard(settings);
+    this.broadcastJson({ type: 'settings', settings });
+    // 旧クライアント(設定メッセージを知らない版)のために気配の範囲は個別にも配る
+    this.broadcastJson({ type: 'peerMode', mode: settings.peerMode });
+    return settings;
   }
 
   /** 配信者として接続しているソケットにだけ送る */
@@ -729,7 +927,7 @@ export default {
     if (url.pathname === '/api/presence') {
       const room = normalizeRoom(url.searchParams.get('room'));
       // 視聴者の認可点(会員限定にする場合は auth.ts の authorize を差し替える)
-      const viewer = await authorize(env, request, url, { scope: 'viewer', room });
+      const viewer = await authorizeViewer(env, request, url, room);
       if (!viewer.ok) return json(403, { error: 'forbidden(視聴トークンが必要です)' });
       /**
        * 配信者かどうかはここで検証してDOへ伝える。
@@ -747,7 +945,28 @@ export default {
       );
     }
 
-    // 視聴者の気配の公開範囲(配信者が切り替える)
+    /**
+     * ルーム設定の取得/変更(配信者のみ)。
+     * 変更はDurable Objectを真の値として保存し、視聴の認可で使う項目だけ
+     * KVへ写す(認可のたびにDOを起こさないため)
+     */
+    if (url.pathname === '/api/room-settings') {
+      const room = normalizeRoom(url.searchParams.get('room'));
+      if (!(await allows(env, request, url, 'broadcaster', room))) {
+        return json(403, { error: 'forbidden(配信者キーが必要です)' });
+      }
+      const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
+      // ルーム名を渡す(DOはKVへ写しを書くのに自分の名前が要る)
+      const result = await stub.fetch(
+        new Request(`https://presence.internal/settings?room=${encodeURIComponent(room)}`, {
+          method: request.method,
+          body: request.method === 'POST' ? await request.text() : undefined,
+        }),
+      );
+      return json(result.status, (await result.json()) as unknown);
+    }
+
+    // 視聴者の気配の公開範囲(配信者が切り替える)。ルーム設定へ統合済みの旧API
     if (url.pathname === '/api/peer-mode') {
       const room = normalizeRoom(url.searchParams.get('room'));
       if (!(await allows(env, request, url, 'broadcaster', room))) {

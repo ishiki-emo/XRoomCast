@@ -136,7 +136,16 @@ export async function authorize(
   env: AuthEnv,
   request: Request,
   url: URL,
-  ctx: { scope: AuthScope; room: string },
+  ctx: {
+    scope: AuthScope;
+    room: string;
+    /**
+     * 視聴にトークンを要求するか。ルームごとの設定で実行時に切り替えるため、
+     * 呼び出し側が解決して渡す。省略時は REQUIRE_VIEWER_TOKEN を既定として使う
+     * (設定を持たない従来のルームはこちらに落ちる)
+     */
+    requireViewerToken?: boolean;
+  },
 ): Promise<AuthResult> {
   const { scope, room } = ctx;
 
@@ -158,7 +167,8 @@ export async function authorize(
   }
 
   // scope === 'viewer'
-  if (env.REQUIRE_VIEWER_TOKEN !== '1') return OK; // 既定: 匿名視聴
+  const requireToken = ctx.requireViewerToken ?? env.REQUIRE_VIEWER_TOKEN === '1';
+  if (!requireToken) return OK; // 匿名視聴
   // 配信者は当然視聴もできる(配信者コンソールのプレビューがこの経路を通る)
   if (await isBroadcaster(env, request, url, room)) return OK;
   const candidate = readCredential(request, url, ['wt']);

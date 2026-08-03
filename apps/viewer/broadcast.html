@@ -261,6 +261,32 @@
         ・視聴者側でも各自「隠す」を選べます
       </p>
 
+      <h2>⚙️ ルーム設定</h2>
+      <div id="s-status">読み込み中...</div>
+      <div class="row">
+        <span class="ar-label">視聴を</span>
+        <button class="small" data-access="public">誰でも</button>
+        <button class="small" data-access="invite">招待された人だけ</button>
+      </div>
+      <div class="row">
+        <span class="ar-label">コメントを</span>
+        <button class="small" data-chat="on">受け付ける</button>
+        <button class="small" data-chat="off">止める</button>
+      </div>
+      <div class="row">
+        <span class="ar-label">同時に見られる人数</span>
+        <input id="s-capacity" type="number" min="1" max="10000" placeholder="無制限" style="width: 7em" />
+        <button class="small" id="s-capacity-apply">適用</button>
+        <button class="small" id="s-capacity-clear">無制限に戻す</button>
+      </div>
+      <p class="note">
+        ・<strong>デプロイし直さずに切り替わります。</strong>公開配信・非公開配信・イベント会場を、この設定だけで使い分けます<br />
+        ・「招待された人だけ」にすると、<strong>視聴URL経由で開いた人しか繋がりません</strong>。ルーム名を推測しただけでは入れません<br />
+        ・<strong>人数の上限は課金の歯止めです。</strong>URLが出回ったときに視聴者数とともに費用が伸びるのを防げます<br />
+        ・数えるのは<strong>視聴者だけ</strong>です。この配信者コンソールは含みません<br />
+        ・上限に達すると、以降の入室はモーションと音声ごと断られます(既に見ている人はそのままです)
+      </p>
+
       <h2>🧍 アバター</h2>
       <div id="a-status">読み込み中...</div>
       <div class="row">

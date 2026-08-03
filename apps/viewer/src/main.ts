@@ -10,6 +10,7 @@ import {
   defaultServerUrls,
   readConfig,
   sameOriginWebSocketUrl,
+  type RoomSettings,
   type TransportKind,
 } from './config';
 import { ContactShadow, type ShadowMode } from '@xroomcast/viewer-core';
@@ -410,8 +411,11 @@ chatInput.addEventListener('keydown', (event) => {
 });
 
 function setChatEnabled(enabled: boolean): void {
-  chatInput.disabled = !enabled;
-  chatSendButton.disabled = !enabled;
+  // 接続していても、ルーム設定でコメントを止めていれば使えない
+  const usable = enabled && chatAllowed;
+  chatInput.disabled = !usable;
+  chatSendButton.disabled = !usable;
+  chatInput.placeholder = chatAllowed ? 'コメントを入力' : 'コメントは停止中です';
 }
 
 interface PresenceMessage extends PeerState {
@@ -428,10 +432,30 @@ interface PresenceMessage extends PeerState {
   mode?: string;
   /** type==='audio': 配信者の音声パブリッシャー(停止時はnull) */
   audio?: { sessionId: string; trackName: string } | null;
+  /** type==='settings': ルーム設定 */
+  settings?: RoomSettings;
 }
 
 /** 気配の公開範囲(サーバーが決める。配信者コンソールから変更できる) */
 let peerMode: 'all' | 'broadcaster' | 'off' = 'all';
+/** コメントを受け付けるか(ルーム設定。既定は許可) */
+let chatAllowed = true;
+
+function applyPeerMode(mode: string | undefined): void {
+  peerMode = mode === 'broadcaster' || mode === 'off' ? mode : 'all';
+  if (peerMode !== 'all') peers.clear(); // 配信者のみ/無効なら他人は見えない
+}
+
+/**
+ * ルーム設定の反映。サーバーが接続時と変更時に押し出してくる。
+ * 公開配信・非公開配信・イベント会場の違いはここの値だけで表現する
+ */
+function applyRoomSettings(settings: RoomSettings): void {
+  applyPeerMode(settings.peerMode);
+  chatAllowed = settings.chat;
+  // 接続中でもコメントだけ止められる。入力欄の状態は接続状態と両方を見る
+  setChatEnabled(presenceWs !== null);
+}
 
 // ---- 視聴者の気配の送信 ----
 /** 送信レート。動きの少ない対象なので10Hzで足りる */
@@ -546,9 +570,11 @@ function connectPresence(): void {
         peers.apply(data.id, data);
       } else if (data.type === 'peerLeft' && typeof data.id === 'string') {
         peers.remove(data.id);
+      } else if (data.type === 'settings' && data.settings) {
+        applyRoomSettings(data.settings);
       } else if (data.type === 'peerMode') {
-        peerMode = data.mode === 'broadcaster' || data.mode === 'off' ? data.mode : 'all';
-        if (peerMode !== 'all') peers.clear(); // 配信者のみ/無効なら他人は見えない
+        // 旧サーバー互換。設定メッセージが来ていればそちらが優先される
+        applyPeerMode(data.mode);
       }
     } catch {
       // pong等は無視
