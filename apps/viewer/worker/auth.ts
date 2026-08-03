@@ -227,6 +227,29 @@ export async function verifyAdmission(
 }
 
 /**
+ * そのルームの視聴URL(パス部分)を組み立てる。
+ * 配信者コンソールで「ここから見られます」と案内するために使う。
+ * **視聴トークンは配信トークンとは別の導出**なので、配信者が自分の鍵から
+ * 計算することはできず、サーバーが渡す必要がある
+ */
+export function watchPathFor(
+  env: AuthEnv,
+  room: string,
+  defaultRoom: string,
+): Promise<string | null> {
+  if (env.ROOM_SECRET) {
+    return roomToken(env.ROOM_SECRET, 'watch', room).then(
+      (token) => `/watch/${encodeURIComponent(room)}/${encodeURIComponent(token)}`,
+    );
+  }
+  // 旧方式(既定ルーム専用)
+  if (env.WATCH_KEY && room === defaultRoom) {
+    return Promise.resolve(`/watch/${encodeURIComponent(env.WATCH_KEY)}`);
+  }
+  return Promise.resolve(null);
+}
+
+/**
  * 短縮URLのルーム解決。
  * - /<用途>/<ルーム>/<トークン>: ROOM_SECRETから導出したトークンと照合する新形式
  * - /<用途>/<キー>: 既定ルーム専用の旧形式(WATCH_KEY / BROADCAST_KEY)

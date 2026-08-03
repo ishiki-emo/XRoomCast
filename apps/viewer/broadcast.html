@@ -188,6 +188,46 @@
         border-color: #5c9c72;
         color: #d7f5e2;
       }
+      /* 視聴URLのQR。会場掲示用に全画面へ拡大できる */
+      #s-qr img {
+        display: block;
+        width: 108px;
+        height: 108px;
+        background: #fff;
+        padding: 6px;
+        border-radius: 6px;
+      }
+      #qr-stage[hidden] {
+        display: none !important;
+      }
+      #qr-stage {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        background: #fff;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        cursor: zoom-out;
+      }
+      #qr-stage img {
+        width: min(70vw, 70vh);
+        height: min(70vw, 70vh);
+        image-rendering: pixelated; /* 拡大してもエッジをぼかさない */
+      }
+      #qr-stage .url {
+        color: #111;
+        font-size: clamp(14px, 2.2vw, 24px);
+        word-break: break-all;
+        text-align: center;
+        padding: 0 16px;
+      }
+      #qr-stage .close {
+        color: #666;
+        font-size: 13px;
+      }
     </style>
   </head>
   <body>
@@ -261,6 +301,22 @@
         ・視聴者側でも各自「隠す」を選べます
       </p>
 
+      <h2>🔗 視聴URL</h2>
+      <div class="row">
+        <input id="s-watch-url" type="text" readonly placeholder="読み込み中..." style="flex: 1; min-width: 18em" />
+        <button class="small primary" id="s-watch-copy">コピー</button>
+        <button class="small" id="s-watch-open">開く</button>
+      </div>
+      <div class="row">
+        <div id="s-qr" aria-label="視聴URLのQRコード"></div>
+        <button class="small" id="s-qr-big">大きく表示(会場掲示用)</button>
+      </div>
+      <p class="note">
+        ・このURLを渡せば視聴できます。<strong>会場ではQRを掲示すると案内が楽です</strong><br />
+        ・「招待された人だけ」に設定している場合、<strong>このURLを経由した人だけが視聴できます</strong><br />
+        ・視聴URLと配信者URLは別の鍵です。<strong>視聴URLを渡しても配信は操作されません</strong>
+      </p>
+
       <h2>⚙️ ルーム設定</h2>
       <div id="s-status">読み込み中...</div>
       <div class="row">
@@ -317,6 +373,12 @@
       </p>
 
       <p class="note" id="app-version"></p>
+    </div>
+    <!-- 会場掲示用の全画面QR。白背景・余白ありでスマホから読み取りやすくする -->
+    <div id="qr-stage" hidden>
+      <div id="qr-stage-image"></div>
+      <div class="url" id="qr-stage-url"></div>
+      <div class="close">画面のどこかをクリック / Esc で閉じます</div>
     </div>
     <script type="module" src="/src/broadcast.ts"></script>
   </body>

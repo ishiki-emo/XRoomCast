@@ -19,6 +19,7 @@ import {
   issueAdmission,
   resolveShortLink,
   verifyAdmission,
+  watchPathFor,
   type AuthEnv,
   type AuthScope,
 } from './auth';
@@ -1032,7 +1033,14 @@ export default {
           body: request.method === 'POST' ? await request.text() : undefined,
         }),
       );
-      return json(result.status, (await result.json()) as unknown);
+      const data = (await result.json()) as Record<string, unknown>;
+      // 案内用の視聴URL。視聴トークンは配信トークンと別導出なので、
+      // 配信者が自分で計算することはできずサーバーが渡す
+      const watchPath = await watchPathFor(env, room, DEFAULT_ROOM);
+      return json(result.status, {
+        ...data,
+        watchUrl: watchPath ? `${url.origin}${watchPath}` : null,
+      });
     }
 
     // 視聴者の気配の公開範囲(配信者が切り替える)。ルーム設定へ統合済みの旧API
