@@ -752,6 +752,13 @@ function applyRemoteAvatar(slot: number, url: string, name?: string): void {
  */
 function applyPublishers(list: { slot: number; sessionId: string }[]): void {
   const active = new Set<number>([0]); // 主ユニットは常に残す
+  /**
+   * アバターが割り当てられている席は、配信元が居なくても表示を残す。
+   * 入室直後は「席のアバター」→「配信者の顔ぶれ」の順で届くため、ここで
+   * 配信元だけを見ると、アバターを設定しただけの席(待機表示)を
+   * 作った直後に片付けてしまう
+   */
+  for (const slot of syncedAvatarUrls.keys()) active.add(slot);
   for (const p of list) {
     if (typeof p.slot !== 'number' || p.slot < 0 || p.slot >= MAX_SLOTS) continue;
     active.add(p.slot);
