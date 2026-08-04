@@ -42,6 +42,26 @@ export interface AvatarLoadOptions {
 const COMPILE_TIMEOUT_MS = 4000;
 /** フレーム待ちの上限。XR中にフレームが来なくてもロードを止めないための保険 */
 const YIELD_TIMEOUT_MS = 50;
+/** 1フレームに前送りするテクスチャの枚数(大きいテクスチャは1枚10ms超かかる) */
+const TEXTURES_PER_FRAME = 2;
+
+/** モデルが参照しているテクスチャを重複なしで集める(MToonの独自テクスチャも含む) */
+function collectTextures(root: THREE.Object3D): THREE.Texture[] {
+  const found = new Set<THREE.Texture>();
+  root.traverse((object) => {
+    const mesh = object as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const material of materials) {
+      if (!material) continue;
+      for (const value of Object.values(material)) {
+        const texture = value as THREE.Texture | null;
+        if (texture?.isTexture) found.add(texture);
+      }
+    }
+  });
+  return [...found];
+}
 
 /**
  * 次の描画フレームまで処理を譲る。
@@ -345,6 +365,24 @@ export class Avatar {
           new Promise<void>((resolve) => setTimeout(resolve, COMPILE_TIMEOUT_MS)),
         ]),
       );
+      /**
+       * テクスチャのGPU転送を数枚ずつ前送りする。
+       * compileAsync が非同期にするのは**シェーダのコンパイルだけ**で、
+       * テクスチャは最初に描画されるフレームで同期アップロードされる。
+       * MToonは1モデルで数十枚持つことがあり、それが「切り替えた瞬間だけ
+       * 一瞬固まる」の正体。表示に入れる前に小分けで転送しておく
+       */
+      await measure('テクスチャ転送', async () => {
+        const textures = collectTextures(vrm.scene);
+        for (let i = 0; i < textures.length; i += 1) {
+          try {
+            precompile.renderer.initTexture(textures[i]!);
+          } catch {
+            // 転送に失敗しても描画時に改めて処理される(ここでは急がないだけ)
+          }
+          if ((i + 1) % TEXTURES_PER_FRAME === 0) await yieldFrame(precompile.renderer);
+        }
+      });
     }
     console.debug('[avatar] ロード内訳(ms):', timings);
 
