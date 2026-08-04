@@ -949,8 +949,14 @@ export class Presence extends DurableObject<Env> {
     // アバターの取得/切り替え(Worker本体が配信者キーを検証したうえで呼ぶ内部API)
     if (path === '/avatar') {
       if (request.method === 'GET') {
-        const current = (await this.ctx.storage.get<AvatarRecord>(AVATAR_KEY)) ?? null;
-        return Response.json({ avatar: current });
+        // 席番号 → 現在のアバター。avatar(単数)は旧クライアント互換(=席0)
+        const entries = await this.ctx.storage.list<AvatarRecord>({ prefix: AVATAR_KEY });
+        const avatars: Record<string, AvatarRecord> = {};
+        for (const [key, record] of entries) {
+          const slot = key === AVATAR_KEY ? 0 : Number(key.slice(AVATAR_KEY.length + 1));
+          if (Number.isFinite(slot)) avatars[String(slot)] = record;
+        }
+        return Response.json({ avatar: avatars['0'] ?? null, avatars });
       }
       const { slot = 0, ...record } = (await request.json()) as AvatarRecord & { slot?: number };
       await this.ctx.storage.put(avatarStorageKey(slot), record);

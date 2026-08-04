@@ -22,6 +22,8 @@ interface ListResponse {
 
 interface AvatarResponse {
   avatar?: { key: string; name: string; url: string } | null;
+  /** 席番号 → 現在のアバター(新サーバーのみ。旧サーバーは avatar のみ) */
+  avatars?: Record<string, { key: string; name: string; url: string }>;
   error?: string;
 }
 
@@ -41,10 +43,20 @@ export function setupAvatarConsole(options: { room: string; auth: AuthProvider }
   const emptyEl = document.getElementById('a-empty') as HTMLParagraphElement;
   const defaultButton = document.getElementById('a-default') as HTMLButtonElement;
   const reloadButton = document.getElementById('a-reload') as HTMLButtonElement;
+  const slotSelect = document.getElementById('a-slot') as HTMLSelectElement | null;
 
-  let currentKey: string | null = null;
+  /** 操作対象の席。席1以降は複数配信者用(2つ目の配信元の見た目を選ぶ) */
+  let slot = 0;
+  /** 席番号 → 配信中のVRMキー */
+  let currentKeys: Record<string, string> = {};
   let defaultKey: string | null = null;
   let busy = false;
+  let lastItems: VrmItem[] = [];
+
+  /** いま選択中の席の配信中キー */
+  function currentKey(): string | null {
+    return currentKeys[String(slot)] ?? null;
+  }
 
   function setStatus(text: string, kind: 'idle' | 'live' | 'error' = 'idle'): void {
     statusEl.textContent = text;
@@ -74,12 +86,14 @@ export function setupAvatarConsole(options: { room: string; auth: AuthProvider }
   }
 
   function render(items: VrmItem[]): void {
+    lastItems = items;
     listEl.replaceChildren();
     emptyEl.hidden = items.length > 0;
+    const current = currentKey();
 
     for (const item of items) {
       const li = document.createElement('li');
-      li.classList.toggle('current', item.key === currentKey);
+      li.classList.toggle('current', item.key === current);
 
       const name = document.createElement('span');
       name.className = 'name';
@@ -93,8 +107,8 @@ export function setupAvatarConsole(options: { room: string; auth: AuthProvider }
 
       const switchButton = document.createElement('button');
       switchButton.className = 'small primary';
-      switchButton.textContent = item.key === currentKey ? '配信中' : '切り替え';
-      switchButton.disabled = item.key === currentKey || busy;
+      switchButton.textContent = item.key === current ? '配信中' : '切り替え';
+      switchButton.disabled = item.key === current || busy;
       switchButton.addEventListener('click', () => void switchTo(item.key, item.name));
       li.appendChild(switchButton);
 
@@ -109,9 +123,23 @@ export function setupAvatarConsole(options: { room: string; auth: AuthProvider }
     }
 
     defaultButton.hidden = defaultKey === null;
-    defaultButton.disabled = busy || defaultKey === currentKey;
+    defaultButton.disabled = busy || defaultKey === current;
     defaultButton.textContent =
-      defaultKey === currentKey ? '既定のVRMを配信中' : '既定のVRMに切り替え';
+      defaultKey === current ? '既定のVRMを配信中' : '既定のVRMに切り替え';
+  }
+
+  /** いま選択中の席の状態をステータス行へ出す */
+  function reportCurrent(): void {
+    const key = currentKey();
+    const seat = slot === 0 ? '' : `席${slot}: `;
+    if (key) {
+      const name = key.slice(key.lastIndexOf('/') + 1);
+      setStatus(`${seat}配信中のアバター: ${name}`, 'live');
+    } else if (slot === 0) {
+      setStatus('まだ切り替えていません(視聴者は視聴URLの既定VRMを表示中)');
+    } else {
+      setStatus(`席${slot}はまだアバター未設定です(2つ目の配信元の見た目をここで選びます)`);
+    }
   }
 
   async function refresh(): Promise<void> {
@@ -121,14 +149,14 @@ export function setupAvatarConsole(options: { room: string; auth: AuthProvider }
         callJson('/api/avatar') as Promise<AvatarResponse>,
       ]);
       defaultKey = listed.defaultKey ?? null;
-      currentKey = current.avatar?.key ?? null;
+      currentKeys = {};
+      // 旧サーバーは avatar(席0)だけを返す
+      if (current.avatar?.key) currentKeys['0'] = current.avatar.key;
+      for (const [slotKey, record] of Object.entries(current.avatars ?? {})) {
+        if (record?.key) currentKeys[slotKey] = record.key;
+      }
       render(listed.items ?? []);
-      setStatus(
-        currentKey
-          ? `配信中のアバター: ${current.avatar?.name ?? currentKey}`
-          : 'まだ切り替えていません(視聴者は視聴URLの既定VRMを表示中)',
-        currentKey ? 'live' : 'idle',
-      );
+      reportCurrent();
     } catch (error) {
       setStatus(`一覧の取得に失敗: ${String(error)}`, 'error');
     }
@@ -136,15 +164,16 @@ export function setupAvatarConsole(options: { room: string; auth: AuthProvider }
 
   async function switchTo(vrmKey: string, name: string): Promise<void> {
     setBusy(true);
-    setStatus(`「${name}」に切り替えています...`);
+    const seat = slot === 0 ? '' : `席${slot}を`;
+    setStatus(`${seat}「${name}」に切り替えています...`);
     try {
       await callJson('/api/avatar', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: vrmKey }),
+        body: JSON.stringify({ key: vrmKey, slot }),
       });
-      currentKey = vrmKey;
-      setStatus(`「${name}」に切り替えました(視聴者はDL完了順に反映されます)`, 'live');
+      currentKeys[String(slot)] = vrmKey;
+      setStatus(`${seat}「${name}」に切り替えました(視聴者はDL完了順に反映されます)`, 'live');
     } catch (error) {
       setStatus(`切り替えに失敗: ${String(error)}`, 'error');
     } finally {
@@ -233,6 +262,12 @@ export function setupAvatarConsole(options: { room: string; auth: AuthProvider }
   reloadButton.addEventListener('click', () => void refresh());
   defaultButton.addEventListener('click', () => {
     if (defaultKey) void switchTo(defaultKey, defaultKey);
+  });
+  // 席の切り替えは表示の対象を変えるだけ(一覧は共通なので取得し直さない)
+  slotSelect?.addEventListener('change', () => {
+    slot = Number(slotSelect.value) || 0;
+    render(lastItems);
+    reportCurrent();
   });
 
   void refresh();

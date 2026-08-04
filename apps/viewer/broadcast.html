@@ -354,6 +354,15 @@
       <h2>🧍 アバター</h2>
       <div id="a-status">読み込み中...</div>
       <div class="row">
+        <label for="a-slot">席</label>
+        <select id="a-slot">
+          <option value="0">席0(メイン)</option>
+          <option value="1">席1</option>
+          <option value="2">席2</option>
+          <option value="3">席3</option>
+        </select>
+      </div>
+      <div class="row">
         <input type="file" id="a-file" accept=".vrm,model/vrm" />
         <button id="a-upload" class="small primary">アップロード</button>
       </div>
@@ -369,7 +378,9 @@
       <p class="note">
         ・「切り替え」を押すと、視聴中の全員がそのVRMを読み込み直します<br />
         ・読み込み完了まで各視聴者には元のアバター(初回はクリスタル)が表示されます<br />
-        ・アップロードしたVRMはこのルーム専用です。イベント後は削除してください
+        ・アップロードしたVRMはこのルーム専用です。イベント後は削除してください<br />
+        ・<strong>席</strong>は複数配信者用です。2人目の配信元(PUBLISHER_ID を変えたブリッジ
+        またはHMD配信)が席1に入るので、その見た目を席1で選びます。1人配信なら席0のまま
       </p>
 
       <h2>🎪 ステージ</h2>
