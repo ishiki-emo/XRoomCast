@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { decodePacket } from '@xroomcast/protocol';
 import { ArController } from './ar';
-import { Avatar } from '@xroomcast/viewer-core';
+import { AvatarUnit, type AvatarUnitHooks } from './avatarUnit';
 import { withAuth } from '@xroomcast/sync';
 import { createAuth } from './auth';
 import {
@@ -14,16 +14,13 @@ import {
   type StageState,
   type TransportKind,
 } from './config';
-import { ContactShadow, type ShadowMode } from '@xroomcast/viewer-core';
+import type { ShadowMode } from '@xroomcast/viewer-core';
 import { DemoController } from './demo';
-import { IdleMotion, blendPose } from '@xroomcast/viewer-core';
 import { PeerPresence, type PeerDevice, type PeerState } from '@xroomcast/viewer-core';
-import { PlaceholderAvatar } from '@xroomcast/viewer-core';
 import { SpatialAudio, isSpatialAudioSupported } from '@xroomcast/viewer-core';
 import { SpatialChat } from './spatialChat';
 import { SpatialPanel } from './spatialUI';
 import { createStage, setupScenery } from '@xroomcast/viewer-core';
-import { PoseStreamPlayer } from '@xroomcast/sync';
 import type { Transport } from '@xroomcast/sync';
 import { WebSocketTransport } from '@xroomcast/sync';
 import { SfuTransport } from '@xroomcast/sync';
@@ -131,14 +128,47 @@ const scenery = setupScenery(scene);
 const roomSpace = new THREE.Group();
 scene.add(roomSpace);
 
-// アバターの足元フレーム。ポーズはこの下に適用される(PoseApplierがフレーム
-// 対応なのでIK等は壊れない)。将来のロコモーション(SECTION_ROOT)や複数配信者
-// では、roomSpace は動かさずこのフレームが roomSpace の中で動く
-const avatarRoot = new THREE.Group();
-roomSpace.add(avatarRoot);
+// ---- 配信ストリームごとの表示ユニット ----
+// slotフレーム+アバター+ジッタバッファ+接地影+待機モーションを AvatarUnit に
+// 束ねる。slot 0 が主ユニット(現行の単一配信)。複数配信者ではここが増える。
+// 将来のロコモーション(SECTION_ROOT)では、roomSpace は動かさず unit.root が
+// roomSpace の中で動く
+const units = new Map<number, AvatarUnit>();
 
-// AR用の接地影(装飾床が消えるARでのみ有効化する)
-const contactShadow = new ContactShadow(avatarRoot);
+function createUnit(slot: number, hooks?: AvatarUnitHooks): AvatarUnit {
+  const unit = new AvatarUnit({
+    parent: roomSpace,
+    precompile: { renderer, camera, scene },
+    hooks,
+  });
+  unit.applyScale(roomSpace.scale.x);
+  units.set(slot, unit);
+  return unit;
+}
+
+// 主ユニット。ステータス表示などのUI通知はこのユニットだけに付ける
+const primaryUnit = createUnit(0, {
+  onLoadingChanged: (loading) => {
+    loadButton.disabled = loading;
+    if (loading) setStatus('VRM 読み込み中...');
+  },
+  onProgress: (loaded, total) => {
+    setStatus(`VRM 読み込み中... ${formatProgress(loaded, total)}`);
+  },
+  onLoaded: (avatar) => {
+    arController.setAvatarBounds(avatar.bounds);
+    // モーフ削減が走ったかは端末依存なので、コンソールを見なくても分かるよう表示する
+    const morphNote =
+      avatar.morphNotes.length > 0 ? `(モーフ整理: ${avatar.morphNotes.join(' / ')})` : '';
+    setStatus(`VRM ${avatar.versionLabel} を表示中 ${morphNote}`);
+    arController.showHint(`アバターを切り替えました ${morphNote}`);
+    console.log('VRM loaded:', avatar.vrm);
+  },
+  onError: (error) => {
+    console.error('VRM load error:', error);
+    setStatus(`VRMの読み込みに失敗しました: ${describeError(error)}`, true);
+  },
+});
 
 /**
  * AR中のステージ(足元の台と浮遊装飾)。
@@ -218,7 +248,7 @@ const settingsPanel = new SpatialPanel({
         { label: 'かんたん(軽量)', value: 'blob' },
         { label: 'なし', value: 'off' },
       ],
-      initial: contactShadow.getMode(),
+      initial: primaryUnit.getShadowMode(),
       onSelect: (value) => setShadowMode(value as ShadowMode),
     },
     {
@@ -272,14 +302,14 @@ const arController = new ArController(
   },
   (arActive) => {
     scenery.setARMode(arActive);
-    contactShadow.setARActive(arActive);
+    for (const unit of units.values()) unit.setShadowARActive(arActive);
     // ステージはPC表示でも出す(配信の見た目そのものなので)
     refreshStage();
   },
 );
 // ピンチ/両手グリップで無段階に変えたときもUIの選択状態を追従させる
 arController.onScaleChanged = (scale) => {
-  avatar?.applyScale(scale);
+  for (const unit of units.values()) unit.applyScale(scale);
   spatialAudio.setAvatarScale(scale);
   syncSizeUi(scale);
 };
@@ -314,13 +344,13 @@ function syncSizeUi(scale: number): void {
 function setAvatarSizeMode(mode: AvatarSizeMode): void {
   const scale = AVATAR_SCALES[mode];
   roomSpace.scale.setScalar(scale);
-  avatar?.applyScale(scale);
+  for (const unit of units.values()) unit.applyScale(scale);
   spatialAudio.setAvatarScale(scale);
   syncSizeUi(scale);
 }
 
 function setShadowMode(mode: ShadowMode): void {
-  contactShadow.setMode(mode);
+  for (const unit of units.values()) unit.setShadowMode(mode);
   settingsPanel.setActive(mode);
   for (const button of shadowButtons) {
     button.classList.toggle('active', button.dataset.shadow === mode);
@@ -376,7 +406,7 @@ settingsToggle.addEventListener('click', () => {
 });
 
 syncSizeUi(roomSpace.scale.x);
-setShadowMode(contactShadow.getMode());
+setShadowMode(primaryUnit.getShadowMode());
 
 /** 音源位置の計算に使い回すベクトル */
 const _headWorld = new THREE.Vector3();
@@ -384,16 +414,8 @@ const _headWorld = new THREE.Vector3();
 // 他の視聴者の気配。位置は部屋(roomSpace)基準の相対座標でやり取りする
 const peers = new PeerPresence(roomSpace);
 
-// ロード中に立てておくクリスタルの仮アバター(ロード成功時に本体と入れ替わる)
-const placeholder = new PlaceholderAvatar(avatarRoot);
-placeholder.setVisible(false);
-
-let avatar: Avatar | null = null;
-let loading = false;
-
 const demo = new DemoController();
 let liveTransport: Transport | null = null;
-let livePlayer: PoseStreamPlayer | null = null;
 
 
 // 転送量・描画の統計(視聴モードでステージ下に表示)
@@ -405,7 +427,6 @@ const offlineOverlay = document.getElementById('offline-overlay') as HTMLDivElem
 const offlineBadge = offlineOverlay.querySelector('.badge') as HTMLDivElement;
 const offlineHint = offlineOverlay.querySelector('.hint') as HTMLDivElement;
 const OFFLINE_AFTER_MS = 5000;
-let lastLivePacketAt = 0;
 
 /**
  * 視聴できない理由。満員・停止中は「待てば戻る状態」なので、
@@ -433,7 +454,7 @@ function refreshOfflineOverlay(): void {
   }
   offlineBadge.textContent = '⏸ 配信は停止中です';
   offlineHint.textContent = '配信が始まると自動で動き出します';
-  offlineOverlay.hidden = performance.now() - lastLivePacketAt < OFFLINE_AFTER_MS;
+  offlineOverlay.hidden = performance.now() - primaryUnit.lastPacketAt < OFFLINE_AFTER_MS;
 }
 
 /** 満員・停止中は視聴モードでなくても知らせる(理由が分からないと待てない) */
@@ -444,18 +465,6 @@ function setUnavailable(reason: string | null): void {
 }
 
 if (watchMode) window.setInterval(refreshOfflineOverlay, 1000);
-
-// ---- 待機モーション ----
-// 配信が届いていない間はクライアント側で生成した待機モーションを再生し、
-// パケットが来たら配信側を優先する(戻るときもクロスフェードする)
-const idleMotion = new IdleMotion();
-/** 最後の受信からこの時間が空いたら待機モーションへ移る */
-const IDLE_AFTER_MS = OFFLINE_AFTER_MS;
-const IDLE_BLEND_MS = 700;
-/** 待機↔配信の混ぜ具合(0=待機のみ、1=配信のみ) */
-let liveBlend = 0;
-/** 完全に配信側へ移行済みか(移行の瞬間だけ待機の表情を片付ける) */
-let liveOnly = false;
 
 window.setInterval(() => {
   const kbps = (netStats.bytes / 1024).toFixed(1);
@@ -674,8 +683,6 @@ function sendPeerState(): void {
 
 /** 配信者から指示された最後のアバターURL(同じ指示の再ロードを避ける) */
 let syncedAvatarUrl: string | null = null;
-/** ロード中に届いた切り替え指示(完了後に処理する) */
-let pendingAvatarUrl: string | null = null;
 
 function applyRemoteAvatar(url: string, name?: string): void {
   if (url === syncedAvatarUrl) return;
@@ -684,11 +691,8 @@ function applyRemoteAvatar(url: string, name?: string): void {
   const label = `アバターを切り替えています${name ? `: ${name}` : ''}`;
   setStatus(label);
   arController.showHint(label); // AR中はDOMのステータスが見えないため
-  if (loading) {
-    pendingAvatarUrl = url; // 今のロードが終わってから読み直す
-    return;
-  }
-  void loadVRM(url);
+  // ロード中でもユニット側が覚えていて、完了後に読み直す
+  void primaryUnit.load(url);
 }
 
 /**
@@ -766,7 +770,7 @@ function connectPresence(): void {
 function stopDemo(): void {
   if (!demo.active) return;
   demo.stop();
-  avatar?.resetPose();
+  for (const unit of units.values()) unit.resetPose();
   demoButton.textContent = 'デモ再生';
   demoButton.classList.remove('active');
 }
@@ -776,8 +780,7 @@ function disconnectTransport(): void {
   liveTransport.onStatus = null; // close()後の状態通知でUIを上書きさせない
   liveTransport.close();
   liveTransport = null;
-  livePlayer = null;
-  avatar?.resetPose();
+  for (const unit of units.values()) unit.resetPose();
   wsButton.textContent = '接続';
   transportSelect.disabled = false;
 }
@@ -785,7 +788,6 @@ function disconnectTransport(): void {
 function connectTransport(kind: string, url: string): void {
   stopDemo();
   disconnectTransport();
-  livePlayer = new PoseStreamPlayer();
   liveTransport =
     kind === 'sfu' ? new SfuTransport(url, config.room, auth) : new WebSocketTransport(url);
   if (liveTransport instanceof SfuTransport) {
@@ -800,9 +802,11 @@ function connectTransport(kind: string, url: string): void {
     netStats.bytes += bytes.byteLength;
     netStats.totalBytes += bytes.byteLength;
     netStats.packets += 1;
-    lastLivePacketAt = performance.now();
+    const now = performance.now();
     try {
-      livePlayer?.push(decodePacket(bytes), performance.now());
+      const packet = decodePacket(bytes);
+      // いまは全ユニットへ同じストリームを流す(複数配信者ではストリームIDで振り分ける)
+      for (const unit of units.values()) unit.pushPacket(packet, now);
     } catch (error) {
       console.warn('パケットのデコードに失敗:', error);
     }
@@ -832,53 +836,10 @@ function formatProgress(loaded: number, total: number): string {
 }
 
 // 将来の署名付きURL+暗号化配信(復号済みバッファの直接ロード)を見据えて
-// URL / ArrayBuffer の両方を受け付ける
+// URL / ArrayBuffer の両方を受け付ける。ロードの実体と進捗・完了の通知は
+// AvatarUnit(のフック)に移っている
 async function loadVRM(source: string | ArrayBuffer): Promise<void> {
-  if (loading) return;
-  loading = true;
-  loadButton.disabled = true;
-  setStatus('VRM 読み込み中...');
-  // 表示できるアバターがまだ無いときだけ仮アバターを立てる。
-  // 差し替え中は旧アバターをそのまま見せ続ける(視聴者ごとにDL完了時点で入れ替わる)
-  placeholder.setVisible(avatar === null);
-
-  try {
-    const next = await Avatar.load(source, avatarRoot, {
-      onProgress: (progress) => {
-        setStatus(`VRM 読み込み中... ${formatProgress(progress.loaded, progress.total)}`);
-      },
-      // 表示に入れる前にシェーダとテクスチャをGPUへ載せておく
-      precompile: { renderer, camera, scene },
-    });
-
-    // 新モデルのロードに成功してから旧モデルを外す(失敗時は表示を維持)。
-    // GPUリソースの解放は重いので、見た目を切り替えたあと次のフレームで行う
-    const previous = avatar;
-    previous?.detach();
-    avatar = next;
-    if (previous) requestAnimationFrame(() => previous.dispose());
-    avatar.applyScale(roomSpace.scale.x); // AR中の差し替えでもスケールに追従
-    arController.setAvatarBounds(avatar.bounds);
-    placeholder.setVisible(false);
-
-    // モーフ削減が走ったかは端末依存なので、コンソールを見なくても分かるよう表示する
-    const morphNote =
-      avatar.morphNotes.length > 0 ? `(モーフ整理: ${avatar.morphNotes.join(' / ')})` : '';
-    setStatus(`VRM ${avatar.versionLabel} を表示中 ${morphNote}`);
-    arController.showHint(`アバターを切り替えました ${morphNote}`);
-    console.log('VRM loaded:', avatar.vrm);
-  } catch (error) {
-    console.error('VRM load error:', error);
-    setStatus(`VRMの読み込みに失敗しました: ${describeError(error)}`, true);
-    placeholder.setVisible(avatar === null);
-  } finally {
-    loading = false;
-    loadButton.disabled = false;
-    // ロード中に届いた切り替え指示を処理する
-    const next = pendingAvatarUrl;
-    pendingAvatarUrl = null;
-    if (next && next !== source) void loadVRM(next);
-  }
+  await primaryUnit.load(source);
 }
 
 loadButton.addEventListener('click', () => {
@@ -947,8 +908,6 @@ renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
   const delta = clock.getDelta();
   scenery.update(clock.elapsedTime);
   arStage.update(clock.elapsedTime);
-  placeholder.update(clock.elapsedTime);
-  contactShadow.update();
   arController.onFrame(frame);
   peers.update();
 
@@ -958,35 +917,23 @@ renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
     sendPeerState();
   }
 
-  if (avatar) {
-    const now = performance.now();
-    const player = livePlayer ?? (demo.active ? demo.player : null);
-    const liveFrame = player?.sample(now);
-    // デモ再生は常に配信側扱い。実配信はパケットが途切れたら待機モーションへ戻す
-    const liveReady = Boolean(liveFrame?.pose) && (demo.active || now - lastLivePacketAt < IDLE_AFTER_MS);
-
-    const step = delta * (1000 / IDLE_BLEND_MS);
-    liveBlend = THREE.MathUtils.clamp(liveBlend + (liveReady ? step : -step), 0, 1);
-
-    // 音声の音源をアバターの頭へ追従させる
-    spatialAudio.setSourcePosition(avatar.getHeadWorldPosition(_headWorld));
-
-    if (liveBlend >= 1 && liveFrame) {
-      if (!liveOnly) {
-        // 待機中のまばたきが「目を閉じたまま」で残らないよう、移行時に戻す
-        avatar.vrm.expressionManager?.setValue('blink', 0);
-        liveOnly = true;
-      }
-      avatar.applyPose(liveFrame);
-    } else {
-      liveOnly = false;
-      const idleFrame = idleMotion.sample(now, avatar.restPose);
-      avatar.applyPose(
-        liveBlend > 0 && liveFrame ? blendPose(idleFrame, liveFrame, liveBlend) : idleFrame,
-      );
-    }
+  // ポーズ適用。未接続でデモ中はデモのバッファを全ユニットへ流す(2体表示の検証にも使う)
+  const now = performance.now();
+  const demoPlayer = !liveTransport && demo.active ? demo.player : null;
+  for (const unit of units.values()) {
+    unit.update({
+      now,
+      delta,
+      elapsed: clock.elapsedTime,
+      player: liveTransport ? unit.player : demoPlayer,
+      alwaysLive: demoPlayer !== null,
+    });
   }
-  avatar?.update(delta);
+
+  // 音声の音源を主ユニットのアバターの頭へ追従させる
+  const head = primaryUnit.getHeadWorldPosition(_headWorld);
+  if (head) spatialAudio.setSourcePosition(head);
+
   controls.update();
   renderer.render(scene, camera);
 });
@@ -997,12 +944,12 @@ Object.assign(window, {
     renderer,
     loadVRM,
     demo,
-    getVrm: () => avatar?.vrm ?? null,
-    getAvatar: () => avatar,
+    getVrm: () => primaryUnit.avatar?.vrm ?? null,
+    getAvatar: () => primaryUnit.avatar,
     /** メッシュごとの表示状態・モーフ数・マテリアル設定を一覧する(実機での切り分け用) */
     inspectMeshes: () => {
       const rows: Record<string, unknown>[] = [];
-      avatar?.vrm.scene.traverse((object) => {
+      primaryUnit.avatar?.vrm.scene.traverse((object) => {
         const mesh = object as THREE.Mesh;
         if (!mesh.isMesh) return;
         const material = (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material) as
@@ -1032,7 +979,7 @@ Object.assign(window, {
      */
     disableMorphs: (meshName?: string) => {
       let hit = 0;
-      avatar?.vrm.scene.traverse((object) => {
+      primaryUnit.avatar?.vrm.scene.traverse((object) => {
         const mesh = object as THREE.Mesh;
         if (!mesh.isMesh) return;
         if (meshName && mesh.name !== meshName) return;
@@ -1047,19 +994,37 @@ Object.assign(window, {
       console.log(`[debug] ${hit}メッシュのモーフを外しました`);
       return hit;
     },
-    placeholder,
     spatialAudio,
     roomSpace,
-    avatarRoot,
+    units,
+    primaryUnit,
+    /** 複数配信者の描画検証用: 同じストリームで動く2体目を隣に生やす */
+    spawnTestUnit: (offsetX = 0.9, url?: string) => {
+      const slot = Math.max(...units.keys()) + 1;
+      const unit = createUnit(slot);
+      unit.root.position.x = offsetX;
+      const source = url ?? urlInput.value.trim();
+      if (source) void unit.load(source);
+      return unit;
+    },
+    removeTestUnit: (slot: number) => {
+      if (slot === 0) return false;
+      const unit = units.get(slot);
+      unit?.dispose();
+      units.delete(slot);
+      return unit !== undefined;
+    },
     scene,
     scenery,
     THREE,
     setAvatarScale: (scale: number) => {
       roomSpace.scale.setScalar(scale);
-      avatar?.applyScale(scale);
+      for (const unit of units.values()) unit.applyScale(scale);
       spatialAudio.setAvatarScale(scale);
     },
-    setContactShadow: (on: boolean) => contactShadow.setARActive(on),
+    setContactShadow: (on: boolean) => {
+      for (const unit of units.values()) unit.setShadowARActive(on);
+    },
     setShadowMode,
     setAvatarSizeMode,
     setSpatialAudio,
@@ -1077,7 +1042,7 @@ urlInput.value = config.vrmUrl;
 syncedAvatarUrl = config.vrmUrl;
 void loadVRM(config.vrmUrl).then(() => {
   // デプロイ環境には既定VRMを置かないため、初回ロード失敗時は使い方を案内する
-  if (!avatar && config.vrmUrl === DEFAULT_VRM_PATH) {
+  if (!primaryUnit.avatar && config.vrmUrl === DEFAULT_VRM_PATH) {
     setStatus(
       '既定のVRMがありません。上のURL欄にVRMのURL(CORS許可済み)を入れてロードするか、?vrm= で指定してください',
       true,
