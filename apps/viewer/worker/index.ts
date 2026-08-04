@@ -68,9 +68,20 @@ function audioPublisherKey(room: string): string {
  */
 const MAX_VRM_BYTES = 80 * 1024 * 1024;
 
+/**
+ * ステージモデルの上限。**視聴者全員がダウンロードする**ので、VRMより厳しくする
+ * (演出のために毎回配るものなので軽さを優先する)
+ */
+const MAX_STAGE_BYTES = 10 * 1024 * 1024;
+
 /** ルームにアップロードしたVRMのR2キー接頭辞(既定VRMはトップレベルのまま) */
 function roomVrmPrefix(room: string): string {
   return `rooms/${room}/`;
+}
+
+/** ステージモデルはVRMと混ざらないよう別の接頭辞へ置く */
+function roomStagePrefix(room: string): string {
+  return `rooms/${room}/stage/`;
 }
 
 /**
@@ -84,6 +95,14 @@ function sanitizeVrmName(raw: string): string | null {
   if (/[\u0000-\u001f\u007f]/.test(base)) return null;
   if (!base.toLowerCase().endsWith('.vrm')) return null;
   return base;
+}
+
+/** ステージモデル用。中身の検証はしないので拡張子だけで受ける */
+function sanitizeStageName(raw: string): string | null {
+  const name = sanitizeVrmName(raw.replace(/\.(glb|gltf)$/i, '.vrm'));
+  if (!name) return null;
+  const original = (raw.split(/[\\/]/).pop() ?? '').trim();
+  return /\.(glb|gltf)$/i.test(original) ? original : null;
 }
 
 /** R2キーを /vrm/ 配信URLに変換する(パス区切りは保ったままエンコード) */
@@ -425,6 +444,30 @@ interface AvatarRecord {
 }
 
 /**
+ * ステージ(アバターの周りの飾り)。アバターと同じく配信者が決め、
+ * 接続中の視聴者へ押し出す。PC表示でもAR中でも使う
+ */
+interface StageRecord {
+  /** none: 何も出さない / builtin: 組み込みの装飾 / model: アップロードしたモデル */
+  source: 'none' | 'builtin' | 'model';
+  /** source==='model' のときのR2キーと配信URL */
+  key?: string;
+  name?: string;
+  url?: string;
+  /** PC表示の空と地面の色(#rrggbb)。未指定なら既定色 */
+  sky?: string | null;
+  ground?: string | null;
+  ts: number;
+}
+
+/** 色は #rrggbb だけ受ける(そのままCSS/threeへ渡すため) */
+function sanitizeColor(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== 'string') return undefined;
+  return /^#[0-9a-fA-F]{6}$/.test(value) ? value : undefined;
+}
+
+/**
  * ルームのVRM管理API(すべて配信者キーが必要)。
  * - POST /api/vrm/upload?room=&name= : R2へアップロード(ボディがVRM本体)
  * - GET  /api/vrm/list?room=         : そのルームにあるVRM一覧
@@ -527,6 +570,122 @@ async function handleAvatarApi(request: Request, env: Env, url: URL): Promise<Re
   return json(200, { ok: true, ...record });
 }
 
+/**
+ * ステージのモデル管理(すべて配信者キーが必要)。
+ * VRMと同じ流れだが、置き場と拡張子と上限が違う
+ * - POST /api/stage/upload?room=&name= : R2へアップロード(ボディがモデル本体)
+ * - GET  /api/stage/list?room=         : そのルームのモデル一覧
+ * - POST /api/stage/delete?room=&name= : 削除
+ */
+async function handleStageAssetApi(request: Request, env: Env, url: URL): Promise<Response> {
+  const room = normalizeRoom(url.searchParams.get('room'));
+  if (!(await allows(env, request, url, 'broadcaster', room))) {
+    return json(403, { error: 'forbidden(配信者キーが必要です)' });
+  }
+  const prefix = roomStagePrefix(room);
+
+  if (request.method === 'POST' && url.pathname === '/api/stage/upload') {
+    const name = sanitizeStageName(url.searchParams.get('name') ?? '');
+    if (!name) return json(400, { error: 'ファイル名が不正です(.glb / .gltf・100文字以内)' });
+    const declared = Number(request.headers.get('Content-Length') ?? '');
+    if (!Number.isFinite(declared) || declared <= 0) {
+      return json(411, { error: 'Content-Lengthが必要です' });
+    }
+    if (declared > MAX_STAGE_BYTES) {
+      const limit = Math.floor(MAX_STAGE_BYTES / 1024 / 1024);
+      return json(413, {
+        error: `ファイルが大きすぎます(上限 ${limit}MB。視聴者全員がダウンロードします)`,
+      });
+    }
+    if (!request.body) return json(400, { error: 'ボディがありません' });
+    await env.VRM_BUCKET.put(`${prefix}${name}`, request.body);
+    return json(200, { ok: true, key: `${prefix}${name}`, name, size: declared });
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/stage/list') {
+    const listed = await env.VRM_BUCKET.list({ prefix });
+    return json(200, {
+      room,
+      items: listed.objects.map((object) => ({
+        key: object.key,
+        name: object.key.slice(prefix.length),
+        size: object.size,
+        uploaded: object.uploaded.getTime(),
+      })),
+    });
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/stage/delete') {
+    const name = sanitizeStageName(url.searchParams.get('name') ?? '');
+    if (!name) return json(400, { error: 'ファイル名が不正です' });
+    await env.VRM_BUCKET.delete(`${prefix}${name}`);
+    return json(200, { ok: true });
+  }
+
+  return json(404, { error: 'not found' });
+}
+
+/**
+ * 現在のステージの取得/変更(配信者キー必須)。
+ * アバターと同じくPresence DOへ渡し、接続中の視聴者へ即座に配る
+ */
+async function handleStageApi(request: Request, env: Env, url: URL): Promise<Response> {
+  const room = normalizeRoom(url.searchParams.get('room'));
+  if (!(await allows(env, request, url, 'broadcaster', room))) {
+    return json(403, { error: 'forbidden(配信者キーが必要です)' });
+  }
+  const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
+
+  if (request.method === 'GET') {
+    const current = await stub.fetch('https://presence.internal/stage');
+    return json(200, (await current.json()) as unknown);
+  }
+  if (request.method !== 'POST') return json(405, { error: 'method not allowed' });
+
+  const body = (await request.json()) as {
+    source?: string;
+    key?: string;
+    sky?: unknown;
+    ground?: unknown;
+  };
+  const source =
+    body.source === 'none' || body.source === 'builtin' || body.source === 'model'
+      ? body.source
+      : 'builtin';
+
+  const record: StageRecord = { source, ts: Date.now() };
+  const sky = sanitizeColor(body.sky);
+  if (sky !== undefined) record.sky = sky;
+  const ground = sanitizeColor(body.ground);
+  if (ground !== undefined) record.ground = ground;
+
+  if (source === 'model') {
+    if (!env.VRM_TOKEN) {
+      return json(503, { error: 'VRM_TOKEN未設定のため配信URLを組み立てられません' });
+    }
+    const key = String(body.key ?? '');
+    const prefix = roomStagePrefix(room);
+    const localName = key.startsWith(prefix) ? key.slice(prefix.length) : null;
+    // 自ルームにアップロードしたモデルだけを許可する
+    if (localName === null || sanitizeStageName(localName) !== localName) {
+      return json(400, { error: 'このルームでは使えないキーです' });
+    }
+    if (!(await env.VRM_BUCKET.head(key))) {
+      return json(404, { error: 'R2にそのモデルがありません' });
+    }
+    record.key = key;
+    record.name = localName;
+    record.url = vrmUrlFor(key, env.VRM_TOKEN);
+  }
+
+  const result = await stub.fetch('https://presence.internal/stage', {
+    method: 'POST',
+    body: JSON.stringify(record),
+  });
+  if (!result.ok) return json(502, { error: 'ステージの配信に失敗しました' });
+  return json(200, { ok: true, stage: record });
+}
+
 interface ChatItem {
   text: string;
   ts: number;
@@ -542,6 +701,8 @@ const PEER_MIN_INTERVAL_MS = 60;
 const MESSAGE_MAX_BYTES = 2048;
 /** 現在のアバター(接続時に配り、切り替え時にブロードキャストする) */
 const AVATAR_KEY = 'avatar';
+/** 現在のステージ。アバターと同じ扱い(接続時に配り、変更時に配信する) */
+const STAGE_KEY = 'stage';
 /**
  * 現在の音声パブリッシャー。アバターと同じく接続時に配り、変化時に配信する。
  * 以前は視聴側が30秒ごとに状態APIを叩いて確認していたが、視聴者×1日2,880回に
@@ -700,6 +861,17 @@ export class Presence extends DurableObject<Env> {
       return Response.json({ mode: (await this.settings()).peerMode });
     }
 
+    // ステージの取得/変更(Worker本体が配信者キーを検証したうえで呼ぶ内部API)
+    if (path === '/stage') {
+      if (request.method === 'GET') {
+        return Response.json({ stage: await this.stage() });
+      }
+      const record = (await request.json()) as StageRecord;
+      await this.ctx.storage.put(STAGE_KEY, record);
+      this.broadcastJson({ type: 'stage', stage: record });
+      return new Response(null, { status: 204 });
+    }
+
     // アバターの取得/切り替え(Worker本体が配信者キーを検証したうえで呼ぶ内部API)
     if (path === '/avatar') {
       if (request.method === 'GET') {
@@ -781,6 +953,8 @@ export class Presence extends DurableObject<Env> {
     // 途中入室者にも現在のアバターを配る(配信者が切り替えた状態に追いつける)
     const avatar = await this.ctx.storage.get<AvatarRecord>(AVATAR_KEY);
     if (avatar) pair[1].send(JSON.stringify({ type: 'avatar', ...avatar }));
+    // ステージも同様(途中入室でも配信者の設定した見た目になる)
+    pair[1].send(JSON.stringify({ type: 'stage', stage: await this.stage() }));
     // 音声も同様。既に配信中なら入室した時点で購読できる
     const audio = await this.freshAudio();
     if (audio) {
@@ -789,6 +963,13 @@ export class Presence extends DurableObject<Env> {
       );
     }
     return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  /** 現在のステージ。未設定なら組み込みの装飾を出す */
+  private async stage(): Promise<StageRecord> {
+    return (
+      (await this.ctx.storage.get<StageRecord>(STAGE_KEY)) ?? { source: 'builtin', ts: 0 }
+    );
   }
 
   /** 保存済みの音声パブリッシャー。失効していれば null */
@@ -1098,14 +1279,20 @@ export default {
     if (
       url.pathname.startsWith('/api/sfu/') ||
       url.pathname.startsWith('/api/vrm/') ||
-      url.pathname === '/api/avatar'
+      url.pathname.startsWith('/api/stage/') ||
+      url.pathname === '/api/avatar' ||
+      url.pathname === '/api/stage'
     ) {
       if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: CORS_HEADERS });
       }
       try {
         if (url.pathname.startsWith('/api/vrm/')) return await handleVrmApi(request, env, url);
+        if (url.pathname.startsWith('/api/stage/')) {
+          return await handleStageAssetApi(request, env, url);
+        }
         if (url.pathname === '/api/avatar') return await handleAvatarApi(request, env, url);
+        if (url.pathname === '/api/stage') return await handleStageApi(request, env, url);
         return await handleSfuApi(request, env, url);
       } catch (error) {
         return json(500, { error: String(error) });

@@ -9,9 +9,23 @@ export interface Scenery {
   update(elapsedSeconds: number): void;
   /** ARモード: 装飾(床・プリミティブ・背景・フォグ)を隠してアバターだけにする */
   setARMode(on: boolean): void;
+  /**
+   * 装飾(床・プリミティブ)の表示。
+   * 配信者がステージを設定したときは引っ込める(二重に飾らない)
+   */
+  setDecorationsVisible(visible: boolean): void;
+  /**
+   * 配信者が決める配色。空(背景とフォグ)と地面をそれぞれ指定できる。
+   * `null` を渡した項目は既定値へ戻す。ARでは背景も地面も出ないので効かない
+   */
+  setTheme(theme: { sky?: string | null; ground?: string | null }): void;
 }
 
-const BACKGROUND = 0xf3edff; // ラベンダーがかった白
+/** 配信者が色を決めなかったときの既定 */
+export const DEFAULT_SKY_COLOR = '#f3edff';
+export const DEFAULT_GROUND_COLOR = '#fbf8ff';
+
+const BACKGROUND = 0xf3edff; // ラベンダーがかった白(DEFAULT_SKY_COLOR と同じ)
 const PASTELS = {
   pink: 0xffd1dc,
   mint: 0xc8f0de,
@@ -44,6 +58,9 @@ export function setupScenery(scene: THREE.Scene): Scenery {
   // ライトはARでもアバターに必要なのでグループ外
   const decorations = new THREE.Group();
   scene.add(decorations);
+  /** AR中か / 配信者が装飾を出したいか。両方を満たすときだけ表示する */
+  let arMode = false;
+  let decorationsWanted = true;
 
   // ライティング: パステルに合わせて柔らかく明るく
   const hemisphere = new THREE.HemisphereLight(0xffffff, 0xe6d9ee, 1.1);
@@ -143,8 +160,25 @@ export function setupScenery(scene: THREE.Scene): Scenery {
         f.mesh.rotation.y += f.spin * 0.016;
       }
     },
+    setDecorationsVisible(visible: boolean): void {
+      decorationsWanted = visible;
+      decorations.visible = visible && !arMode;
+    },
+    setTheme(theme: { sky?: string | null; ground?: string | null }): void {
+      if (theme.sky !== undefined) {
+        background.set(theme.sky ?? DEFAULT_SKY_COLOR);
+        // フォグも同じ色にしないと、遠景で地面の縁が浮いて見える
+        fog.color.set(theme.sky ?? DEFAULT_SKY_COLOR);
+      }
+      if (theme.ground !== undefined) {
+        (ground.material as THREE.MeshStandardMaterial).color.set(
+          theme.ground ?? DEFAULT_GROUND_COLOR,
+        );
+      }
+    },
     setARMode(on: boolean): void {
-      decorations.visible = !on;
+      arMode = on;
+      decorations.visible = decorationsWanted && !on;
       scene.background = on ? null : background;
       scene.fog = on ? null : fog;
       // ARでは装飾床が消えるので太陽の影は不要。切ることで接地影プレーンへの

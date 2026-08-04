@@ -11,6 +11,7 @@ import {
   readConfig,
   sameOriginWebSocketUrl,
   type RoomSettings,
+  type StageState,
   type TransportKind,
 } from './config';
 import { ContactShadow, type ShadowMode } from '@xroomcast/viewer-core';
@@ -142,13 +143,39 @@ avatarRoot.add(arStage.object);
 /** ステージを出すか(AR中のみ意味を持つ。ARを抜けたら常に隠す) */
 let stageEnabled = true;
 
+/** 配信者が決めたステージ(未受信のうちは組み込みの装飾) */
+let stageState: StageState = { source: 'builtin' };
+
+function refreshStage(): void {
+  // 「なし」なら視聴者側の切り替えに関わらず出さない
+  const wanted = stageEnabled && stageState.source !== 'none';
+  arStage.setVisible(wanted);
+  // ステージを出している間はPC表示の装飾を引っ込める(二重に飾らない)
+  scenery.setDecorationsVisible(!wanted);
+}
+
 function setStageEnabled(on: boolean): void {
   stageEnabled = on;
-  arStage.setVisible(on && arController.isPresenting);
+  refreshStage();
   settingsPanel.setActive(on ? 'stage-on' : 'stage-off');
   for (const button of stageButtons) {
     button.classList.toggle('active', (button.dataset.stage === 'on') === on);
   }
+}
+
+/** 配信者からのステージ設定を反映する */
+function applyStageState(next: StageState): void {
+  stageState = next;
+  arStage.setSource(next.source);
+  scenery.setTheme({ sky: next.sky ?? null, ground: next.ground ?? null });
+  if (next.source === 'model') {
+    void arStage.loadModel(next.url ?? null).catch((error) => {
+      console.warn('[stage] モデルの読み込みに失敗:', error);
+    });
+  } else {
+    void arStage.loadModel(null);
+  }
+  refreshStage();
 }
 
 /**
@@ -238,8 +265,8 @@ const arController = new ArController(
   (arActive) => {
     scenery.setARMode(arActive);
     contactShadow.setARActive(arActive);
-    // ステージはAR専用(PC表示には scenery.ts の装飾があるので出さない)
-    arStage.setVisible(arActive && stageEnabled);
+    // ステージはPC表示でも出す(配信の見た目そのものなので)
+    refreshStage();
   },
 );
 // ピンチ/両手グリップで無段階に変えたときもUIの選択状態を追従させる
@@ -558,6 +585,8 @@ interface PresenceMessage extends PeerState {
   settings?: RoomSettings;
   /** type==='admission': 入室証 */
   token?: string;
+  /** type==='stage': 配信者が決めたステージ */
+  stage?: StageState;
 }
 
 /** 入室証。presence接続後に届く。トランスポートを作り直しても持ち回る */
@@ -701,6 +730,8 @@ function connectPresence(): void {
         // 入室が許された証明。満員のルームでもSFUを使えるようにする
         admissionToken = data.token;
         if (liveTransport instanceof SfuTransport) liveTransport.setAdmission(admissionToken);
+      } else if (data.type === 'stage' && data.stage) {
+        applyStageState(data.stage);
       } else if (data.type === 'settings' && data.settings) {
         applyRoomSettings(data.settings);
       } else if (data.type === 'peerMode') {

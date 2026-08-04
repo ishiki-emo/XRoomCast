@@ -12,6 +12,7 @@
  * ここはアバターの周囲1m強に収まる控えめな構成にしている。
  */
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 /** scenery.ts と同じ系統の淡い色 */
 const COLORS = {
@@ -47,11 +48,27 @@ interface Floater {
   spin: THREE.Vector3;
 }
 
+/**
+ * ステージの中身。
+ * - none    : 何も出さない
+ * - builtin : 組み込みの浮遊装飾
+ * - model   : 配信者がアップロードしたglTF/GLB
+ */
+export type StageSource = 'none' | 'builtin' | 'model';
+
 export interface Stage {
   /** avatarRoot へ add する対象 */
   readonly object: THREE.Object3D;
   setVisible(visible: boolean): void;
   readonly visible: boolean;
+  /** 組み込み装飾とモデルの切り替え */
+  setSource(source: StageSource): void;
+  /**
+   * モデルの読み込み。**アバターの足元が原点・正面が -Z** という約束で
+   * 作られたものを、そのままアバターのフレームへ置く。
+   * 同じURLなら読み直さない(押し出しが重複しても無駄が出ない)
+   */
+  loadModel(url: string | null): Promise<void>;
   update(elapsedSeconds: number): void;
   dispose(): void;
 }
@@ -68,18 +85,29 @@ function softMaterial(color: number, opacity = 1): THREE.MeshStandardMaterial {
 
 export function createStage(): Stage {
   const root = new THREE.Group();
-  root.name = 'ar-stage';
+  root.name = 'stage';
   root.visible = false;
+
+  /** 組み込み装飾。モデルを使うときは丸ごと隠す */
+  const builtin = new THREE.Group();
+  root.add(builtin);
+  /** 読み込んだモデルの置き場 */
+  const modelRoot = new THREE.Group();
+  root.add(modelRoot);
 
   const disposables: (THREE.BufferGeometry | THREE.Material)[] = [];
   const floaters: Floater[] = [];
+  let source: StageSource = 'builtin';
+  let loadedUrl: string | null = null;
+  /** 読み込み中のURL(古い応答で新しいモデルを上書きしないため) */
+  let loadingUrl: string | null = null;
 
   const add = (mesh: THREE.Mesh): THREE.Mesh => {
     // ARでは接地影を別に描いているので、ステージ側で影を作ると二重になる
     mesh.castShadow = false;
     mesh.receiveShadow = false;
     disposables.push(mesh.geometry, mesh.material as THREE.Material);
-    root.add(mesh);
+    builtin.add(mesh);
     return mesh;
   };
 
@@ -200,6 +228,26 @@ export function createStage(): Stage {
     spin: [0, 1.5, 0],
   });
 
+  const applySource = (): void => {
+    builtin.visible = source === 'builtin';
+    modelRoot.visible = source === 'model';
+  };
+  applySource();
+
+  /** 読み込んだモデルを捨てる(差し替えのたびに積み上がらないように) */
+  const clearModel = (): void => {
+    modelRoot.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      mesh.geometry.dispose();
+      const material = mesh.material;
+      if (Array.isArray(material)) material.forEach((m) => m.dispose());
+      else material.dispose();
+    });
+    modelRoot.clear();
+    loadedUrl = null;
+  };
+
   return {
     object: root,
     get visible(): boolean {
@@ -208,8 +256,33 @@ export function createStage(): Stage {
     setVisible(visible: boolean): void {
       root.visible = visible;
     },
+    setSource(next: StageSource): void {
+      source = next;
+      applySource();
+    },
+    async loadModel(url: string | null): Promise<void> {
+      if (url === loadedUrl && url !== null) return;
+      if (!url) {
+        clearModel();
+        return;
+      }
+      loadingUrl = url;
+      const gltf = await new GLTFLoader().loadAsync(url);
+      // 読み込み中に別のモデルへ切り替わっていたら捨てる
+      if (loadingUrl !== url) return;
+      clearModel();
+      gltf.scene.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        // 接地影と二重にならないよう、ステージ側は影を落とさない
+        mesh.castShadow = false;
+        mesh.receiveShadow = true;
+      });
+      modelRoot.add(gltf.scene);
+      loadedUrl = url;
+    },
     update(elapsedSeconds: number): void {
-      if (!root.visible) return;
+      if (!root.visible || source !== 'builtin') return;
       for (const f of floaters) {
         const bob = Math.sin(elapsedSeconds * f.bobSpeed + f.phase) * f.amplitude;
         if (f.orbitRadius > 0) {

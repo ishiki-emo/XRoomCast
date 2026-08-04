@@ -11,6 +11,7 @@ import { withAuth } from '@xroomcast/sync';
 import { createAuth } from './auth';
 import { readConfig, sameOriginWebSocketUrl, type RoomSettings } from './config';
 import { setupRoomSettings } from './roomSettings';
+import { setupStageConsole } from './stageConsole';
 import { withRoom } from '@xroomcast/sync';
 import { DEFAULT_WRIST_OFFSET, HmdBroadcast, setWristOffset } from './hmdBroadcast';
 import type { PeerState } from '@xroomcast/viewer-core';
@@ -306,6 +307,7 @@ if (!key) {
   toggleButton.disabled = true;
 } else {
   setupAvatarConsole({ room: config.room, auth });
+  setupStageConsole({ room: config.room, auth });
   setupPreview();
 }
 

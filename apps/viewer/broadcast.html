@@ -372,6 +372,39 @@
         ・アップロードしたVRMはこのルーム専用です。イベント後は削除してください
       </p>
 
+      <h2>🎪 ステージ</h2>
+      <div id="st-status">読み込み中...</div>
+      <div class="row">
+        <span class="ar-label">表示</span>
+        <button class="small" data-stagesource="none">なし</button>
+        <button class="small" data-stagesource="builtin">組み込みの装飾</button>
+        <button class="small" data-stagesource="model">モデル</button>
+      </div>
+      <div class="row">
+        <input type="file" id="st-file" accept=".glb,.gltf,model/gltf-binary,model/gltf+json" />
+        <button id="st-upload" class="small primary">アップロード</button>
+      </div>
+      <ul id="st-list"></ul>
+      <p class="empty" id="st-empty" hidden>
+        まだモデルがありません。上から追加してください
+      </p>
+      <div class="row">
+        <span class="ar-label">空の色</span>
+        <input type="color" id="st-sky" value="#f3edff" />
+        <span class="ar-label">地面の色</span>
+        <input type="color" id="st-ground" value="#fbf8ff" />
+        <button class="small primary" id="st-color-apply">適用</button>
+        <button class="small" id="st-color-reset">既定に戻す</button>
+      </div>
+      <p class="note">
+        ・ステージは<strong>PC表示でもAR中でも出ます</strong>(配信の見た目そのものなので)<br />
+        ・ステージを出している間は、PC表示の既定の装飾(浮遊する図形)は引っ込みます<br />
+        ・モデルは<strong>アバターの足元が原点・正面が -Z</strong> で作ってください。
+        そのままアバターの位置に置かれるので、ARで設置・拡大縮小するとステージごと追従します<br />
+        ・<strong>10MB以内</strong>にしてください。視聴者全員がダウンロードします<br />
+        ・空と地面の色はPC表示のみです(ARでは現実の風景が背景になります)
+      </p>
+
       <p class="note" id="app-version"></p>
     </div>
     <!-- 会場掲示用の全画面QR。白背景・余白ありでスマホから読み取りやすくする -->

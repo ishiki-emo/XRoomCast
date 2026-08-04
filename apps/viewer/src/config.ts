@@ -66,6 +66,21 @@ export interface RoomSettings {
   viewerVoice: boolean;
 }
 
+/**
+ * 配信者が決めるステージ(アバターの周りの飾りと、PC表示の配色)。
+ * サーバーが保持し、接続時と変更時に押し出す
+ */
+export interface StageState {
+  source: 'none' | 'builtin' | 'model';
+  /** source==='model' のときのR2キーと配信URL(キーは配信者コンソールが使う) */
+  key?: string;
+  url?: string;
+  name?: string;
+  /** PC表示の空と地面の色(#rrggbb)。null/未指定なら既定色 */
+  sky?: string | null;
+  ground?: string | null;
+}
+
 export interface AppConfig {
   /** 参加するルーム。SFU・同接・コメントの分離単位 */
   room: string;
