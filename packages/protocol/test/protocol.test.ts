@@ -145,7 +145,7 @@ describe('encodePacket / decodePacket', () => {
     expect(() => decodePacket(bytes)).toThrow(/バージョン/);
   });
 
-  it('壊れたパケット(切り詰め・余分なバイト)を拒否する', () => {
+  it('切り詰められたパケットを拒否する', () => {
     const bytes = encodePacket({
       sequence: 1,
       timestamp: 1,
@@ -156,9 +156,31 @@ describe('encodePacket / decodePacket', () => {
       },
     });
     expect(() => decodePacket(bytes.subarray(0, bytes.length - 4))).toThrow();
+  });
+
+  it('末尾の未知セクションは無視して既知部分を読む(§6.6)', () => {
+    const packet: Packet = {
+      sequence: 42,
+      timestamp: 4242,
+      pose: {
+        head: f32Node([0, 1.4, 0], [0, 0, 0, 1]),
+        leftHand: f32Node([0.3, 1, 0], [0, 0, 0, 1]),
+        rightHand: f32Node([-0.3, 1, 0], [0, 0, 0, 1]),
+      },
+    };
+    const bytes = encodePacket(packet);
+
+    // 将来のデコーダだけが知るセクション(予約ビット bit4)が末尾に付いた想定
+    const extended = new Uint8Array(bytes.length + 28);
+    extended.set(bytes, 0);
+    extended[1]! |= 1 << 4;
+    extended.fill(0x7f, bytes.length);
+    expect(decodePacket(extended)).toEqual(packet);
+
+    // フラグなしの単なる余剰バイトも同じルールで許容する
     const padded = new Uint8Array(bytes.length + 3);
     padded.set(bytes, 0);
-    expect(() => decodePacket(padded)).toThrow(/パケット長/);
+    expect(decodePacket(padded)).toEqual(packet);
   });
 
   it('Uint8Array と ArrayBuffer のどちらも受け付ける', () => {

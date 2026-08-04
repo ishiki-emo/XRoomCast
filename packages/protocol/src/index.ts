@@ -67,6 +67,9 @@ const FINGER_SECTION_SIZE = 12;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+/** 末尾の未知セクションを無視した警告は毎パケット出ると洪水になるため1回だけ */
+let warnedTrailingBytes = false;
+
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
@@ -243,8 +246,17 @@ export function decodePacket(data: Uint8Array | ArrayBuffer): Packet {
     packet.dictionary = dictionary;
   }
 
-  if (o !== bytes.byteLength) {
-    throw new Error(`パケット長が不正です(期待 ${o} バイト、実際 ${bytes.byteLength} バイト)`);
+  if (o > bytes.byteLength) {
+    throw new Error(`パケットが短すぎます(必要 ${o} バイト、実際 ${bytes.byteLength} バイト)`);
+  }
+
+  // 既知セクションを読み終えた後に残るバイトは、将来のセクション(§6.6)とみなして無視する。
+  // 旧デコーダを落とさずにセクションを末尾追加できるようにするための互換ルール。
+  if (o < bytes.byteLength && !warnedTrailingBytes) {
+    warnedTrailingBytes = true;
+    console.warn(
+      `[protocol] 末尾の未知セクション(${bytes.byteLength - o} バイト)を無視しました。送信側がこちらの知らない新しいセクションを送っています(この警告は初回のみ)`,
+    );
   }
 
   return packet;
