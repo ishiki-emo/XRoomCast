@@ -511,22 +511,40 @@ window.setInterval(() => {
 const audioButton = document.getElementById('audio-button') as HTMLButtonElement;
 const spatialAudio = new SpatialAudio(camera, scene);
 let audioMuted = true;
-let currentAudioTrack: MediaStreamTrack | null = null;
+/** 席ごとの最新トラックと、いま鳴っている席(音声ボタンの表示判定に使う) */
+const audioTracks = new Map<number, MediaStreamTrack>();
+const audibleSlots = new Set<number>();
 
-function handleAudioTrack(track: MediaStreamTrack | null): void {
-  currentAudioTrack = track;
+function refreshAudioButton(): void {
   // ボタンの表示を先に決める。再生側で例外が出ても操作手段だけは残す
-  audioButton.hidden = track === null;
-  spatialAudio.setTrack(track);
-  if (!track) return;
+  audioButton.hidden = audibleSlots.size === 0;
+}
+
+function handleAudioTrack(slot: number, track: MediaStreamTrack | null): void {
+  spatialAudio.setTrack(track, slot);
+  if (!track) {
+    audioTracks.delete(slot);
+    audibleSlots.delete(slot);
+    refreshAudioButton();
+    return;
+  }
+  audioTracks.set(slot, track);
+  audibleSlots.add(slot);
+  refreshAudioButton();
   // 配信者側が停止するとリモートトラックはmuteになる(endedは飛んでこない)
-  const hideIfCurrent = (): void => {
-    if (currentAudioTrack === track) audioButton.hidden = true;
+  const dropIfCurrent = (): void => {
+    if (audioTracks.get(slot) === track) {
+      audibleSlots.delete(slot);
+      refreshAudioButton();
+    }
   };
-  track.onmute = hideIfCurrent;
-  track.onended = hideIfCurrent;
+  track.onmute = dropIfCurrent;
+  track.onended = dropIfCurrent;
   track.onunmute = () => {
-    if (currentAudioTrack === track) audioButton.hidden = false;
+    if (audioTracks.get(slot) === track) {
+      audibleSlots.add(slot);
+      refreshAudioButton();
+    }
   };
 }
 
@@ -744,20 +762,29 @@ function applyPublishers(list: { slot: number; sessionId: string }[]): void {
     unit.dispose();
     units.delete(slot);
     syncedAvatarUrls.delete(slot);
+    remoteAudios.delete(slot);
+    spatialAudio.removeSource(slot);
+    audioTracks.delete(slot);
+    audibleSlots.delete(slot);
+    refreshAudioButton();
   }
   if (liveTransport instanceof SfuTransport) liveTransport.notifyPublishers(list);
 }
 
 /**
- * 配信者の音声パブリッシャー。presenceから届く最新値を保持する。
+ * 配信者の音声パブリッシャー(席ごと)。presenceから届く最新値を保持する。
  * トランスポートより先に届くことも、張り直しでトランスポートが差し替わることも
  * あるため、状態はここに持ってトランスポート生成時に流し込む
  */
-let remoteAudio: { sessionId: string; trackName: string } | null = null;
+const remoteAudios = new Map<number, { sessionId: string; trackName: string } | null>();
 
-function applyRemoteAudio(audio: { sessionId: string; trackName: string } | null): void {
-  remoteAudio = audio;
-  if (liveTransport instanceof SfuTransport) liveTransport.setAudioPublisher(audio);
+function applyRemoteAudio(
+  slot: number,
+  audio: { sessionId: string; trackName: string } | null,
+): void {
+  if (slot < 0 || slot >= MAX_SLOTS) return;
+  remoteAudios.set(slot, audio);
+  if (liveTransport instanceof SfuTransport) liveTransport.setAudioPublisher(audio, slot);
 }
 
 // 同接・コメント用WebSocket。切断時は少し間を置いて張り直す
@@ -790,9 +817,9 @@ function connectPresence(): void {
       } else if (data.type === 'publishers' && Array.isArray(data.publishers)) {
         applyPublishers(data.publishers);
       } else if (data.type === 'audio') {
-        // 配信者のマイクの開始/停止。以前は視聴側が30秒ごとに問い合わせていたが、
+        // 配信者のマイクの開始/停止(席ごと)。以前は視聴側が30秒ごとに問い合わせていたが、
         // サーバーからの押し出しに変えた(視聴者×1日2,880回のリクエストが消える)
-        applyRemoteAudio(data.audio ?? null);
+        applyRemoteAudio(typeof data.slot === 'number' ? data.slot : 0, data.audio ?? null);
       } else if (data.type === 'peer' && typeof data.id === 'string') {
         peers.apply(data.id, data);
       } else if (data.type === 'peerLeft' && typeof data.id === 'string') {
@@ -857,11 +884,11 @@ function connectTransport(kind: string, url: string): void {
     kind === 'sfu' ? new SfuTransport(url, config.room, auth) : new WebSocketTransport(url);
   liveTransport = transport;
   if (transport instanceof SfuTransport) {
-    transport.onAudioTrack = handleAudioTrack;
+    transport.onAudioTrackFrom = handleAudioTrack;
     transport.onUnavailable = setUnavailable;
     if (admissionToken) transport.setAdmission(admissionToken);
-    // presenceで既に音声の開始を受け取っていれば、その状態から始める
-    transport.setAudioPublisher(remoteAudio);
+    // presenceで既に音声の開始を受け取っていれば、その状態から始める(席ごと)
+    for (const [slot, audio] of remoteAudios) transport.setAudioPublisher(audio, slot);
     // SFUは配信者ごとにDataChannelが分かれており、席番号つきで届く
     transport.onPacketFrom = routePacket;
   }
@@ -993,9 +1020,11 @@ renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
     });
   }
 
-  // 音声の音源を主ユニットのアバターの頭へ追従させる
-  const head = primaryUnit.getHeadWorldPosition(_headWorld);
-  if (head) spatialAudio.setSourcePosition(head);
+  // 音声の音源を各席のアバターの頭へ追従させる
+  for (const [slot, unit] of units) {
+    const head = unit.getHeadWorldPosition(_headWorld);
+    if (head) spatialAudio.setSourcePosition(head, slot);
+  }
 
   controls.update();
   renderer.render(scene, camera);

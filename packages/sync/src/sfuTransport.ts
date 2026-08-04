@@ -84,8 +84,10 @@ export class SfuTransport implements Transport {
    * エラーではなく「待てば戻る状態」なので、画面はこれを見て案内を出す
    */
   onUnavailable: ((reason: UnavailableReason | null) => void) | null = null;
-  /** 配信者の音声トラックを購読できたとき(track)と配信終了時(null)に呼ばれる */
+  /** 配信者の音声トラックを購読できたとき(track)と配信終了時(null)に呼ばれる(席0のみ、旧互換) */
   onAudioTrack: ((track: MediaStreamTrack | null) => void) | null = null;
+  /** 席(slot)付きの音声トラック通知。複数配信者ではこちらを使う */
+  onAudioTrackFrom: ((slot: number, track: MediaStreamTrack | null) => void) | null = null;
   /**
    * 席(slot)付きの受信通知。複数配信者では配信者ごとにDataChannelが分かれており、
    * どの席のポーズかを添えて渡す。onPacket も従来どおり全パケットで呼ばれる
@@ -98,9 +100,12 @@ export class SfuTransport implements Transport {
   private retryTimer: number | null = null;
   private watchdogTimer: number | null = null;
   private lastPacketAt = 0;
-  /** サーバーから届いた最新の音声パブリッシャー(未接続時はここで保留する) */
-  private pendingAudio: { sessionId: string; trackName: string } | null = null;
-  private audioSubscribedSession: string | null = null;
+  /** サーバーから届いた最新の音声パブリッシャー(席ごと。未接続時はここで保留する) */
+  private readonly desiredAudio = new Map<number, { sessionId: string; trackName: string } | null>();
+  /** 席ごとに購読済みの配信セッションID */
+  private readonly subscribedAudio = new Map<number, string>();
+  /** SDPのmid → 席番号。ontrack でどの席のトラックかを対応付ける */
+  private readonly midToSlot = new Map<string, number>();
   /**
    * 音声の購読処理を直列化する。押し出しの受信と接続完了が同時に走ると、
    * 同じトラックへ tracks/new を二重に投げ、再ネゴシエーションが衝突して
@@ -109,8 +114,8 @@ export class SfuTransport implements Transport {
   private audioQueue: Promise<void> = Promise.resolve();
   /** DataChannelが開通しているか。開通前に購読を始めると上記の衝突を招く */
   private channelOpen = false;
-  /** 最後に通知した音声トラック。同じものを重複して通知しないために持つ */
-  private lastAudioTrack: MediaStreamTrack | null = null;
+  /** 最後に通知した音声トラック(席ごと)。同じものを重複して通知しないために持つ */
+  private readonly lastAudioTracks = new Map<number, MediaStreamTrack | null>();
   /** 最後に通知した「視聴できない理由」。変化したときだけ伝える */
   private lastUnavailable: UnavailableReason | null = null;
   /** 入室証(presenceで入室が許された証明) */
@@ -188,8 +193,9 @@ export class SfuTransport implements Transport {
     this.pc = null;
     this.channelOpen = false;
     // 新しいセッションではトラックの購読もやり直しになる
-    this.audioSubscribedSession = null;
-    this.lastAudioTrack = null;
+    this.subscribedAudio.clear();
+    this.midToSlot.clear();
+    this.lastAudioTracks.clear();
 
     /**
      * セッションを作る前に配信元の有無を確認する。
@@ -227,13 +233,16 @@ export class SfuTransport implements Transport {
 
       const session = await this.apiPost('/api/sfu/sessions/new', { sdp: offer.sdp });
       this.mySessionId = String(session.sessionId);
-      this.audioSubscribedSession = null;
+      this.subscribedAudio.clear();
       await pc.setRemoteDescription({ type: 'answer', sdp: String(session.sdp) });
 
-      // 配信者の音声トラックが届いたら通知する
+      // 配信者の音声トラックが届いたら、mid→席の対応で振り分けて通知する
       pc.ontrack = (event) => {
         if (generation !== this.generation) return;
-        if (event.track.kind === 'audio') this.reportAudioTrack(event.track);
+        if (event.track.kind !== 'audio') return;
+        const mid = event.transceiver?.mid ?? null;
+        const slot = (mid !== null ? this.midToSlot.get(mid) : undefined) ?? 0;
+        this.reportAudioTrack(slot, event.track);
       };
 
       const sub = await this.apiPost('/api/sfu/subscribe', { sessionId: session.sessionId });
@@ -312,8 +321,8 @@ export class SfuTransport implements Transport {
    * 呼び出し側(視聴ページ)がそれをこのメソッドへ渡す。
    * 接続前に呼ばれた場合は状態だけ覚えておき、接続後に適用する。
    */
-  setAudioPublisher(audio: { sessionId: string; trackName: string } | null): void {
-    this.pendingAudio = audio;
+  setAudioPublisher(audio: { sessionId: string; trackName: string } | null, slot = 0): void {
+    this.desiredAudio.set(slot, audio);
     this.queueAudioApply();
   }
 
@@ -341,77 +350,84 @@ export class SfuTransport implements Transport {
 
   private async applyAudioPublisher(): Promise<void> {
     const generation = this.generation;
-    const audio = this.pendingAudio;
 
-    if (!audio) {
-      /**
-       * 配信者が音声を止めた。
-       *
-       * **audioSubscribedSession は消さない。** これは「どの配信元をSFUで
-       * 購読しているか」であって、配信者がマイクを切ってもSFU側の購読
-       * (トランシーバ)は残っている。ここで消すと再開時に購読をやり直し、
-       * トランシーバがON/OFFのたびに増えていく。
-       *
-       * 一方、通知の記録は必ず消す。条件を付けて囲うと、購読に失敗した回に
-       * 記録が残り、以後の入れ直しが全て「同じトラック」と見なされて
-       * 通知されなくなる
-       */
-      this.reportAudioTrack(null);
-      return;
-    }
-    // DataChannel開通前に購読を始めると再ネゴシエーションが衝突する。
-    // 開通後に channel.onopen から改めて適用されるので、ここでは待つだけでよい
-    if (!this.channelOpen || !this.pc || !this.mySessionId) return;
+    for (const [slot, audio] of [...this.desiredAudio]) {
+      if (generation !== this.generation) return;
 
-    if (audio.sessionId === this.audioSubscribedSession) {
-      /**
-       * 同じ配信元を購読済み。配信者がマイクを入れ直しただけなので、
-       * **購読をやり直さない。** やり直すとSFUがトランシーバを追加し、
-       * ON/OFFのたびに視聴側へ積み上がっていく。
-       * 停止時に通知を消しているので、いま来ているトラックを拾い直して
-       * 「また鳴り始めた」ことだけ伝える(再生側は繋ぎ直さず音量を戻すだけ)
-       */
-      const live = this.liveAudioTrack();
-      if (live) this.reportAudioTrack(live);
-      return;
-    }
-
-    // ontrack が発火したかどうかを見るため、購読前の通知内容を控えておく
-    const beforeTrack = this.lastAudioTrack;
-    try {
-      const result = await this.apiPost('/api/sfu/tracks/new', {
-        sessionId: this.mySessionId,
-        tracks: [{ location: 'remote', sessionId: audio.sessionId, trackName: audio.trackName }],
-      });
-      if (generation !== this.generation || !this.pc) return;
-      const desc = result.sessionDescription as { type: string; sdp: string } | undefined;
-      if (result.requiresImmediateRenegotiation && desc) {
-        await this.pc.setRemoteDescription({ type: 'offer', sdp: desc.sdp });
-        const answer = await this.pc.createAnswer();
-        await this.pc.setLocalDescription(answer);
-        await this.apiPost('/api/sfu/renegotiate', { sessionId: this.mySessionId, sdp: answer.sdp });
+      if (!audio) {
+        /**
+         * 配信者が音声を止めた。
+         *
+         * **subscribedAudio は消さない。** これは「どの配信元をSFUで
+         * 購読しているか」であって、配信者がマイクを切ってもSFU側の購読
+         * (トランシーバ)は残っている。ここで消すと再開時に購読をやり直し、
+         * トランシーバがON/OFFのたびに増えていく。
+         *
+         * 一方、通知の記録は必ず消す。条件を付けて囲うと、購読に失敗した回に
+         * 記録が残り、以後の入れ直しが全て「同じトラック」と見なされて
+         * 通知されなくなる
+         */
+        this.reportAudioTrack(slot, null);
+        continue;
       }
-      this.audioSubscribedSession = audio.sessionId;
+      // DataChannel開通前に購読を始めると再ネゴシエーションが衝突する。
+      // 開通後に channel.onopen から改めて適用されるので、ここでは待つだけでよい
+      if (!this.channelOpen || !this.pc || !this.mySessionId) return;
 
-      /**
-       * 再ネゴシエーションが起きた回は ontrack が正しいトラックを通知済みなので、
-       * ここでは何もしない。**上書きすると壊れる。**
-       *
-       * 配信者がマイクを入れ直すと新しい配信セッションになるため、視聴側の
-       * セッションには**古い(死んだ)トラックのトランシーバが残ったまま**
-       * 新しいものが増える。そこで `getReceivers()` の先頭を拾うと、
-       * 1本目=死んだトラックを掴んでしまい、無音になる。
-       *
-       * 再ネゴシエーションが起きなかった回(SFUがトランシーバを使い回した回)は
-       * ontrack が発火しないので、そのときだけ受信側から拾う。
-       * 拾うときも readyState を見て、生きているものの最新を選ぶ
-       */
-      if (this.lastAudioTrack === beforeTrack) {
-        const received = this.liveAudioTrack();
-        if (received) this.reportAudioTrack(received);
+      if (audio.sessionId === this.subscribedAudio.get(slot)) {
+        /**
+         * 同じ配信元を購読済み。配信者がマイクを入れ直しただけなので、
+         * **購読をやり直さない。** やり直すとSFUがトランシーバを追加し、
+         * ON/OFFのたびに視聴側へ積み上がっていく。
+         * 停止時に通知を消しているので、いま来ているトラックを拾い直して
+         * 「また鳴り始めた」ことだけ伝える(再生側は繋ぎ直さず音量を戻すだけ)
+         */
+        const live = this.liveAudioTrack(slot);
+        if (live) this.reportAudioTrack(slot, live);
+        continue;
       }
-    } catch (error) {
-      console.warn('[sfu] 音声トラックの購読に失敗:', error);
+
+      // ontrack が発火したかどうかを見るため、購読前の通知内容を控えておく
+      const beforeTrack = this.lastAudioTracks.get(slot) ?? null;
+      try {
+        const result = await this.apiPost('/api/sfu/tracks/new', {
+          sessionId: this.mySessionId,
+          tracks: [{ location: 'remote', sessionId: audio.sessionId, trackName: audio.trackName }],
+        });
+        if (generation !== this.generation || !this.pc) return;
+        // どのトランシーバ(mid)がこの席の音声かを控える(ontrackの振り分けに使う)。
+        // **setRemoteDescriptionの前に**控えないと、ontrackが先に発火して席0扱いになる
+        const createdTracks = result.tracks as { mid?: string }[] | undefined;
+        const mid = createdTracks?.[0]?.mid;
+        if (typeof mid === 'string') this.midToSlot.set(mid, slot);
+        const desc = result.sessionDescription as { type: string; sdp: string } | undefined;
+        if (result.requiresImmediateRenegotiation && desc) {
+          await this.pc.setRemoteDescription({ type: 'offer', sdp: desc.sdp });
+          const answer = await this.pc.createAnswer();
+          await this.pc.setLocalDescription(answer);
+          await this.apiPost('/api/sfu/renegotiate', { sessionId: this.mySessionId, sdp: answer.sdp });
+        }
+        this.subscribedAudio.set(slot, audio.sessionId);
+
+        /**
+         * 再ネゴシエーションが起きた回は ontrack が正しいトラックを通知済みなので、
+         * ここでは何もしない。**上書きすると壊れる。**
+         *
+         * 配信者がマイクを入れ直すと新しい配信セッションになるため、視聴側の
+         * セッションには**古い(死んだ)トラックのトランシーバが残ったまま**
+         * 新しいものが増える。先頭を拾うと死んだトラックを掴んで無音になる。
+         *
+         * 再ネゴシエーションが起きなかった回(SFUがトランシーバを使い回した回)は
+         * ontrack が発火しないので、そのときだけ受信側から拾う。
+         * 拾うときも readyState を見て、生きているものの最新を選ぶ
+         */
+        if ((this.lastAudioTracks.get(slot) ?? null) === beforeTrack) {
+          const received = this.liveAudioTrack(slot);
+          if (received) this.reportAudioTrack(slot, received);
+        }
+      } catch (error) {
+        console.warn('[sfu] 音声トラックの購読に失敗:', error);
+      }
     }
   }
 
@@ -438,32 +454,37 @@ export class SfuTransport implements Transport {
   }
 
   /**
-   * いま受け取れている音声トラック。
-   * 配信元が入れ替わると古い(終了した)トラックが残るため、生きているものの
-   * 最新を選ぶ。先頭を拾うと死んだトラックを掴んで無音になる
+   * いま受け取れている、指定席の音声トラック。
+   * 席に対応するトランシーバ(mid)から探す。配信元が入れ替わると古い(終了した)
+   * トラックが残るため、readyState を見て生きているものの最新を選ぶ
+   * (先頭を拾うと死んだトラックを掴んで無音になる)
    */
-  private liveAudioTrack(): MediaStreamTrack | null {
+  private liveAudioTrack(slot: number): MediaStreamTrack | null {
+    if (!this.pc) return null;
+    const mids = new Set([...this.midToSlot].filter(([, s]) => s === slot).map(([mid]) => mid));
     return (
       this.pc
-        ?.getReceivers()
-        .map((r) => r.track)
+        .getTransceivers()
+        .filter((t) => t.mid !== null && mids.has(t.mid))
+        .map((t) => t.receiver.track)
         .filter((t): t is MediaStreamTrack => t?.kind === 'audio' && t.readyState === 'live')
         .at(-1) ?? null
     );
   }
 
   /**
-   * 音声トラックの通知。ontrack と購読完了の両方から呼ばれるため、
+   * 音声トラックの通知(席ごと)。ontrack と購読完了の両方から呼ばれるため、
    * 同じトラックを二度通知しない(再生側でノードを繋ぎ直す無駄を避ける)
    */
-  private reportAudioTrack(track: MediaStreamTrack | null): void {
-    if (track === this.lastAudioTrack) return;
-    this.lastAudioTrack = track;
+  private reportAudioTrack(slot: number, track: MediaStreamTrack | null): void {
+    if ((this.lastAudioTracks.get(slot) ?? null) === track) return;
+    this.lastAudioTracks.set(slot, track);
     if (track) this.tuneAudioLatency();
     // 再生側で例外が出ても購読処理は続ける。両者は独立した関心事で、
     // 実際に再生側の例外が ontrack と購読処理の両方を巻き込んで止めていた
     try {
-      this.onAudioTrack?.(track);
+      this.onAudioTrackFrom?.(slot, track);
+      if (slot === 0) this.onAudioTrack?.(track);
     } catch (error) {
       console.warn('[sfu] 音声トラックの受け渡しで例外:', error);
     }
@@ -474,8 +495,9 @@ export class SfuTransport implements Transport {
     this.pc?.close();
     this.pc = null;
     this.channelOpen = false;
-    this.reportAudioTrack(null);
-    this.audioSubscribedSession = null;
+    for (const slot of [...this.lastAudioTracks.keys()]) this.reportAudioTrack(slot, null);
+    this.subscribedAudio.clear();
+    this.midToSlot.clear();
     this.subscribedPublisher = null;
   }
 
@@ -593,7 +615,7 @@ export class SfuTransport implements Transport {
        * 「モーションだけ止まっている配信」で2分ごとに音が切れることになる
        */
       const stalledTooLong =
-        this.audioSubscribedSession === null &&
+        this.subscribedAudio.size === 0 &&
         performance.now() - this.lastPacketAt > FORCE_RECONNECT_MS;
 
       if (!this.pc || changed || stalledTooLong) {
@@ -647,8 +669,9 @@ export class SfuTransport implements Transport {
     this.pc = null;
     this.channelOpen = false;
     // 張り直すと同じトラックを購読し直す必要がある
-    this.audioSubscribedSession = null;
-    this.lastAudioTrack = null;
+    this.subscribedAudio.clear();
+    this.midToSlot.clear();
+    this.lastAudioTracks.clear();
     const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** this.retryCount);
     this.retryCount += 1;
     this.onStatus?.(
@@ -667,8 +690,9 @@ export class SfuTransport implements Transport {
     this.stopWatchdog();
     this.stopIdlePoll();
     this.channelOpen = false;
-    this.audioSubscribedSession = null;
-    this.lastAudioTrack = null;
+    this.subscribedAudio.clear();
+    this.midToSlot.clear();
+    this.lastAudioTracks.clear();
     if (this.retryTimer !== null) {
       window.clearTimeout(this.retryTimer);
       this.retryTimer = null;

@@ -235,11 +235,22 @@
       <h1>🎙 配信者コンソール</h1>
       <p class="sub" id="b-room">このページを開いている間だけ、マイク音声が視聴ページへ配信されます</p>
       <div id="b-status">待機中</div>
+      <div class="row" style="margin-top: 12px">
+        <label for="m-slot">声の席</label>
+        <select id="m-slot">
+          <option value="0">席0(メイン)</option>
+          <option value="1">席1</option>
+          <option value="2">席2</option>
+          <option value="3">席3</option>
+        </select>
+      </div>
       <button id="b-toggle">マイク配信を開始</button>
       <p class="note">
         ・音声はCloudflare Realtime SFUの音声トラック(Opus)として配信されます<br />
         ・ポーズ配信(VSeeFace+ブリッジ)とは独立して動きます<br />
-        ・タブを閉じる/停止ボタンで配信は止まります
+        ・タブを閉じる/停止ボタンで配信は止まります<br />
+        ・<strong>声の席</strong>は複数配信者用です。視聴者にはその席のアバターの頭から
+        聞こえます。1人配信なら席0のまま
       </p>
 
       <h2>👀 プレビューと視聴者</h2>

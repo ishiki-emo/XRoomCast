@@ -196,18 +196,43 @@ interface AudioPublisherRecord {
   updatedAt: number;
 }
 
+/** 席番号つきの音声パブリッシャー(KVの新形式) */
+interface AudioEntry extends AudioPublisherRecord {
+  slot: number;
+}
+
+/** 旧形式(単一レコード)のKV値も読めるように吸収する */
+function parseAudios(raw: unknown): AudioEntry[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const record = raw as { audios?: AudioEntry[] } & Partial<AudioPublisherRecord>;
+  if (Array.isArray(record.audios)) return record.audios;
+  if (typeof record.sessionId === 'string' && typeof record.updatedAt === 'number') {
+    return [
+      {
+        slot: 0,
+        sessionId: record.sessionId,
+        trackName: record.trackName ?? 'mic',
+        updatedAt: record.updatedAt,
+      },
+    ];
+  }
+  return [];
+}
+
+/** 生きている音声パブリッシャー一覧(slot昇順) */
+async function readAudioPublishers(env: Env, room: string): Promise<AudioEntry[]> {
+  const raw = await env.SFU_STATE.get(audioPublisherKey(room), 'json');
+  return parseAudios(raw)
+    .filter((a) => Date.now() - a.updatedAt <= PUBLISHER_FRESH_MS)
+    .sort((a, b) => a.slot - b.slot);
+}
+
 /** 生きている配信者一覧(slot昇順)。ハートビートが途絶えたものは除く */
 async function readPublishers(env: Env, room: string): Promise<PublisherEntry[]> {
   const raw = await env.SFU_STATE.get(publisherKey(room), 'json');
   return parsePublishers(raw)
     .filter((p) => Date.now() - p.updatedAt <= PUBLISHER_FRESH_MS)
     .sort((a, b) => a.slot - b.slot);
-}
-
-async function readAudioPublisher(env: Env, room: string): Promise<AudioPublisherRecord | null> {
-  const record = await env.SFU_STATE.get<AudioPublisherRecord>(audioPublisherKey(room), 'json');
-  if (!record || Date.now() - record.updatedAt > PUBLISHER_FRESH_MS) return null;
-  return record;
 }
 
 /**
@@ -274,29 +299,32 @@ async function viewingBlockedBy(
 }
 
 /**
- * 音声パブリッシャーの登録/解除(bodyのsessionIdがnullなら解除)。
- * KVに保存したうえでPresence DOへ渡し、接続中の視聴者へ即座に配る。
- * KVは途中入室者の状態APIのため、DOは押し出しのために保つ
+ * 音声パブリッシャーの登録/解除(bodyのsessionIdがnullなら解除)。席(slot)ごとに持つ。
+ * 保存・KVへの写し・視聴者への押し出しはPresence DOが行う
+ * (複数配信者の同時登録でKVの読み書きが競合しないよう、書き手をDOに一本化)
  */
 async function handleAudioPublisherUpdate(request: Request, env: Env, room: string): Promise<Response> {
-  const body = (await request.json()) as { sessionId?: string | null; trackName?: string };
-  const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
-  if (!body.sessionId) {
-    await env.SFU_STATE.delete(audioPublisherKey(room));
-    await stub.fetch('https://presence.internal/audio', { method: 'POST', body: 'null' });
-    return json(200, { ok: true, cleared: true });
-  }
-  const record: AudioPublisherRecord = {
-    sessionId: String(body.sessionId),
-    trackName: String(body.trackName ?? 'mic'),
-    updatedAt: Date.now(),
+  const body = (await request.json()) as {
+    sessionId?: string | null;
+    trackName?: string;
+    slot?: number;
   };
-  await env.SFU_STATE.put(audioPublisherKey(room), JSON.stringify(record));
-  await stub.fetch('https://presence.internal/audio', {
-    method: 'POST',
-    body: JSON.stringify(record),
-  });
-  return json(200, { ok: true });
+  const slot = typeof body.slot === 'number' && Number.isInteger(body.slot) ? body.slot : 0;
+  if (slot < 0 || slot >= MAX_PUBLISHERS) return json(400, { error: 'slotが不正です' });
+  const audio: AudioPublisherRecord | null = body.sessionId
+    ? {
+        sessionId: String(body.sessionId),
+        trackName: String(body.trackName ?? 'mic'),
+        updatedAt: Date.now(),
+      }
+    : null;
+  const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
+  const result = await stub.fetch(
+    `https://presence.internal/audio?room=${encodeURIComponent(room)}`,
+    { method: 'POST', body: JSON.stringify({ slot, audio }) },
+  );
+  if (!result.ok) return json(502, { error: '音声の登録に失敗しました' });
+  return json(200, { ok: true, slot, cleared: audio === null });
 }
 
 async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Response> {
@@ -329,7 +357,8 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
   }
 
   if (request.method === 'GET' && url.pathname === '/api/sfu/status') {
-    const audio = await readAudioPublisher(env, room);
+    const audios = await readAudioPublishers(env, room);
+    const audio = audios.find((a) => a.slot === 0) ?? null;
     const publishers = await readPublishers(env, room);
     const blocked = await viewingBlockedBy(env, request, url, room);
     return json(200, {
@@ -347,7 +376,9 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
        */
       publisherSessionId: publishers[0]?.sessionId ?? null,
       publishers: publishers.map((p) => ({ slot: p.slot, sessionId: p.sessionId })),
+      /** 単数形は旧クライアント互換(席0の音声) */
       audio: audio ? { sessionId: audio.sessionId, trackName: audio.trackName } : null,
+      audios: audios.map((a) => ({ slot: a.slot, sessionId: a.sessionId, trackName: a.trackName })),
     });
   }
 
@@ -783,6 +814,15 @@ const STAGE_KEY = 'stage';
  * なるため押し出しに変えた。応答も速くなる(配信者がマイクを入れた瞬間に届く)
  */
 const AUDIO_KEY = 'audio';
+/** slot 1 以降の音声は 'audio:<slot>'。slot 0 は互換のため AUDIO_KEY のまま */
+function audioStorageKey(slot: number): string {
+  return slot === 0 ? AUDIO_KEY : `${AUDIO_KEY}:${slot}`;
+}
+/** ストレージキーから席番号を戻す(音声・アバター共通の規則) */
+function slotFromStorageKey(key: string, base: string): number | null {
+  const slot = key === base ? 0 : Number(key.slice(base.length + 1));
+  return Number.isFinite(slot) ? slot : null;
+}
 /** 視聴者の気配の公開範囲 */
 const PEER_MODE_KEY = 'peer-mode';
 /**
@@ -1013,25 +1053,36 @@ export class Presence extends DurableObject<Env> {
 
     /**
      * 音声パブリッシャーの更新(Worker本体が配信者キーを検証したうえで呼ぶ内部API)。
-     * 変化があったときだけ配る。配信者は4分ごとにハートビートを送ってくるので、
-     * 毎回配ると無意味な再購読を誘発する
+     * 席(slot)ごとに保存し、変化があったときだけ配る。配信者は4分ごとに
+     * ハートビートを送ってくるので、毎回配ると無意味な再購読を誘発する。
+     * KVの写し(状態API用)もここで書く(書き手をDOに一本化して競合を防ぐ)
      */
     if (path === '/audio') {
-      const next = (await request.json()) as AudioPublisherRecord | null;
-      const current = (await this.ctx.storage.get<AudioPublisherRecord>(AUDIO_KEY)) ?? null;
+      const { slot = 0, audio: next } = (await request.json()) as {
+        slot?: number;
+        audio?: AudioPublisherRecord | null;
+      };
+      const key = audioStorageKey(slot);
+      const current = (await this.ctx.storage.get<AudioPublisherRecord>(key)) ?? null;
       if (!next) {
         if (current) {
-          await this.ctx.storage.delete(AUDIO_KEY);
-          this.broadcastJson({ type: 'audio', audio: null });
+          await this.ctx.storage.delete(key);
+          this.broadcastJson({ type: 'audio', slot, audio: null });
+          await this.syncAudioKv();
         }
         return new Response(null, { status: 204 });
       }
-      await this.ctx.storage.put(AUDIO_KEY, next);
+      await this.ctx.storage.put(key, next);
       // 登録が途絶えたまま配信者が落ちた場合に備え、失効時刻に自分で気づく
       await this.ctx.storage.setAlarm(next.updatedAt + PUBLISHER_FRESH_MS);
       if (current?.sessionId !== next.sessionId || current?.trackName !== next.trackName) {
-        this.broadcastJson({ type: 'audio', audio: { sessionId: next.sessionId, trackName: next.trackName } });
+        this.broadcastJson({
+          type: 'audio',
+          slot,
+          audio: { sessionId: next.sessionId, trackName: next.trackName },
+        });
       }
+      await this.syncAudioKv();
       return new Response(null, { status: 204 });
     }
 
@@ -1100,11 +1151,14 @@ export class Presence extends DurableObject<Env> {
     }
     // ステージも同様(途中入室でも配信者の設定した見た目になる)
     pair[1].send(JSON.stringify({ type: 'stage', stage: await this.stage() }));
-    // 音声も同様。既に配信中なら入室した時点で購読できる
-    const audio = await this.freshAudio();
-    if (audio) {
+    // 音声も同様。既に配信中なら入室した時点で購読できる(席ごと)
+    for (const audio of await this.freshAudios()) {
       pair[1].send(
-        JSON.stringify({ type: 'audio', audio: { sessionId: audio.sessionId, trackName: audio.trackName } }),
+        JSON.stringify({
+          type: 'audio',
+          slot: audio.slot,
+          audio: { sessionId: audio.sessionId, trackName: audio.trackName },
+        }),
       );
     }
     return new Response(null, { status: 101, webSocket: pair[0] });
@@ -1117,28 +1171,50 @@ export class Presence extends DurableObject<Env> {
     );
   }
 
-  /** 保存済みの音声パブリッシャー。失効していれば null */
-  private async freshAudio(): Promise<AudioPublisherRecord | null> {
-    const record = (await this.ctx.storage.get<AudioPublisherRecord>(AUDIO_KEY)) ?? null;
-    if (!record || Date.now() - record.updatedAt > PUBLISHER_FRESH_MS) return null;
-    return record;
+  /** 保存済みの音声パブリッシャー一覧(席ごと)。失効したものは除く */
+  private async freshAudios(): Promise<AudioEntry[]> {
+    const entries = await this.ctx.storage.list<AudioPublisherRecord>({ prefix: AUDIO_KEY });
+    const result: AudioEntry[] = [];
+    for (const [key, record] of entries) {
+      const slot = slotFromStorageKey(key, AUDIO_KEY);
+      if (slot === null) continue;
+      if (Date.now() - record.updatedAt > PUBLISHER_FRESH_MS) continue;
+      result.push({ slot, ...record });
+    }
+    return result.sort((a, b) => a.slot - b.slot);
+  }
+
+  /** 音声パブリッシャー一覧のKVへの写し(途中入室者の状態API用) */
+  private async syncAudioKv(): Promise<void> {
+    const audios = await this.freshAudios();
+    const roomName = (await this.ctx.storage.get<string>(ROOM_NAME_KEY)) ?? DEFAULT_ROOM;
+    await this.env.SFU_STATE.put(audioPublisherKey(roomName), JSON.stringify({ audios }));
   }
 
   /**
-   * 音声パブリッシャーの失効。
+   * 音声パブリッシャーの失効(席ごと)。
    * 配信者のタブが登録解除を送れずに閉じた場合、これが唯一の終了通知になる
    * (視聴側のポーリングを廃止したため、サーバーから知らせる必要がある)
    */
   override async alarm(): Promise<void> {
-    const record = (await this.ctx.storage.get<AudioPublisherRecord>(AUDIO_KEY)) ?? null;
-    if (!record) return;
-    if (Date.now() - record.updatedAt <= PUBLISHER_FRESH_MS) {
-      // ハートビートで更新されていた。次の失効時刻へ繰り延べる
-      await this.ctx.storage.setAlarm(record.updatedAt + PUBLISHER_FRESH_MS);
-      return;
+    const entries = await this.ctx.storage.list<AudioPublisherRecord>({ prefix: AUDIO_KEY });
+    let nextExpiry: number | null = null;
+    let removed = false;
+    for (const [key, record] of entries) {
+      const slot = slotFromStorageKey(key, AUDIO_KEY);
+      if (slot === null) continue;
+      const expiry = record.updatedAt + PUBLISHER_FRESH_MS;
+      if (Date.now() >= expiry) {
+        await this.ctx.storage.delete(key);
+        this.broadcastJson({ type: 'audio', slot, audio: null });
+        removed = true;
+      } else {
+        // ハートビートで更新されていた席は、次の失効時刻へ繰り延べる
+        nextExpiry = nextExpiry === null ? expiry : Math.min(nextExpiry, expiry);
+      }
     }
-    await this.ctx.storage.delete(AUDIO_KEY);
-    this.broadcastJson({ type: 'audio', audio: null });
+    if (removed) await this.syncAudioKv();
+    if (nextExpiry !== null) await this.ctx.storage.setAlarm(nextExpiry);
   }
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {

@@ -22,6 +22,12 @@ const HEARTBEAT_MS = 4 * 60 * 1000;
 
 const statusEl = document.getElementById('b-status') as HTMLDivElement;
 const toggleButton = document.getElementById('b-toggle') as HTMLButtonElement;
+/** 声を届ける席(複数配信者用)。配信中は変更できないようにする */
+const micSlotSelect = document.getElementById('m-slot') as HTMLSelectElement | null;
+
+function micSlot(): number {
+  return Number(micSlotSelect?.value ?? '0') || 0;
+}
 
 const config = readConfig();
 const key = config.broadcastKey;
@@ -161,7 +167,7 @@ async function createSession(track: MediaStreamTrack): Promise<void> {
 
 async function register(): Promise<void> {
   if (!sessionId) return;
-  await api('/api/sfu/audio-publisher', { sessionId, trackName: TRACK_NAME });
+  await api('/api/sfu/audio-publisher', { sessionId, trackName: TRACK_NAME, slot: micSlot() });
 }
 
 /**
@@ -176,7 +182,7 @@ async function stop(silent = false): Promise<void> {
     heartbeatTimer = null;
   }
   try {
-    await api('/api/sfu/audio-publisher', { sessionId: null });
+    await api('/api/sfu/audio-publisher', { sessionId: null, slot: micSlot() });
   } catch {
     // 登録解除の失敗は無視(15分で自動失効する)
   }
@@ -195,6 +201,8 @@ function markMic(on: boolean): void {
   live = on;
   toggleButton.textContent = on ? 'マイク配信を停止' : 'マイク配信を開始';
   toggleButton.classList.toggle('live', on);
+  // 配信中に席を変えると旧席の登録が残るため、停止するまで固定する
+  if (micSlotSelect) micSlotSelect.disabled = on;
 }
 
 /** マイク配信の開始/停止。HMD配信の開始時にも使う */
@@ -228,7 +236,7 @@ window.addEventListener('pagehide', () => {
     // sendBeaconはヘッダを付けられないので資格情報はクエリで運ぶ
     navigator.sendBeacon?.(
       withAuth('/api/sfu/audio-publisher-beacon', config.room, auth),
-      JSON.stringify({ sessionId: null }),
+      JSON.stringify({ sessionId: null, slot: micSlot() }),
     );
     teardown();
   }
