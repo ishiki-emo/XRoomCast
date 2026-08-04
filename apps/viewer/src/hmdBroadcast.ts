@@ -195,7 +195,9 @@ export class HmdBroadcast {
   /** 視聴者が購読できるよう、自分のセッションIDを登録する */
   private async register(): Promise<void> {
     if (!this.sessionId) return;
-    await this.api('/api/sfu/publisher', { sessionId: this.sessionId });
+    // pid はブリッジ(default)と別の席を取るための固定ID。
+    // 同じブラウザからの再接続では同じ席を保つ
+    await this.api('/api/sfu/publisher', { sessionId: this.sessionId, pid: 'hmd' });
   }
 
   /**

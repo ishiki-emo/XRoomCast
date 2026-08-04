@@ -135,6 +135,14 @@ scene.add(roomSpace);
 // roomSpace の中で動く
 const units = new Map<number, AvatarUnit>();
 
+/** 席数の上限(Worker側のMAX_PUBLISHERSと合わせる) */
+const MAX_SLOTS = 8;
+/** 席の間隔。slot 0 を中心に左右交互へ広げる */
+const SLOT_SPACING = 0.9;
+
+// AR中かどうか(あとから生えたユニットにも接地影のARモードを引き継ぐ)
+let arModeActive = false;
+
 function createUnit(slot: number, hooks?: AvatarUnitHooks): AvatarUnit {
   const unit = new AvatarUnit({
     parent: roomSpace,
@@ -142,7 +150,26 @@ function createUnit(slot: number, hooks?: AvatarUnitHooks): AvatarUnit {
     hooks,
   });
   unit.applyScale(roomSpace.scale.x);
+  unit.setShadowARActive(arModeActive);
+  const first = units.get(0);
+  if (first) unit.setShadowMode(first.getShadowMode());
   units.set(slot, unit);
+  return unit;
+}
+
+function slotOffsetX(slot: number): number {
+  if (slot === 0) return 0;
+  const step = Math.ceil(slot / 2) * SLOT_SPACING;
+  return slot % 2 === 1 ? step : -step;
+}
+
+/** 席のユニットを取得し、無ければ席の位置に作る */
+function ensureUnit(slot: number): AvatarUnit {
+  let unit = units.get(slot);
+  if (!unit) {
+    unit = createUnit(slot);
+    unit.root.position.x = slotOffsetX(slot);
+  }
   return unit;
 }
 
@@ -302,6 +329,7 @@ const arController = new ArController(
   },
   (arActive) => {
     scenery.setARMode(arActive);
+    arModeActive = arActive;
     for (const unit of units.values()) unit.setShadowARActive(arActive);
     // ステージはPC表示でも出す(配信の見た目そのものなので)
     refreshStage();
@@ -592,6 +620,10 @@ interface PresenceMessage extends PeerState {
   /** type==='avatar': 配信者が選んだVRMの配信URL */
   url?: string;
   name?: string;
+  /** type==='avatar': 席番号(複数配信者)。無ければ slot 0 */
+  slot?: number;
+  /** type==='publishers': 配信者の席割り当て一覧 */
+  publishers?: { slot: number; sessionId: string }[];
   /** type==='peer' / 'peerLeft': 送信元の接続ID */
   id?: string;
   /** type==='peerMode': 気配の公開範囲 */
@@ -681,18 +713,39 @@ function sendPeerState(): void {
   presenceWs.send(JSON.stringify(payload));
 }
 
-/** 配信者から指示された最後のアバターURL(同じ指示の再ロードを避ける) */
-let syncedAvatarUrl: string | null = null;
+/** 配信者から指示された最後のアバターURL(席ごと。同じ指示の再ロードを避ける) */
+const syncedAvatarUrls = new Map<number, string>();
 
-function applyRemoteAvatar(url: string, name?: string): void {
-  if (url === syncedAvatarUrl) return;
-  syncedAvatarUrl = url;
-  urlInput.value = url;
+function applyRemoteAvatar(slot: number, url: string, name?: string): void {
+  if (slot < 0 || slot >= MAX_SLOTS) return;
+  if (syncedAvatarUrls.get(slot) === url) return;
+  syncedAvatarUrls.set(slot, url);
+  if (slot === 0) urlInput.value = url;
   const label = `アバターを切り替えています${name ? `: ${name}` : ''}`;
   setStatus(label);
   arController.showHint(label); // AR中はDOMのステータスが見えないため
   // ロード中でもユニット側が覚えていて、完了後に読み直す
-  void primaryUnit.load(url);
+  void ensureUnit(slot).load(url);
+}
+
+/**
+ * 配信者の席割り当て。席ぶんのユニットを用意し、消えた席は片付ける。
+ * ポーズの購読の張り直しはトランスポート側が指紋比較で判断する
+ */
+function applyPublishers(list: { slot: number; sessionId: string }[]): void {
+  const active = new Set<number>([0]); // 主ユニットは常に残す
+  for (const p of list) {
+    if (typeof p.slot !== 'number' || p.slot < 0 || p.slot >= MAX_SLOTS) continue;
+    active.add(p.slot);
+    ensureUnit(p.slot);
+  }
+  for (const [slot, unit] of [...units]) {
+    if (active.has(slot)) continue;
+    unit.dispose();
+    units.delete(slot);
+    syncedAvatarUrls.delete(slot);
+  }
+  if (liveTransport instanceof SfuTransport) liveTransport.notifyPublishers(list);
 }
 
 /**
@@ -733,7 +786,9 @@ function connectPresence(): void {
         for (const item of data.items.slice(-CHAT_VISIBLE_MAX)) appendChat(item.text);
         spatialChat.setHistory(data.items.map((it) => it.text));
       } else if (data.type === 'avatar' && typeof data.url === 'string') {
-        applyRemoteAvatar(data.url, data.name);
+        applyRemoteAvatar(typeof data.slot === 'number' ? data.slot : 0, data.url, data.name);
+      } else if (data.type === 'publishers' && Array.isArray(data.publishers)) {
+        applyPublishers(data.publishers);
       } else if (data.type === 'audio') {
         // 配信者のマイクの開始/停止。以前は視聴側が30秒ごとに問い合わせていたが、
         // サーバーからの押し出しに変えた(視聴者×1日2,880回のリクエストが消える)
@@ -785,33 +840,41 @@ function disconnectTransport(): void {
   transportSelect.disabled = false;
 }
 
+/** 受信パケットを席のユニットへ届ける(デコード失敗は警告のみ) */
+function routePacket(slot: number, bytes: Uint8Array): void {
+  if (slot < 0 || slot >= MAX_SLOTS) return;
+  try {
+    ensureUnit(slot).pushPacket(decodePacket(bytes), performance.now());
+  } catch (error) {
+    console.warn('パケットのデコードに失敗:', error);
+  }
+}
+
 function connectTransport(kind: string, url: string): void {
   stopDemo();
   disconnectTransport();
-  liveTransport =
+  const transport =
     kind === 'sfu' ? new SfuTransport(url, config.room, auth) : new WebSocketTransport(url);
-  if (liveTransport instanceof SfuTransport) {
-    liveTransport.onAudioTrack = handleAudioTrack;
-    liveTransport.onUnavailable = setUnavailable;
-    if (admissionToken) liveTransport.setAdmission(admissionToken);
+  liveTransport = transport;
+  if (transport instanceof SfuTransport) {
+    transport.onAudioTrack = handleAudioTrack;
+    transport.onUnavailable = setUnavailable;
+    if (admissionToken) transport.setAdmission(admissionToken);
     // presenceで既に音声の開始を受け取っていれば、その状態から始める
-    liveTransport.setAudioPublisher(remoteAudio);
+    transport.setAudioPublisher(remoteAudio);
+    // SFUは配信者ごとにDataChannelが分かれており、席番号つきで届く
+    transport.onPacketFrom = routePacket;
   }
-  liveTransport.onStatus = (text, isError) => setStatus(text, isError);
-  liveTransport.onPacket = (bytes) => {
+  transport.onStatus = (text, isError) => setStatus(text, isError);
+  transport.onPacket = (bytes) => {
     netStats.bytes += bytes.byteLength;
     netStats.totalBytes += bytes.byteLength;
     netStats.packets += 1;
-    const now = performance.now();
-    try {
-      const packet = decodePacket(bytes);
-      // いまは全ユニットへ同じストリームを流す(複数配信者ではストリームIDで振り分ける)
-      for (const unit of units.values()) unit.pushPacket(packet, now);
-    } catch (error) {
-      console.warn('パケットのデコードに失敗:', error);
-    }
+    // WS直結はブリッジ1本のストリームなので主ユニット(slot 0)へ。
+    // SFUの振り分けは onPacketFrom が行う(こちらは統計のみ)
+    if (!(transport instanceof SfuTransport)) routePacket(0, bytes);
   };
-  liveTransport.connect();
+  transport.connect();
   wsButton.textContent = '切断';
   transportSelect.disabled = true;
 }
@@ -1039,7 +1102,7 @@ wsUrlInput.value = config.serverUrl;
 
 urlInput.value = config.vrmUrl;
 // 初期表示と同じアバターが同期で流れてきても読み直さないようにする
-syncedAvatarUrl = config.vrmUrl;
+syncedAvatarUrls.set(0, config.vrmUrl);
 void loadVRM(config.vrmUrl).then(() => {
   // デプロイ環境には既定VRMを置かないため、初回ロード失敗時は使い方を案内する
   if (!primaryUnit.avatar && config.vrmUrl === DEFAULT_VRM_PATH) {

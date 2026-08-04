@@ -165,6 +165,11 @@ const publisher = sfuApi ? new SfuPublisher(sfuApi) : null;
 // VIEWER_ORIGIN / BRIDGE_TOKEN が.envにあるときだけ有効
 const VIEWER_ORIGIN = process.env.VIEWER_ORIGIN;
 const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN;
+/**
+ * 配信元の自称ID。同じルームで複数のブリッジを動かす(複数配信者)場合に
+ * それぞれ別の値を設定する。再接続しても同じ席(slot)を保つ鍵になる
+ */
+const PUBLISHER_ID = process.env.PUBLISHER_ID ?? 'default';
 
 async function registerPublisher(): Promise<void> {
   if (!VIEWER_ORIGIN || !BRIDGE_TOKEN || !publisher?.sessionId) return;
@@ -175,10 +180,12 @@ async function registerPublisher(): Promise<void> {
         Authorization: `Bearer ${BRIDGE_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ sessionId: publisher.sessionId }),
+      body: JSON.stringify({ sessionId: publisher.sessionId, pid: PUBLISHER_ID }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    console.log(`[sfu] ビューアWorkerへ登録完了: ${VIEWER_ORIGIN} (ルーム: ${ROOM})`);
+    const data = (await res.json().catch(() => ({}))) as { slot?: number };
+    const seat = typeof data.slot === 'number' ? ` / 席 ${data.slot}` : '';
+    console.log(`[sfu] ビューアWorkerへ登録完了: ${VIEWER_ORIGIN} (ルーム: ${ROOM}${seat})`);
   } catch (error) {
     console.warn('[sfu] ビューアWorkerへの登録に失敗:', error);
   }

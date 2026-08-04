@@ -148,9 +148,46 @@ async function cfApi(
   return (await res.json()) as Record<string, unknown>;
 }
 
+/** 旧形式(単一配信者)のKVレコード。読み取り互換のためだけに残す */
 interface PublisherRecord {
   sessionId: string;
   updatedAt: number;
+}
+
+/**
+ * 配信者1人ぶんの登録。pid は配信元が自称する固定ID(ブリッジ/HMDごと)で、
+ * 再接続してセッションIDが変わっても同じ席(slot)を保つために使う
+ */
+interface PublisherEntry {
+  pid: string;
+  slot: number;
+  sessionId: string;
+  updatedAt: number;
+}
+
+interface PublishersRecord {
+  publishers: PublisherEntry[];
+}
+
+/** 1ルームの配信者数の上限(席は 0..MAX_PUBLISHERS-1) */
+const MAX_PUBLISHERS = 8;
+
+/** pid の文字種制限(KV/DOストレージにそのまま入るため) */
+const PID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+
+function sanitizePid(value: unknown): string {
+  return typeof value === 'string' && PID_PATTERN.test(value) ? value : 'default';
+}
+
+/** 旧形式(単一レコード)のKV値も読めるように吸収する */
+function parsePublishers(raw: unknown): PublisherEntry[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const record = raw as Partial<PublishersRecord> & Partial<PublisherRecord>;
+  if (Array.isArray(record.publishers)) return record.publishers;
+  if (typeof record.sessionId === 'string' && typeof record.updatedAt === 'number') {
+    return [{ pid: 'default', slot: 0, sessionId: record.sessionId, updatedAt: record.updatedAt }];
+  }
+  return [];
 }
 
 interface AudioPublisherRecord {
@@ -159,10 +196,12 @@ interface AudioPublisherRecord {
   updatedAt: number;
 }
 
-async function readPublisher(env: Env, room: string): Promise<PublisherRecord | null> {
-  const record = await env.SFU_STATE.get<PublisherRecord>(publisherKey(room), 'json');
-  if (!record || Date.now() - record.updatedAt > PUBLISHER_FRESH_MS) return null;
-  return record;
+/** 生きている配信者一覧(slot昇順)。ハートビートが途絶えたものは除く */
+async function readPublishers(env: Env, room: string): Promise<PublisherEntry[]> {
+  const raw = await env.SFU_STATE.get(publisherKey(room), 'json');
+  return parsePublishers(raw)
+    .filter((p) => Date.now() - p.updatedAt <= PUBLISHER_FRESH_MS)
+    .sort((a, b) => a.slot - b.slot);
 }
 
 async function readAudioPublisher(env: Env, room: string): Promise<AudioPublisherRecord | null> {
@@ -291,21 +330,23 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
 
   if (request.method === 'GET' && url.pathname === '/api/sfu/status') {
     const audio = await readAudioPublisher(env, room);
-    const publisher = await readPublisher(env, room);
+    const publishers = await readPublishers(env, room);
     const blocked = await viewingBlockedBy(env, request, url, room);
     return json(200, {
       enabled: sfuConfigured,
       room,
       /** 満員・停止中の理由。視聴側はこれを見て表示を出し分け、解除を待つ */
       unavailable: blocked,
-      publisherReady: publisher !== null,
+      publisherReady: publishers.length > 0,
       /**
        * 視聴側が「配信元が変わったか」を判定するために返す。
        * これが無いと、モーションが来ないだけの状態と配信元の再起動を区別できず、
        * セッションを作り直し続けることになる(Cloudflare APIへの発信が跳ね上がる)。
-       * 購読には元々このIDが使われるので、視聴者に対して新たな権限にはならない
+       * 購読には元々このIDが使われるので、視聴者に対して新たな権限にはならない。
+       * 単数形は旧クライアント互換(先頭=slot最小の配信者)
        */
-      publisherSessionId: publisher?.sessionId ?? null,
+      publisherSessionId: publishers[0]?.sessionId ?? null,
+      publishers: publishers.map((p) => ({ slot: p.slot, sessionId: p.sessionId })),
       audio: audio ? { sessionId: audio.sessionId, trackName: audio.trackName } : null,
     });
   }
@@ -343,16 +384,31 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
     return json(200, result);
   }
 
-  // パブリッシャーのセッションID登録。ブリッジ(BRIDGE_TOKEN)か配信者(BROADCAST_KEY)
+  // パブリッシャーのセッションID登録。ブリッジ(BRIDGE_TOKEN)か配信者(BROADCAST_KEY)。
+  // 席(slot)の割り当ては競合しないようDurable Objectで行う(単一スレッド)
   if (request.method === 'POST' && url.pathname === '/api/sfu/publisher') {
     if (!(await allows(env, request, url, 'publisher', room))) {
       return json(403, { error: 'forbidden' });
     }
-    const body = (await request.json()) as { sessionId?: string };
+    const body = (await request.json()) as { sessionId?: string; pid?: string };
     if (!body.sessionId) return json(400, { error: 'sessionIdがありません' });
-    const record: PublisherRecord = { sessionId: body.sessionId, updatedAt: Date.now() };
-    await env.SFU_STATE.put(publisherKey(room), JSON.stringify(record));
-    return json(200, { ok: true, room });
+    const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
+    const result = await stub.fetch(
+      `https://presence.internal/publisher?room=${encodeURIComponent(room)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ pid: sanitizePid(body.pid), sessionId: String(body.sessionId) }),
+      },
+    );
+    if (!result.ok) {
+      return json(result.status === 507 ? 507 : 502, {
+        error:
+          result.status === 507
+            ? `配信枠が満員です(1ルーム${MAX_PUBLISHERS}人まで)`
+            : '配信者の登録に失敗しました',
+      });
+    }
+    return json(200, { ok: true, room, ...((await result.json()) as object) });
   }
 
   if (!sfuConfigured) {
@@ -405,28 +461,36 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
   }
 
   if (request.method === 'POST' && url.pathname === '/api/sfu/subscribe') {
-    const publisher = await readPublisher(env, room);
-    if (!publisher) {
+    const publishers = await readPublishers(env, room);
+    if (publishers.length === 0) {
       return json(503, {
         error: `パブリッシャーが未登録です(ルーム「${room}」のブリッジが起動しているか確認)`,
       });
     }
     const body = (await request.json()) as { sessionId?: string };
+    // 全配信者ぶんのDataChannelを一括で作る(結果は要求順で返る)
     const result = await cfApi(env, `/sessions/${String(body.sessionId)}/datachannels/new`, {
-      dataChannels: [
-        { location: 'remote', sessionId: publisher.sessionId, dataChannelName: DATA_CHANNEL_NAME },
-      ],
+      dataChannels: publishers.map((p) => ({
+        location: 'remote',
+        sessionId: p.sessionId,
+        dataChannelName: DATA_CHANNEL_NAME,
+      })),
     });
-    const channels = result.dataChannels as { id: number }[];
-    const channelId = channels[0]?.id;
-    if (channelId === undefined) {
+    const created = result.dataChannels as { id?: number }[];
+    const channels = publishers.map((p, i) => ({
+      slot: p.slot,
+      sessionId: p.sessionId,
+      id: created[i]?.id,
+    }));
+    if (channels.some((c) => c.id === undefined)) {
       return json(502, { error: 'DataChannel IDが取得できませんでした' });
     }
-    // publisherSessionId は視聴側が「いまどの配信元を購読しているか」を覚えるために返す
     return json(200, {
-      id: channelId,
+      // 単数形のフィールドは旧クライアント互換(先頭=slot最小の配信者)
+      id: channels[0]!.id,
       name: DATA_CHANNEL_NAME,
-      publisherSessionId: publisher.sessionId,
+      publisherSessionId: channels[0]!.sessionId,
+      channels,
     });
   }
 
@@ -542,7 +606,11 @@ async function handleAvatarApi(request: Request, env: Env, url: URL): Promise<Re
     return json(503, { error: 'VRM_TOKEN未設定のため配信URLを組み立てられません' });
   }
 
-  const body = (await request.json()) as { key?: string };
+  const body = (await request.json()) as { key?: string; slot?: number };
+  // 席番号(複数配信者)。省略時は slot 0(=従来の単一配信者)
+  const slot =
+    typeof body.slot === 'number' && Number.isInteger(body.slot) ? body.slot : 0;
+  if (slot < 0 || slot >= MAX_PUBLISHERS) return json(400, { error: 'slotが不正です' });
   const key = String(body.key ?? '');
   const prefix = roomVrmPrefix(room);
   const localName = key.startsWith(prefix) ? key.slice(prefix.length) : null;
@@ -564,10 +632,10 @@ async function handleAvatarApi(request: Request, env: Env, url: URL): Promise<Re
   const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
   const result = await stub.fetch('https://presence.internal/avatar', {
     method: 'POST',
-    body: JSON.stringify(record),
+    body: JSON.stringify({ ...record, slot }),
   });
   if (!result.ok) return json(502, { error: 'アバターの配信に失敗しました' });
-  return json(200, { ok: true, ...record });
+  return json(200, { ok: true, slot, ...record });
 }
 
 /**
@@ -701,6 +769,12 @@ const PEER_MIN_INTERVAL_MS = 60;
 const MESSAGE_MAX_BYTES = 2048;
 /** 現在のアバター(接続時に配り、切り替え時にブロードキャストする) */
 const AVATAR_KEY = 'avatar';
+/** slot 1 以降のアバターは 'avatar:<slot>'。slot 0 は互換のため AVATAR_KEY のまま */
+function avatarStorageKey(slot: number): string {
+  return slot === 0 ? AVATAR_KEY : `${AVATAR_KEY}:${slot}`;
+}
+/** 配信者(パブリッシャー)の席割り当て一覧(Durable Object内) */
+const PUBLISHERS_KEY = 'publishers';
 /** 現在のステージ。アバターと同じ扱い(接続時に配り、変更時に配信する) */
 const STAGE_KEY = 'stage';
 /**
@@ -878,10 +952,57 @@ export class Presence extends DurableObject<Env> {
         const current = (await this.ctx.storage.get<AvatarRecord>(AVATAR_KEY)) ?? null;
         return Response.json({ avatar: current });
       }
-      const record = (await request.json()) as AvatarRecord;
-      await this.ctx.storage.put(AVATAR_KEY, record);
-      this.broadcastJson({ type: 'avatar', ...record });
+      const { slot = 0, ...record } = (await request.json()) as AvatarRecord & { slot?: number };
+      await this.ctx.storage.put(avatarStorageKey(slot), record);
+      this.broadcastJson({ type: 'avatar', slot, ...record });
       return new Response(null, { status: 204 });
+    }
+
+    /**
+     * 配信者(パブリッシャー)の登録と席(slot)の割り当て。
+     * 同じ pid は再接続しても同じ席を保つ。新しい pid には空いている最小の席を配る。
+     * 単一スレッドのDOで処理するため、同時登録でも席は競合しない。
+     * 一覧はKVへ写し、視聴側の状態確認・購読(Workerだけで完結する経路)が読む
+     */
+    if (path === '/publisher') {
+      const body = (await request.json()) as { pid?: string; sessionId?: string };
+      const pid = String(body.pid ?? 'default');
+      const sessionId = String(body.sessionId ?? '');
+      if (!sessionId) return new Response('sessionId required', { status: 400 });
+
+      const now = Date.now();
+      const stored = (await this.ctx.storage.get<PublisherEntry[]>(PUBLISHERS_KEY)) ?? [];
+      const fresh = stored.filter((p) => now - p.updatedAt <= PUBLISHER_FRESH_MS);
+      const beforeFingerprint = fresh.map((p) => `${p.slot}=${p.sessionId}`).join('|');
+
+      let entry = fresh.find((p) => p.pid === pid);
+      if (entry) {
+        entry.sessionId = sessionId;
+        entry.updatedAt = now;
+      } else {
+        const used = new Set(fresh.map((p) => p.slot));
+        let slot = 0;
+        while (used.has(slot)) slot += 1;
+        if (slot >= MAX_PUBLISHERS) return new Response('room publishers full', { status: 507 });
+        entry = { pid, slot, sessionId, updatedAt: now };
+        fresh.push(entry);
+      }
+      fresh.sort((a, b) => a.slot - b.slot);
+      await this.ctx.storage.put(PUBLISHERS_KEY, fresh);
+
+      const record: PublishersRecord = { publishers: fresh };
+      const roomName = (await this.ctx.storage.get<string>(ROOM_NAME_KEY)) ?? DEFAULT_ROOM;
+      await this.env.SFU_STATE.put(publisherKey(roomName), JSON.stringify(record));
+
+      // 顔ぶれ・配信元が変わったときだけ視聴者へ押し出す(ハートビートで毎回配らない)
+      const afterFingerprint = fresh.map((p) => `${p.slot}=${p.sessionId}`).join('|');
+      if (afterFingerprint !== beforeFingerprint) {
+        this.broadcastJson({
+          type: 'publishers',
+          publishers: fresh.map(({ slot, sessionId: sid }) => ({ slot, sessionId: sid })),
+        });
+      }
+      return Response.json({ slot: entry.slot });
     }
 
     /**
@@ -950,9 +1071,27 @@ export class Presence extends DurableObject<Env> {
     if (admission) pair[1].send(JSON.stringify({ type: 'admission', token: admission }));
     // 旧クライアント向け(設定メッセージを知らない版でも気配は動く)
     pair[1].send(JSON.stringify({ type: 'peerMode', mode: settings.peerMode }));
-    // 途中入室者にも現在のアバターを配る(配信者が切り替えた状態に追いつける)
-    const avatar = await this.ctx.storage.get<AvatarRecord>(AVATAR_KEY);
-    if (avatar) pair[1].send(JSON.stringify({ type: 'avatar', ...avatar }));
+    // 途中入室者にも現在のアバターを配る(配信者が切り替えた状態に追いつける)。
+    // 'avatar' が slot 0、'avatar:<slot>' がそれ以外の席
+    const avatars = await this.ctx.storage.list<AvatarRecord>({ prefix: AVATAR_KEY });
+    for (const [key, record] of avatars) {
+      const slot = key === AVATAR_KEY ? 0 : Number(key.slice(AVATAR_KEY.length + 1));
+      if (!Number.isFinite(slot)) continue;
+      pair[1].send(JSON.stringify({ type: 'avatar', slot, ...record }));
+    }
+    // 配信者の顔ぶれ(席割り当て)。途中入室でも全員ぶんの購読を張れる
+    const knownPublishers = (await this.ctx.storage.get<PublisherEntry[]>(PUBLISHERS_KEY)) ?? [];
+    const freshPublishers = knownPublishers.filter(
+      (p) => Date.now() - p.updatedAt <= PUBLISHER_FRESH_MS,
+    );
+    if (freshPublishers.length > 0) {
+      pair[1].send(
+        JSON.stringify({
+          type: 'publishers',
+          publishers: freshPublishers.map(({ slot, sessionId }) => ({ slot, sessionId })),
+        }),
+      );
+    }
     // ステージも同様(途中入室でも配信者の設定した見た目になる)
     pair[1].send(JSON.stringify({ type: 'stage', stage: await this.stage() }));
     // 音声も同様。既に配信中なら入室した時点で購読できる

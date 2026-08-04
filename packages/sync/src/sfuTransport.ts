@@ -63,7 +63,17 @@ interface SfuStatus {
   publisherReady: boolean;
   /** 配信元の識別子。古いサーバーは返さないため null/undefined を許容する */
   publisherSessionId?: string | null;
+  /** 配信者の一覧(席番号つき)。古いサーバーは返さない */
+  publishers?: { slot: number; sessionId: string }[];
   audio: { sessionId: string; trackName: string } | null;
+}
+
+/** 配信者の組を1つの文字列に畳む。購読の張り直し判定はこの比較だけで行う */
+function publishersFingerprint(list: { slot: number; sessionId: string }[]): string {
+  return list
+    .map((p) => `${p.slot}=${p.sessionId}`)
+    .sort()
+    .join('|');
 }
 
 export class SfuTransport implements Transport {
@@ -76,6 +86,11 @@ export class SfuTransport implements Transport {
   onUnavailable: ((reason: UnavailableReason | null) => void) | null = null;
   /** 配信者の音声トラックを購読できたとき(track)と配信終了時(null)に呼ばれる */
   onAudioTrack: ((track: MediaStreamTrack | null) => void) | null = null;
+  /**
+   * 席(slot)付きの受信通知。複数配信者では配信者ごとにDataChannelが分かれており、
+   * どの席のポーズかを添えて渡す。onPacket も従来どおり全パケットで呼ばれる
+   */
+  onPacketFrom: ((slot: number, bytes: Uint8Array) => void) | null = null;
 
   private pc: RTCPeerConnection | null = null;
   private closedByUser = false;
@@ -103,7 +118,7 @@ export class SfuTransport implements Transport {
   /** connect() が呼ばれたか。入室証の到着で勝手に接続を始めないための番人 */
   private started = false;
   private mySessionId: string | null = null;
-  /** いま購読している配信元。これが変わったときだけ張り直す必要がある */
+  /** いま購読している配信元(の組)の指紋。これが変わったときだけ張り直す */
   private subscribedPublisher: string | null = null;
   /** 無受信中の状態確認タイマー(セッションは作らない) */
   private idleTimer: number | null = null;
@@ -222,48 +237,61 @@ export class SfuTransport implements Transport {
       };
 
       const sub = await this.apiPost('/api/sfu/subscribe', { sessionId: session.sessionId });
-      // どの配信元を購読したかを覚えておく。以後の無受信時に「配信元が変わったのか、
-      // 単に送信が止まっているだけなのか」を区別するのに使う
-      this.subscribedPublisher =
-        typeof sub.publisherSessionId === 'string' ? sub.publisherSessionId : null;
-      const channel = pc.createDataChannel(String(sub.name), {
-        negotiated: true,
-        id: Number(sub.id),
-      });
-      channel.binaryType = 'arraybuffer';
+      /**
+       * どの配信元(の組)を購読したかを覚えておく。以後の無受信時に「配信元が
+       * 変わったのか、単に送信が止まっているだけなのか」を区別するのに使う。
+       * `channels` が無いのは旧サーバー(単一配信者)の応答
+       */
+      const entries = Array.isArray(sub.channels)
+        ? (sub.channels as { slot: number; sessionId: string; id: number }[])
+        : [{ slot: 0, sessionId: String(sub.publisherSessionId ?? ''), id: Number(sub.id) }];
+      this.subscribedPublisher = publishersFingerprint(entries);
 
-      channel.onopen = () => {
-        if (generation !== this.generation) return;
-        // ここでは retryCount を戻さない。チャンネルが開いてもデータが来ない状態が
-        // あり、そこで戻すとバックオフが伸びず、短い周期でセッションを
-        // 作り直し続けることになる(実際に無料枠を使い切る原因になっていた)
-        this.lastPacketAt = performance.now();
-        this.channelOpen = true;
-        this.startWatchdog(generation);
-        // 接続前にサーバーから届いていた音声の状態をここで適用する
-        this.queueAudioApply();
-        this.onStatus?.('SFU接続完了(DataChannel購読中)');
-      };
-      channel.onmessage = (event) => {
-        this.lastPacketAt = performance.now();
-        // 実際にデータが届いて初めて「接続成功」とみなす
-        this.retryCount = 0;
-        // 様子見の最中かどうかは onVisible の有無で見る
-        // (idleTimer は非同期の確認中に一時的に null になる)
-        if (this.onVisible !== null) {
-          // 無受信の様子見から復帰した
-          this.stopIdlePoll();
+      for (const entry of entries) {
+        // negotiated + id 指定なのでラベルはローカル表示用(slotを添えて見分けやすく)
+        const channel = pc.createDataChannel(`${String(sub.name)}:${entry.slot}`, {
+          negotiated: true,
+          id: entry.id,
+        });
+        channel.binaryType = 'arraybuffer';
+
+        channel.onopen = () => {
+          if (generation !== this.generation) return;
+          // 接続完了の処理は最初に開いた1本だけが行う。
+          // ここでは retryCount を戻さない。チャンネルが開いてもデータが来ない状態が
+          // あり、そこで戻すとバックオフが伸びず、短い周期でセッションを
+          // 作り直し続けることになる(実際に無料枠を使い切る原因になっていた)
+          if (this.channelOpen) return;
+          this.lastPacketAt = performance.now();
+          this.channelOpen = true;
           this.startWatchdog(generation);
+          // 接続前にサーバーから届いていた音声の状態をここで適用する
+          this.queueAudioApply();
           this.onStatus?.('SFU接続完了(DataChannel購読中)');
-        }
-        if (event.data instanceof ArrayBuffer) {
-          this.onPacket?.(new Uint8Array(event.data));
-        }
-      };
-      channel.onclose = () => {
-        if (generation !== this.generation) return;
-        this.scheduleReconnect('DataChannelが閉じられました');
-      };
+        };
+        channel.onmessage = (event) => {
+          this.lastPacketAt = performance.now();
+          // 実際にデータが届いて初めて「接続成功」とみなす
+          this.retryCount = 0;
+          // 様子見の最中かどうかは onVisible の有無で見る
+          // (idleTimer は非同期の確認中に一時的に null になる)
+          if (this.onVisible !== null) {
+            // 無受信の様子見から復帰した
+            this.stopIdlePoll();
+            this.startWatchdog(generation);
+            this.onStatus?.('SFU接続完了(DataChannel購読中)');
+          }
+          if (event.data instanceof ArrayBuffer) {
+            const bytes = new Uint8Array(event.data);
+            this.onPacket?.(bytes);
+            this.onPacketFrom?.(entry.slot, bytes);
+          }
+        };
+        channel.onclose = () => {
+          if (generation !== this.generation) return;
+          this.scheduleReconnect('DataChannelが閉じられました');
+        };
+      }
       pc.onconnectionstatechange = () => {
         if (generation !== this.generation) return;
         if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
@@ -287,6 +315,23 @@ export class SfuTransport implements Transport {
   setAudioPublisher(audio: { sessionId: string; trackName: string } | null): void {
     this.pendingAudio = audio;
     this.queueAudioApply();
+  }
+
+  /**
+   * 配信者の顔ぶれの変化(presence経由の押し出し)。
+   * 購読中の組と違っていればセッションを張り直して購読を揃える。
+   * ポーリング(状態API)より速く2人目の配信者に追随するための経路で、
+   * 見逃してもポーリング側の指紋比較が同じ判定をする
+   */
+  notifyPublishers(list: { slot: number; sessionId: string }[]): void {
+    if (!this.started || this.closedByUser || list.length === 0) return;
+    if (publishersFingerprint(list) === this.subscribedPublisher) return;
+    // 接続処理の途中なら任せる(そのsubscribeが最新の一覧で張られる)
+    if (this.pc && !this.channelOpen) return;
+    this.stopIdlePoll();
+    this.retryCount = 0;
+    this.onStatus?.('配信者の構成が変わりました。接続し直します');
+    void this.open();
   }
 
   /** 購読処理を直列に積む(同時に走らせない) */
@@ -533,11 +578,15 @@ export class SfuTransport implements Transport {
         return;
       }
 
-      // 配信元が変わった場合だけ張り直す。古いサーバーはIDを返さないので、
-      // その場合は「変わっていない」とみなし、下の時間切れの判定に任せる
-      const changed =
-        typeof status.publisherSessionId === 'string' &&
-        status.publisherSessionId !== this.subscribedPublisher;
+      // 配信元(の組)が変わった場合だけ張り直す。古いサーバーは一覧を返さないので、
+      // 単数形のIDから指紋を作る。どちらも無ければ「変わっていない」とみなし、
+      // 下の時間切れの判定に任せる
+      const statusFingerprint = Array.isArray(status.publishers)
+        ? publishersFingerprint(status.publishers)
+        : typeof status.publisherSessionId === 'string'
+          ? publishersFingerprint([{ slot: 0, sessionId: status.publisherSessionId }])
+          : null;
+      const changed = statusFingerprint !== null && statusFingerprint !== this.subscribedPublisher;
       /**
        * 保険の張り直し。ただし音声を購読できているならセッションは生きている
        * 証拠なので張り直さない。**張り直すと音声が途切れる**ため、
