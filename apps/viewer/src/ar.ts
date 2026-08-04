@@ -3,7 +3,8 @@
  * - 対応端末(Androidスマホ/Quest/PICO等)でのみボタンを表示する
  * - ヒットテストで床にレティクルを出し、トリガー(select)で設置
  * - グリップ(squeeze)でアバターをつかんで移動、両手グリップで伸縮+回転(卓上モード)
- * - 設置・つかみ・スケールはすべて avatarRoot(配置フレーム)の変換として行う。
+ * - 設置・つかみ・スケールはすべて roomSpace(部屋の配置フレーム)の変換として行う。
+ *   アバターや将来の複数配信者はその子なので部屋ごと動き、
  *   PoseApplierがフレーム対応なので、IK・足接地・ルートモーションは壊れない
  *
  * 互換性メモ: 一部ブラウザ(PICO等)はselectイベントのXRFrameでヒットテスト
@@ -115,7 +116,7 @@ export class ArController {
     { panel: null, index: -1, distance: 0 },
     { panel: null, index: -1, distance: 0 },
   ];
-  /** アバター片手つかみ: グリップ座標系でのavatarRootのオフセット */
+  /** アバター片手つかみ: グリップ座標系でのroomSpaceのオフセット */
   private readonly grabOffset = new THREE.Matrix4();
   private grabHand = -1;
   /** パネルつかみ: 各手が掴んでいるパネルとグリップ座標系でのオフセット */
@@ -170,7 +171,7 @@ export class ArController {
   constructor(
     private readonly renderer: THREE.WebGLRenderer,
     private readonly scene: THREE.Scene,
-    private readonly avatarRoot: THREE.Group,
+    private readonly roomSpace: THREE.Group,
     private readonly panels: ArPanel[],
     private readonly elements: ArElements,
     private readonly onModeChange: (arActive: boolean) => void,
@@ -211,7 +212,7 @@ export class ArController {
     this.touchAR = new TouchAR({
       touchEl: elements.touch,
       renderer,
-      avatarRoot,
+      roomSpace,
       panels,
       place: () => this.place(),
       onScaleChanged: (scale) => this.onScaleChanged?.(scale),
@@ -361,7 +362,7 @@ export class ArController {
   /** アバターのローカルバウンディングボックス(つかみ時の可視化)を作り直す */
   setAvatarBounds(localBounds: THREE.Box3): void {
     if (this.boundsBox) {
-      this.avatarRoot.remove(this.boundsBox);
+      this.roomSpace.remove(this.boundsBox);
       this.boundsBox = null;
     }
     const size = localBounds.getSize(new THREE.Vector3()).addScalar(0.08);
@@ -386,7 +387,7 @@ export class ArController {
     group.position.copy(center);
     group.visible = false;
     this.boundsBox = group;
-    this.avatarRoot.add(group);
+    this.roomSpace.add(group);
   }
 
   /** 実際に許可されたAR機能を初回フレームで判定し、空間内ボードとコンソールへ出す */
@@ -631,11 +632,11 @@ export class ArController {
       const b = this.grips[1]!.getWorldPosition(_v2);
       this.twoHand = {
         distance: Math.max(a.distanceTo(b), 0.01),
-        scale: this.avatarRoot.scale.x,
+        scale: this.roomSpace.scale.x,
         midpoint: a.clone().add(b).multiplyScalar(0.5),
         angle: Math.atan2(b.x - a.x, b.z - a.z),
-        rootPos: this.avatarRoot.position.clone(),
-        rootQuat: this.avatarRoot.quaternion.clone(),
+        rootPos: this.roomSpace.position.clone(),
+        rootQuat: this.roomSpace.quaternion.clone(),
       };
       this.elements.hint.textContent = '両手で伸縮・回転';
     } else {
@@ -668,8 +669,8 @@ export class ArController {
   private beginOneHandGrab(index: number): void {
     const grip = this.grips[index]!;
     grip.updateWorldMatrix(true, false);
-    this.avatarRoot.updateWorldMatrix(true, false);
-    this.grabOffset.copy(grip.matrixWorld).invert().multiply(this.avatarRoot.matrixWorld);
+    this.roomSpace.updateWorldMatrix(true, false);
+    this.grabOffset.copy(grip.matrixWorld).invert().multiply(this.roomSpace.matrixWorld);
     this.grabHand = index;
   }
 
@@ -699,10 +700,10 @@ export class ArController {
       _q1.setFromAxisAngle(new THREE.Vector3(0, 1, 0), angle - snap.angle);
 
       const midpoint = a.add(b).multiplyScalar(0.5); // _v1を流用
-      this.avatarRoot.scale.setScalar(scale);
+      this.roomSpace.scale.setScalar(scale);
       this.onScaleChanged?.(scale);
-      this.avatarRoot.quaternion.copy(_q1).multiply(snap.rootQuat);
-      this.avatarRoot.position
+      this.roomSpace.quaternion.copy(_q1).multiply(snap.rootQuat);
+      this.roomSpace.position
         .copy(snap.rootPos)
         .sub(snap.midpoint)
         .multiplyScalar(ratio)
@@ -712,7 +713,7 @@ export class ArController {
       // アバター片手つかみ
       const grip = this.grips[this.grabHand]!;
       _m1.multiplyMatrices(grip.matrixWorld, this.grabOffset);
-      _m1.decompose(this.avatarRoot.position, this.avatarRoot.quaternion, _v1);
+      _m1.decompose(this.roomSpace.position, this.roomSpace.quaternion, _v1);
     }
   }
 
@@ -735,8 +736,8 @@ export class ArController {
 
     const x = p.x + _v1.x * INITIAL_PLACE_DISTANCE;
     const z = p.z + _v1.z * INITIAL_PLACE_DISTANCE;
-    this.avatarRoot.position.set(x, floorY, z);
-    this.avatarRoot.quaternion.setFromAxisAngle(UP_AXIS, Math.atan2(p.x - x, p.z - z));
+    this.roomSpace.position.set(x, floorY, z);
+    this.roomSpace.quaternion.setFromAxisAngle(UP_AXIS, Math.atan2(p.x - x, p.z - z));
     this.placed = true;
     this.reticle.visible = false;
     this.elements.hint.textContent = '正面に置きました(設定の「置き直す」で移動できます)';
@@ -747,8 +748,8 @@ export class ArController {
     if (!this.session || this.placed || this.avatarHands() > 0 || !this.latestHit) return;
     const p = this.latestHit;
     const yaw = Math.atan2(this.latestViewer.x - p.x, this.latestViewer.z - p.z);
-    this.avatarRoot.position.copy(p);
-    this.avatarRoot.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+    this.roomSpace.position.copy(p);
+    this.roomSpace.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
     this.placed = true;
     this.reticle.visible = false;
     this.setAvatarVisible(true);
@@ -760,7 +761,7 @@ export class ArController {
    * スマホでは「置く」操作を挟むので、置くまでは見せない
    */
   private setAvatarVisible(visible: boolean): void {
-    this.avatarRoot.visible = visible;
+    this.roomSpace.visible = visible;
   }
 
   /**
@@ -895,9 +896,9 @@ export class ArController {
     for (const panel of this.panels) panel.hide();
     for (const laser of this.lasers) laser.visible = false;
     // 通常表示に戻るときは配置をリセット(デスクトップ表示は原点前提)
-    this.avatarRoot.position.set(0, 0, 0);
-    this.avatarRoot.quaternion.identity();
-    this.avatarRoot.scale.setScalar(1);
+    this.roomSpace.position.set(0, 0, 0);
+    this.roomSpace.quaternion.identity();
+    this.roomSpace.scale.setScalar(1);
     this.onScaleChanged?.(1);
     this.elements.overlayRoot.hidden = true;
     this.onModeChange(false);

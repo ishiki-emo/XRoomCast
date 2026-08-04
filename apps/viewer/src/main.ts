@@ -125,21 +125,29 @@ controls.update();
 // パステル背景・ライティング・浮遊プリミティブ
 const scenery = setupScenery(scene);
 
-// アバターの配置フレーム。AR設置・つかみ移動・卓上スケールはこのグループの
-// 変換として行う(PoseApplierがフレーム対応なのでIK等は壊れない)
+// 部屋の配置フレーム。AR設置・つかみ移動・卓上スケールはこのグループの
+// 変換として行い、視聴者(peer)座標の基準もここに置く。
+// 「視聴者が置いた場所」を表すアンカーなので、設置以外では動かさない
+const roomSpace = new THREE.Group();
+scene.add(roomSpace);
+
+// アバターの足元フレーム。ポーズはこの下に適用される(PoseApplierがフレーム
+// 対応なのでIK等は壊れない)。将来のロコモーション(SECTION_ROOT)や複数配信者
+// では、roomSpace は動かさずこのフレームが roomSpace の中で動く
 const avatarRoot = new THREE.Group();
-scene.add(avatarRoot);
+roomSpace.add(avatarRoot);
 
 // AR用の接地影(装飾床が消えるARでのみ有効化する)
 const contactShadow = new ContactShadow(avatarRoot);
 
 /**
  * AR中のステージ(足元の台と浮遊装飾)。
- * **avatarRoot にぶら下げる**ので、設置した場所へステージごと乗り、
- * ミニ 1/10 にすれば卓上サイズのジオラマになる
+ * **roomSpace にぶら下げる**ので、設置した場所へステージごと乗り、
+ * ミニ 1/10 にすれば卓上サイズのジオラマになる(ステージは部屋の持ち物で、
+ * アバターがロコモーションで動いてもついて行かない)
  */
 const arStage = createStage();
-avatarRoot.add(arStage.object);
+roomSpace.add(arStage.object);
 /** ステージを出すか(AR中のみ意味を持つ。ARを抜けたら常に隠す) */
 let stageEnabled = true;
 
@@ -253,7 +261,7 @@ const spatialChat = new SpatialChat();
 const arController = new ArController(
   renderer,
   scene,
-  avatarRoot,
+  roomSpace,
   [settingsPanel, spatialChat],
   {
     button: document.getElementById('ar-button') as HTMLButtonElement,
@@ -305,7 +313,7 @@ function syncSizeUi(scale: number): void {
 
 function setAvatarSizeMode(mode: AvatarSizeMode): void {
   const scale = AVATAR_SCALES[mode];
-  avatarRoot.scale.setScalar(scale);
+  roomSpace.scale.setScalar(scale);
   avatar?.applyScale(scale);
   spatialAudio.setAvatarScale(scale);
   syncSizeUi(scale);
@@ -367,14 +375,14 @@ settingsToggle.addEventListener('click', () => {
   settingsToggle.textContent = open ? '✕ 閉じる' : '⚙ 設定';
 });
 
-syncSizeUi(avatarRoot.scale.x);
+syncSizeUi(roomSpace.scale.x);
 setShadowMode(contactShadow.getMode());
 
 /** 音源位置の計算に使い回すベクトル */
 const _headWorld = new THREE.Vector3();
 
-// 他の視聴者の気配。位置はアバター基準の相対座標でやり取りする
-const peers = new PeerPresence(avatarRoot);
+// 他の視聴者の気配。位置は部屋(roomSpace)基準の相対座標でやり取りする
+const peers = new PeerPresence(roomSpace);
 
 // ロード中に立てておくクリスタルの仮アバター(ロード成功時に本体と入れ替わる)
 const placeholder = new PlaceholderAvatar(avatarRoot);
@@ -625,9 +633,13 @@ const _peerQuat = new THREE.Quaternion();
 const _peerScale = new THREE.Vector3();
 const _frameInverse = new THREE.Matrix4();
 
-/** ワールド姿勢をアバター基準のローカル姿勢に直して [x,y,z,qx,qy,qz,qw] にする */
+/**
+ * ワールド姿勢を部屋(roomSpace)基準のローカル姿勢に直して [x,y,z,qx,qy,qz,qw] にする。
+ * 基準を設置アンカーに置くことで、アバターがロコモーションで動いても
+ * 静止している視聴者の気配が引きずられない
+ */
 function toPeerNode(matrixWorld: THREE.Matrix4): number[] {
-  _frameInverse.copy(avatarRoot.matrixWorld).invert().multiply(matrixWorld);
+  _frameInverse.copy(roomSpace.matrixWorld).invert().multiply(matrixWorld);
   _frameInverse.decompose(_peerPos, _peerQuat, _peerScale);
   return [
     round3(_peerPos.x),
@@ -643,7 +655,7 @@ function toPeerNode(matrixWorld: THREE.Matrix4): number[] {
 function sendPeerState(): void {
   // 「隠す」を選んでいる間と、ルームが無効設定の間は自分の位置も送らない
   if (!peers.isEnabled || peerMode === 'off' || presenceWs?.readyState !== WebSocket.OPEN) return;
-  avatarRoot.updateWorldMatrix(true, false);
+  roomSpace.updateWorldMatrix(true, false);
 
   const device: PeerDevice = arController.deviceKind;
   // AR中はXRカメラ(=実際の視点)、それ以外は通常のカメラを使う
@@ -845,7 +857,7 @@ async function loadVRM(source: string | ArrayBuffer): Promise<void> {
     previous?.detach();
     avatar = next;
     if (previous) requestAnimationFrame(() => previous.dispose());
-    avatar.applyScale(avatarRoot.scale.x); // AR中の差し替えでもスケールに追従
+    avatar.applyScale(roomSpace.scale.x); // AR中の差し替えでもスケールに追従
     arController.setAvatarBounds(avatar.bounds);
     placeholder.setVisible(false);
 
@@ -1037,12 +1049,13 @@ Object.assign(window, {
     },
     placeholder,
     spatialAudio,
+    roomSpace,
     avatarRoot,
     scene,
     scenery,
     THREE,
     setAvatarScale: (scale: number) => {
-      avatarRoot.scale.setScalar(scale);
+      roomSpace.scale.setScalar(scale);
       avatar?.applyScale(scale);
       spatialAudio.setAvatarScale(scale);
     },

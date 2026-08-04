@@ -20,7 +20,8 @@ const UP = new THREE.Vector3(0, 1, 0);
 export interface TouchAROptions {
   touchEl: HTMLElement;
   renderer: THREE.WebGLRenderer;
-  avatarRoot: THREE.Group;
+  /** 部屋の配置フレーム。回転・伸縮はこのグループへ適用する */
+  roomSpace: THREE.Group;
   panels: ArPanel[];
   place: () => void;
   onScaleChanged: (scale: number) => void;
@@ -76,7 +77,7 @@ export class TouchAR {
   }
 
   private currentYaw(): number {
-    const q = this.o.avatarRoot.quaternion;
+    const q = this.o.roomSpace.quaternion;
     return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
   }
 
@@ -160,7 +161,7 @@ export class TouchAR {
   private updateRotate(x: number): void {
     const dx = x - this.rotateStart.x;
     const yaw = this.rotateStart.yaw + (dx / window.innerWidth) * Math.PI * 2;
-    this.o.avatarRoot.quaternion.setFromAxisAngle(UP, yaw);
+    this.o.roomSpace.quaternion.setFromAxisAngle(UP, yaw);
   }
 
   private updatePanelDrag(x: number, y: number): void {
@@ -176,7 +177,7 @@ export class TouchAR {
     this.pinchStart = {
       dist: Math.max(Math.hypot(a!.x - b!.x, a!.y - b!.y), 1),
       angle: Math.atan2(b!.y - a!.y, b!.x - a!.x),
-      scale: this.o.avatarRoot.scale.x,
+      scale: this.o.roomSpace.scale.x,
       yaw: this.currentYaw(),
     };
     this.o.setHint('二本指で伸縮・回転');
@@ -191,10 +192,10 @@ export class TouchAR {
       SCALE_MIN,
       SCALE_MAX,
     );
-    this.o.avatarRoot.scale.setScalar(scale);
+    this.o.roomSpace.scale.setScalar(scale);
     this.o.onScaleChanged(scale);
     // 画面上のひねり → ヨー回転(足元中心・位置は不変)
     const yaw = this.pinchStart.yaw - (angle - this.pinchStart.angle);
-    this.o.avatarRoot.quaternion.setFromAxisAngle(UP, yaw);
+    this.o.roomSpace.quaternion.setFromAxisAngle(UP, yaw);
   }
 }
