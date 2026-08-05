@@ -171,7 +171,12 @@ export class SpatialAudio {
     void source.sink.play().catch(() => {});
     source.positional.setMediaStreamSource(stream);
     source.hasTrack = true;
-    this.attachAnalyser(source);
+    // リップシンクは飾りなので、解析の接続に失敗しても再生は続ける
+    try {
+      this.attachAnalyser(source);
+    } catch (error) {
+      console.warn('[audio] リップシンク解析の接続に失敗:', error);
+    }
     this.applyRouting(source);
   }
 

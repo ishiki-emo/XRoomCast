@@ -521,31 +521,37 @@ function refreshAudioButton(): void {
 }
 
 function handleAudioTrack(slot: number, track: MediaStreamTrack | null): void {
-  spatialAudio.setTrack(track, slot);
+  // ボタンの表示を**先に**決める。再生側(WebAudioの接続)で例外が出ても
+  // 操作手段だけは残す(setTrackを先にすると、失敗時にボタンが出なくなる)
   if (!track) {
     audioTracks.delete(slot);
     audibleSlots.delete(slot);
     refreshAudioButton();
-    return;
+  } else {
+    audioTracks.set(slot, track);
+    audibleSlots.add(slot);
+    refreshAudioButton();
+    // 配信者側が停止するとリモートトラックはmuteになる(endedは飛んでこない)
+    const dropIfCurrent = (): void => {
+      if (audioTracks.get(slot) === track) {
+        audibleSlots.delete(slot);
+        refreshAudioButton();
+      }
+    };
+    track.onmute = dropIfCurrent;
+    track.onended = dropIfCurrent;
+    track.onunmute = () => {
+      if (audioTracks.get(slot) === track) {
+        audibleSlots.add(slot);
+        refreshAudioButton();
+      }
+    };
   }
-  audioTracks.set(slot, track);
-  audibleSlots.add(slot);
-  refreshAudioButton();
-  // 配信者側が停止するとリモートトラックはmuteになる(endedは飛んでこない)
-  const dropIfCurrent = (): void => {
-    if (audioTracks.get(slot) === track) {
-      audibleSlots.delete(slot);
-      refreshAudioButton();
-    }
-  };
-  track.onmute = dropIfCurrent;
-  track.onended = dropIfCurrent;
-  track.onunmute = () => {
-    if (audioTracks.get(slot) === track) {
-      audibleSlots.add(slot);
-      refreshAudioButton();
-    }
-  };
+  try {
+    spatialAudio.setTrack(track, slot);
+  } catch (error) {
+    console.warn('[audio] 再生ノードの接続に失敗:', error);
+  }
 }
 
 audioButton.addEventListener('click', () => {
