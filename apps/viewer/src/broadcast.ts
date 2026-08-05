@@ -328,6 +328,36 @@ toggleButton.addEventListener('click', () => {
     });
 });
 
+// ---- 退室(自分の席を空ける) ----
+// マイクを止め、配信元の登録を解除する。席の持ち物(アバター・音声)は
+// サーバー側で片付く。ブリッジが動いたままだとハートビートで席を取り直す
+// ため、ブリッジ利用時は先にブリッジを止めてもらう(注記に記載)
+const leaveButton = document.getElementById('b-leave') as HTMLButtonElement | null;
+leaveButton?.addEventListener('click', () => {
+  if (!window.confirm(`「${currentPid()}」として退室しますか?(席とアバターが片付きます)`)) {
+    return;
+  }
+  leaveButton.disabled = true;
+  void (async () => {
+    try {
+      if (live) await setMicLive(false);
+      const result = (await api('/api/sfu/publisher', {
+        sessionId: null,
+        pid: currentPid(),
+      })) as { left?: number | null };
+      setStatus(
+        typeof result.left === 'number'
+          ? `退室しました(席${result.left}を空けました)`
+          : '退室しました(この名前の配信元は登録されていませんでした)',
+      );
+    } catch (error) {
+      setStatus(`退室に失敗: ${String(error)}`, 'error');
+    } finally {
+      leaveButton.disabled = false;
+    }
+  })();
+});
+
 // タブを閉じるときに登録解除を試みる(失敗しても15分で自動失効)。
 // ここではセッションごと畳む(停止ボタンと違い、再開の余地がないため)
 window.addEventListener('pagehide', () => {

@@ -250,6 +250,9 @@
         </select>
       </div>
       <button id="b-toggle">マイク配信を開始</button>
+      <div class="row" style="margin-top: 8px">
+        <button id="b-leave" class="small danger">退室する(席を空ける)</button>
+      </div>
       <p class="note">
         ・音声はCloudflare Realtime SFUの音声トラック(Opus)として配信されます<br />
         ・ポーズ配信(VSeeFace+ブリッジ)とは独立して動きます<br />
@@ -258,7 +261,10 @@
         .env の <code>PUBLISHER_ID</code> と同じ値にしてください(HMD配信は自動で一致します)。
         配信中は変えないでください<br />
         ・<strong>声の席</strong>は「自動」で自分(配信者名)の席に届きます。
-        配信元がまだ無いときは席0に流れ、HMD配信の開始後に自動で席を合わせ直します
+        配信元がまだ無いときは席0に流れ、HMD配信の開始後に自動で席を合わせ直します<br />
+        ・<strong>退室する</strong>は自分(配信者名)の席を空けます(マイクも停止。
+        席1以降はアバターも片付きます)。<strong>ブリッジが動いたままだと数分で席を
+        取り直す</strong>ので、ブリッジ利用時は先にブリッジを止めてください
       </p>
 
       <h2>👀 プレビューと視聴者</h2>
