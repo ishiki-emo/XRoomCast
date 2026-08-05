@@ -14,6 +14,7 @@
  * ミュートした <audio> にstreamを繋いだままにしている。
  */
 import * as THREE from 'three';
+import { VowelEstimator, type LipSyncWeights } from './lipSync';
 
 /** 等身大(スケール1)での基準距離。これより近づいても音量は上がらない */
 const BASE_REF_DISTANCE = 1.2;
@@ -50,6 +51,11 @@ class SpatialSource {
   hasTrack = false;
   /** いまWebAudioへ繋いでいるトラック。同じものを繋ぎ直さないために持つ */
   currentTrack: MediaStreamTrack | null = null;
+  /** リップシンク用の周波数解析(遅延生成)。destinationには繋がない */
+  analyser: AnalyserNode | null = null;
+  /** 解析バッファ(毎フレーム確保しない) */
+  freqBuffer: Float32Array<ArrayBuffer> | null = null;
+  estimator: VowelEstimator | null = null;
 
   constructor(listener: THREE.AudioListener, scene: THREE.Scene, refDistance: number) {
     this.positional = new THREE.PositionalAudio(listener);
@@ -165,7 +171,45 @@ export class SpatialAudio {
     void source.sink.play().catch(() => {});
     source.positional.setMediaStreamSource(stream);
     source.hasTrack = true;
+    this.attachAnalyser(source);
     this.applyRouting(source);
+  }
+
+  /**
+   * リップシンク用のAnalyserを音源ノードへ分岐で繋ぐ。
+   * **新しいMediaStreamAudioSourceNodeは作らない**(Chromeは同じトラックを
+   * 複数のソースノードで受けられず無音になる)。three.jsが作ったノードから
+   * 枝分かれさせる。destinationには繋がない(ハウリング防止)
+   */
+  private attachAnalyser(source: SpatialSource): void {
+    const node = source.positional.source as unknown as AudioNode | null;
+    if (!node) return;
+    if (!source.analyser) {
+      const analyser = this.listener.context.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.6;
+      source.analyser = analyser;
+      source.freqBuffer = new Float32Array(analyser.frequencyBinCount);
+      source.estimator = new VowelEstimator(
+        this.listener.context.sampleRate,
+        analyser.frequencyBinCount,
+      );
+    }
+    node.connect(source.analyser);
+  }
+
+  /**
+   * 席の音声から推定した口形(母音)の重み。リップシンクに使う。
+   * 音が来ていない席では null。解析が効かない環境(iOS等)では
+   * 無音扱いになり、重みが全てゼロのまま返る(口が動かないだけで無害)
+   */
+  sampleLipSync(slot: number, delta: number): LipSyncWeights | null {
+    const source = this.sources.get(slot);
+    if (!source?.analyser || !source.freqBuffer || !source.estimator || !source.hasTrack) {
+      return null;
+    }
+    source.analyser.getFloatFrequencyData(source.freqBuffer);
+    return source.estimator.estimate(source.freqBuffer, delta);
   }
 
   /** 席の音源ごと片付ける(配信者の退場時) */

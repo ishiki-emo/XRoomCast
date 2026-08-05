@@ -1017,13 +1017,15 @@ renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
   // ポーズ適用。未接続でデモ中はデモのバッファを全ユニットへ流す(2体表示の検証にも使う)
   const now = performance.now();
   const demoPlayer = !liveTransport && demo.active ? demo.player : null;
-  for (const unit of units.values()) {
+  for (const [slot, unit] of units) {
     unit.update({
       now,
       delta,
       elapsed: clock.elapsedTime,
       player: liveTransport ? unit.player : demoPlayer,
       alwaysLive: demoPlayer !== null,
+      // 席の音声から口パクを駆動する(音が無い席では null)
+      lipSync: spatialAudio.sampleLipSync(slot, delta),
     });
   }
 

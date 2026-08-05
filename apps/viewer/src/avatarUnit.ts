@@ -14,6 +14,7 @@ import {
   IdleMotion,
   PlaceholderAvatar,
   blendPose,
+  type LipSyncWeights,
   type ShadowMode,
 } from '@xroomcast/viewer-core';
 
@@ -48,6 +49,8 @@ export interface UnitFrameInput {
   player: PoseStreamPlayer | null;
   /** デモ再生など、受信の途切れ判定をせず常に配信側として扱うか */
   alwaysLive: boolean;
+  /** 音声解析から推定した口形(リップシンク)。音が来ていない席では null */
+  lipSync?: LipSyncWeights | null;
 }
 
 export class AvatarUnit {
@@ -164,6 +167,19 @@ export class AvatarUnit {
           : idleFrame,
       );
     }
+
+    // 口パク(音声解析)。配信側から口の表情が届いている場合は大きい方を採用し、
+    // 二重駆動(VSeeFaceのリップシンク等)と喧嘩させない。
+    // setValue → avatar.update(内部でvrm.update) の順で反映される
+    if (input.lipSync) {
+      const expressions = avatar.vrm.expressionManager;
+      if (expressions) {
+        for (const [name, value] of Object.entries(input.lipSync)) {
+          if (value > (expressions.getValue(name) ?? 0)) expressions.setValue(name, value);
+        }
+      }
+    }
+
     avatar.update(input.delta);
   }
 
