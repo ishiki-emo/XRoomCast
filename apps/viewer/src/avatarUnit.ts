@@ -14,6 +14,7 @@ import {
   IdleMotion,
   PlaceholderAvatar,
   blendPose,
+  type LipSyncWeights,
   type ShadowMode,
 } from '@xroomcast/viewer-core';
 
@@ -48,6 +49,8 @@ export interface UnitFrameInput {
   player: PoseStreamPlayer | null;
   /** デモ再生など、受信の途切れ判定をせず常に配信側として扱うか */
   alwaysLive: boolean;
+  /** 音声解析から推定した口形(リップシンク)。音が来ていない席では null */
+  lipSync?: LipSyncWeights | null;
 }
 
 export class AvatarUnit {
@@ -72,6 +75,8 @@ export class AvatarUnit {
   private liveBlend = 0;
   /** 完全に配信側へ移行済みか(移行の瞬間だけ待機の表情を片付ける) */
   private liveOnly = false;
+  /** リップシンクが口を駆動中か(音声が消えた瞬間に口を閉じるために持つ) */
+  private lipSyncActive = false;
 
   constructor(options: AvatarUnitOptions) {
     this.options = options;
@@ -164,6 +169,30 @@ export class AvatarUnit {
           : idleFrame,
       );
     }
+
+    /**
+     * 口パク(音声解析)。音声がある間は口(母音)をリップシンクが**所有**し、
+     * 毎フレーム値を直接セットする。
+     *
+     * 「今より大きいときだけ上書き」のような合流はできない——表情値は
+     * 一度セットすると持続し、ワイヤ形式もデルタ方式(変化時のみ送る)なので、
+     * 一度開いた口を誰も下げられず開きっぱなしになる。
+     * 音声が消えたら口を閉じてから手を引く(開いたまま残さない)。
+     * setValue → avatar.update(内部でvrm.update) の順で反映される
+     */
+    const expressions = avatar.vrm.expressionManager;
+    if (expressions) {
+      if (input.lipSync) {
+        this.lipSyncActive = true;
+        for (const [name, value] of Object.entries(input.lipSync)) {
+          expressions.setValue(name, value);
+        }
+      } else if (this.lipSyncActive) {
+        this.lipSyncActive = false;
+        for (const name of ['aa', 'ih', 'ou', 'ee', 'oh']) expressions.setValue(name, 0);
+      }
+    }
+
     avatar.update(input.delta);
   }
 

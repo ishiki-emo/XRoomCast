@@ -21,6 +21,7 @@ export { IdleMotion, blendPose } from './idleMotion';
 export { PeerPresence, type PeerDevice, type PeerState } from './peers';
 export { PlaceholderAvatar } from './placeholderAvatar';
 export { SpatialAudio, isSpatialAudioSupported } from './spatialAudio';
+export { VowelEstimator, type LipSyncWeights } from './lipSync';
 export { setupScenery } from './scenery';
 export { createStage, type Stage } from './stage';
 export { ContactShadow, type ShadowMode } from './contactShadow';

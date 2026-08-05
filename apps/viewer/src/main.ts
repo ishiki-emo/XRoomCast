@@ -521,31 +521,37 @@ function refreshAudioButton(): void {
 }
 
 function handleAudioTrack(slot: number, track: MediaStreamTrack | null): void {
-  spatialAudio.setTrack(track, slot);
+  // ボタンの表示を**先に**決める。再生側(WebAudioの接続)で例外が出ても
+  // 操作手段だけは残す(setTrackを先にすると、失敗時にボタンが出なくなる)
   if (!track) {
     audioTracks.delete(slot);
     audibleSlots.delete(slot);
     refreshAudioButton();
-    return;
+  } else {
+    audioTracks.set(slot, track);
+    audibleSlots.add(slot);
+    refreshAudioButton();
+    // 配信者側が停止するとリモートトラックはmuteになる(endedは飛んでこない)
+    const dropIfCurrent = (): void => {
+      if (audioTracks.get(slot) === track) {
+        audibleSlots.delete(slot);
+        refreshAudioButton();
+      }
+    };
+    track.onmute = dropIfCurrent;
+    track.onended = dropIfCurrent;
+    track.onunmute = () => {
+      if (audioTracks.get(slot) === track) {
+        audibleSlots.add(slot);
+        refreshAudioButton();
+      }
+    };
   }
-  audioTracks.set(slot, track);
-  audibleSlots.add(slot);
-  refreshAudioButton();
-  // 配信者側が停止するとリモートトラックはmuteになる(endedは飛んでこない)
-  const dropIfCurrent = (): void => {
-    if (audioTracks.get(slot) === track) {
-      audibleSlots.delete(slot);
-      refreshAudioButton();
-    }
-  };
-  track.onmute = dropIfCurrent;
-  track.onended = dropIfCurrent;
-  track.onunmute = () => {
-    if (audioTracks.get(slot) === track) {
-      audibleSlots.add(slot);
-      refreshAudioButton();
-    }
-  };
+  try {
+    spatialAudio.setTrack(track, slot);
+  } catch (error) {
+    console.warn('[audio] 再生ノードの接続に失敗:', error);
+  }
 }
 
 audioButton.addEventListener('click', () => {
@@ -1017,13 +1023,15 @@ renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
   // ポーズ適用。未接続でデモ中はデモのバッファを全ユニットへ流す(2体表示の検証にも使う)
   const now = performance.now();
   const demoPlayer = !liveTransport && demo.active ? demo.player : null;
-  for (const unit of units.values()) {
+  for (const [slot, unit] of units) {
     unit.update({
       now,
       delta,
       elapsed: clock.elapsedTime,
       player: liveTransport ? unit.player : demoPlayer,
       alwaysLive: demoPlayer !== null,
+      // 席の音声から口パクを駆動する(音が無い席では null)
+      lipSync: spatialAudio.sampleLipSync(slot, delta),
     });
   }
 
