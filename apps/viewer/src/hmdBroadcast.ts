@@ -125,6 +125,8 @@ export class HmdBroadcast {
   constructor(
     private readonly room: string,
     private readonly auth: AuthProvider,
+    /** 配信者名。席(slot)の割り当てとコンソールの自動席解決の鍵になる */
+    private readonly pid: () => string = () => 'hmd',
   ) {}
 
   get active(): boolean {
@@ -195,9 +197,9 @@ export class HmdBroadcast {
   /** 視聴者が購読できるよう、自分のセッションIDを登録する */
   private async register(): Promise<void> {
     if (!this.sessionId) return;
-    // pid はブリッジ(default)と別の席を取るための固定ID。
-    // 同じブラウザからの再接続では同じ席を保つ
-    await this.api('/api/sfu/publisher', { sessionId: this.sessionId, pid: 'hmd' });
+    // pid はブリッジと席を分ける・再接続で同じ席を保つための固定ID。
+    // コンソールの配信者名と同じ値を使う(自動席解決がそれを前提にする)
+    await this.api('/api/sfu/publisher', { sessionId: this.sessionId, pid: this.pid() });
   }
 
   /**

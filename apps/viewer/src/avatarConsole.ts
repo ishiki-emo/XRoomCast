@@ -32,8 +32,13 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function setupAvatarConsole(options: { room: string; auth: AuthProvider }): void {
-  const { room, auth } = options;
+export function setupAvatarConsole(options: {
+  room: string;
+  auth: AuthProvider;
+  /** 「自動(自分の席)」の解決。自分の配信元が居なければnullを返す */
+  resolveOwnSlot?: () => Promise<number | null>;
+}): void {
+  const { room, auth, resolveOwnSlot } = options;
 
   const statusEl = document.getElementById('a-status') as HTMLDivElement;
   const fileInput = document.getElementById('a-file') as HTMLInputElement;
@@ -45,17 +50,25 @@ export function setupAvatarConsole(options: { room: string; auth: AuthProvider }
   const reloadButton = document.getElementById('a-reload') as HTMLButtonElement;
   const slotSelect = document.getElementById('a-slot') as HTMLSelectElement | null;
 
-  /** 操作対象の席。席1以降は複数配信者用(2つ目の配信元の見た目を選ぶ) */
-  let slot = 0;
+  /** 操作対象の席。'auto' は自分(配信者名)の配信元の席に追従する */
+  let slotChoice: 'auto' | number = slotSelect && slotSelect.value !== 'auto' ? Number(slotSelect.value) || 0 : 'auto';
+  /** 「自動」の解決結果(自分の配信元が居なければnull) */
+  let autoSlot: number | null = null;
   /** 席番号 → 配信中のVRMキー */
   let currentKeys: Record<string, string> = {};
   let defaultKey: string | null = null;
   let busy = false;
   let lastItems: VrmItem[] = [];
 
+  /** いま操作対象になっている席番号(自動が未解決ならnull) */
+  function effectiveSlot(): number | null {
+    return slotChoice === 'auto' ? autoSlot : slotChoice;
+  }
+
   /** いま選択中の席の配信中キー */
   function currentKey(): string | null {
-    return currentKeys[String(slot)] ?? null;
+    const slot = effectiveSlot();
+    return slot === null ? null : (currentKeys[String(slot)] ?? null);
   }
 
   function setStatus(text: string, kind: 'idle' | 'live' | 'error' = 'idle'): void {
@@ -128,27 +141,43 @@ export function setupAvatarConsole(options: { room: string; auth: AuthProvider }
       defaultKey === current ? '既定のVRMを配信中' : '既定のVRMに切り替え';
   }
 
+  /** 席の表記(「自動」は解決結果も添える) */
+  function seatLabel(): string {
+    if (slotChoice === 'auto') {
+      return autoSlot === null ? '自分の席(未確定)' : `自分の席(席${autoSlot})`;
+    }
+    return `席${slotChoice}`;
+  }
+
   /** いま選択中の席の状態をステータス行へ出す */
   function reportCurrent(): void {
+    const slot = effectiveSlot();
+    if (slot === null) {
+      setStatus(
+        '自分の席が未確定です(ブリッジ/HMD配信を開始すると決まります。先に選ぶ場合は席番号を手動で)',
+      );
+      return;
+    }
     const key = currentKey();
-    const seat = slot === 0 ? '' : `席${slot}: `;
     if (key) {
       const name = key.slice(key.lastIndexOf('/') + 1);
-      setStatus(`${seat}配信中のアバター: ${name}`, 'live');
+      setStatus(`${seatLabel()}: 配信中のアバター: ${name}`, 'live');
     } else if (slot === 0) {
       setStatus('まだ切り替えていません(視聴者は視聴URLの既定VRMを表示中)');
     } else {
-      setStatus(`席${slot}はまだアバター未設定です(2つ目の配信元の見た目をここで選びます)`);
+      setStatus(`${seatLabel()}はまだアバター未設定です`);
     }
   }
 
   async function refresh(): Promise<void> {
     try {
-      const [listed, current] = await Promise.all([
+      const [listed, current, resolved] = await Promise.all([
         callJson('/api/vrm/list') as Promise<ListResponse>,
         callJson('/api/avatar') as Promise<AvatarResponse>,
+        resolveOwnSlot ? resolveOwnSlot() : Promise.resolve(null),
       ]);
       defaultKey = listed.defaultKey ?? null;
+      autoSlot = resolved;
       currentKeys = {};
       // 旧サーバーは avatar(席0)だけを返す
       if (current.avatar?.key) currentKeys['0'] = current.avatar.key;
@@ -164,16 +193,27 @@ export function setupAvatarConsole(options: { room: string; auth: AuthProvider }
 
   async function switchTo(vrmKey: string, name: string): Promise<void> {
     setBusy(true);
-    const seat = slot === 0 ? '' : `席${slot}を`;
-    setStatus(`${seat}「${name}」に切り替えています...`);
     try {
+      let slot = effectiveSlot();
+      if (slot === null && resolveOwnSlot) {
+        autoSlot = await resolveOwnSlot();
+        slot = effectiveSlot();
+      }
+      if (slot === null) {
+        setStatus(
+          '自分の席が見つかりません。ブリッジ/HMD配信を開始するか、席番号を手動で選んでください',
+          'error',
+        );
+        return;
+      }
+      setStatus(`${seatLabel()}を「${name}」に切り替えています...`);
       await callJson('/api/avatar', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: vrmKey, slot }),
       });
       currentKeys[String(slot)] = vrmKey;
-      setStatus(`${seat}「${name}」に切り替えました(視聴者はDL完了順に反映されます)`, 'live');
+      setStatus(`${seatLabel()}を「${name}」に切り替えました(視聴者はDL完了順に反映されます)`, 'live');
     } catch (error) {
       setStatus(`切り替えに失敗: ${String(error)}`, 'error');
     } finally {
@@ -263,9 +303,19 @@ export function setupAvatarConsole(options: { room: string; auth: AuthProvider }
   defaultButton.addEventListener('click', () => {
     if (defaultKey) void switchTo(defaultKey, defaultKey);
   });
-  // 席の切り替えは表示の対象を変えるだけ(一覧は共通なので取得し直さない)
+  // 席の切り替えは表示の対象を変えるだけ(一覧は共通なので取得し直さない)。
+  // 「自動」へ戻したときだけ解決し直す
   slotSelect?.addEventListener('change', () => {
-    slot = Number(slotSelect.value) || 0;
+    if (slotSelect.value === 'auto') {
+      slotChoice = 'auto';
+      void (resolveOwnSlot ? resolveOwnSlot() : Promise.resolve(null)).then((resolved) => {
+        autoSlot = resolved;
+        render(lastItems);
+        reportCurrent();
+      });
+      return;
+    }
+    slotChoice = Number(slotSelect.value) || 0;
     render(lastItems);
     reportCurrent();
   });

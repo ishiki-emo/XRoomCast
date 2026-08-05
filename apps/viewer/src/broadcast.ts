@@ -24,9 +24,88 @@ const statusEl = document.getElementById('b-status') as HTMLDivElement;
 const toggleButton = document.getElementById('b-toggle') as HTMLButtonElement;
 /** 声を届ける席(複数配信者用)。配信中は変更できないようにする */
 const micSlotSelect = document.getElementById('m-slot') as HTMLSelectElement | null;
+/** 配信者名(pid)。席の割り当てと「自動(自分の席)」解決の鍵 */
+const pidInput = document.getElementById('b-pid') as HTMLInputElement | null;
+const PID_STORAGE_KEY = 'xroomcast.pid';
+const PID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 
-function micSlot(): number {
-  return Number(micSlotSelect?.value ?? '0') || 0;
+function sanitizePid(value: string): string | null {
+  const trimmed = value.trim();
+  return PID_PATTERN.test(trimmed) ? trimmed : null;
+}
+
+// 初期値: URLの ?pid= > 前回使った名前 > 'default'(=ブリッジの既定と同じ)
+if (pidInput) {
+  const fromUrl = sanitizePid(new URLSearchParams(location.search).get('pid') ?? '');
+  const fromStorage = sanitizePid(localStorage.getItem(PID_STORAGE_KEY) ?? '');
+  pidInput.value = fromUrl ?? fromStorage ?? 'default';
+  localStorage.setItem(PID_STORAGE_KEY, pidInput.value);
+  pidInput.addEventListener('change', () => {
+    const pid = sanitizePid(pidInput.value);
+    if (pid) localStorage.setItem(PID_STORAGE_KEY, pid);
+  });
+}
+
+/** いまの配信者名(不正な入力は 'default' 扱い) */
+function currentPid(): string {
+  return (pidInput ? sanitizePid(pidInput.value) : null) ?? 'default';
+}
+
+/** 自分のpidの席をサーバーの配信者一覧から引く(配信元が居なければnull) */
+async function fetchOwnSlot(): Promise<number | null> {
+  try {
+    const res = await fetch(withAuth('/api/sfu/publisher', config.room, auth));
+    if (!res.ok) return null;
+    const data = (await res.json()) as { publishers?: { pid: string; slot: number }[] };
+    return data.publishers?.find((p) => p.pid === currentPid())?.slot ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** マイク配信中の席(配信中は固定する)と、自動解決の状態メモ */
+let activeMicSlot = 0;
+let micSeatNote = '';
+
+/**
+ * マイクの席を決める。「自動」は自分(配信者名)の配信元の席。
+ * まだ配信元が居ないときは席0へ流しておき、HMD配信の開始後に合わせ直す
+ * (HMDは「マイク開始 → ポーズ配信の登録」の順序で、開始時点では席が無いため)
+ */
+async function resolveMicSlot(): Promise<number> {
+  micSeatNote = '';
+  const value = micSlotSelect?.value ?? 'auto';
+  if (value !== 'auto') return Number(value) || 0;
+  const slot = await fetchOwnSlot();
+  if (slot === null) {
+    micSeatNote = '・自分の席が未確定のため席0';
+    return 0;
+  }
+  return slot;
+}
+
+function micLiveStatus(): string {
+  return `🔴 音声配信中(席${activeMicSlot}${micSeatNote}。このタブを閉じると停止します)`;
+}
+
+/**
+ * 自動選択のまま席がずれていたら登録を移す。
+ * HMD配信の開始でポーズ配信元(pid)が席を得た直後に呼ぶ
+ */
+async function realignMicSeat(): Promise<void> {
+  if (!live || micSlotSelect?.value !== 'auto') return;
+  const slot = await fetchOwnSlot();
+  if (slot === null || slot === activeMicSlot) return;
+  const previous = activeMicSlot;
+  activeMicSlot = slot;
+  micSeatNote = '';
+  try {
+    await api('/api/sfu/audio-publisher', { sessionId: null, slot: previous });
+    await register();
+    setStatus(micLiveStatus(), 'live');
+  } catch {
+    // 失敗しても次のハートビートで現在の席へ登録される
+  }
 }
 
 const config = readConfig();
@@ -100,6 +179,8 @@ function teardown(): void {
  * セッションと送信者を保ったまま、送るトラックだけを差し替える。
  */
 async function start(): Promise<void> {
+  setStatus('声の席を確認中...');
+  activeMicSlot = await resolveMicSlot();
   setStatus('マイクを取得中...');
   const track = await acquireMic();
 
@@ -108,7 +189,7 @@ async function start(): Promise<void> {
       await sender.replaceTrack(track);
       await register();
       startHeartbeat();
-      setStatus('🔴 音声配信中(このタブを閉じると停止します)', 'live');
+      setStatus(micLiveStatus(), 'live');
       return;
     } catch (error) {
       // 再利用できなければ作り直す(セッションが失効している場合など)
@@ -130,7 +211,7 @@ async function createSession(track: MediaStreamTrack): Promise<void> {
   const updateConnectionStatus = (): void => {
     if (pc !== connection) return;
     if (connection.connectionState === 'connected') {
-      setStatus('🔴 音声配信中(このタブを閉じると停止します)', 'live');
+      setStatus(micLiveStatus(), 'live');
     } else if (connection.connectionState === 'failed' || connection.connectionState === 'disconnected') {
       // 壊れた接続を再利用しないよう捨てる(次の開始で作り直される)
       teardown();
@@ -167,7 +248,7 @@ async function createSession(track: MediaStreamTrack): Promise<void> {
 
 async function register(): Promise<void> {
   if (!sessionId) return;
-  await api('/api/sfu/audio-publisher', { sessionId, trackName: TRACK_NAME, slot: micSlot() });
+  await api('/api/sfu/audio-publisher', { sessionId, trackName: TRACK_NAME, slot: activeMicSlot });
 }
 
 /**
@@ -182,7 +263,7 @@ async function stop(silent = false): Promise<void> {
     heartbeatTimer = null;
   }
   try {
-    await api('/api/sfu/audio-publisher', { sessionId: null, slot: micSlot() });
+    await api('/api/sfu/audio-publisher', { sessionId: null, slot: activeMicSlot });
   } catch {
     // 登録解除の失敗は無視(15分で自動失効する)
   }
@@ -201,8 +282,9 @@ function markMic(on: boolean): void {
   live = on;
   toggleButton.textContent = on ? 'マイク配信を停止' : 'マイク配信を開始';
   toggleButton.classList.toggle('live', on);
-  // 配信中に席を変えると旧席の登録が残るため、停止するまで固定する
+  // 配信中に席や名前を変えると旧席の登録が残るため、停止するまで固定する
   if (micSlotSelect) micSlotSelect.disabled = on;
+  if (pidInput) pidInput.disabled = on;
 }
 
 /** マイク配信の開始/停止。HMD配信の開始時にも使う */
@@ -236,7 +318,7 @@ window.addEventListener('pagehide', () => {
     // sendBeaconはヘッダを付けられないので資格情報はクエリで運ぶ
     navigator.sendBeacon?.(
       withAuth('/api/sfu/audio-publisher-beacon', config.room, auth),
-      JSON.stringify({ sessionId: null, slot: micSlot() }),
+      JSON.stringify({ sessionId: null, slot: activeMicSlot }),
     );
     teardown();
   }
@@ -314,7 +396,7 @@ if (!key) {
   setStatus('URLにキーがありません(/broadcast/<キー> から開いてください)', 'error');
   toggleButton.disabled = true;
 } else {
-  setupAvatarConsole({ room: config.room, auth });
+  setupAvatarConsole({ room: config.room, auth, resolveOwnSlot: fetchOwnSlot });
   setupStageConsole({ room: config.room, auth });
   setupPreview();
 }
@@ -325,7 +407,7 @@ if (!key) {
  */
 function setupPreview(): void {
   const previewStatus = document.getElementById('p-status') as HTMLElement;
-  const hmdBroadcast = new HmdBroadcast(config.room, auth);
+  const hmdBroadcast = new HmdBroadcast(config.room, auth, currentPid);
   hmdBroadcast.onStatus = (text) => (previewStatus.textContent = text);
 
   const preview = setupBroadcastPreview({
@@ -358,6 +440,8 @@ function setupPreview(): void {
         preview.setMicLabel(live);
         return preview.enterHmd(mode);
       })
+      // ポーズ配信の登録で席が決まったので、マイクの「自動」を自分の席へ合わせ直す
+      .then(() => realignMicSeat())
       .catch((error: unknown) => {
         previewStatus.textContent = `HMD配信を開始できませんでした: ${String(error)}`;
       })
