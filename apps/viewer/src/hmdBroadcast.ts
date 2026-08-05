@@ -329,6 +329,11 @@ export class HmdBroadcast {
       window.clearInterval(this.heartbeat);
       this.heartbeat = null;
     }
+    // 明示的な退席(席のアバター・音声もサーバー側で片付く)。
+    // 送れなくても15分で自動失効する
+    if (this.sessionId) {
+      void this.api('/api/sfu/publisher', { sessionId: null, pid: this.pid() }).catch(() => {});
+    }
     this.channel = null;
     this.pc?.close();
     this.pc = null;

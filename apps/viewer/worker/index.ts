@@ -434,14 +434,20 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
     if (!(await allows(env, request, url, 'publisher', room))) {
       return json(403, { error: 'forbidden' });
     }
-    const body = (await request.json()) as { sessionId?: string; pid?: string };
-    if (!body.sessionId) return json(400, { error: 'sessionIdがありません' });
+    const body = (await request.json()) as { sessionId?: string | null; pid?: string };
+    // sessionId: null は明示的な退席(席のアバター・音声も片付く)。未指定は従来どおりエラー
+    if (body.sessionId === undefined || body.sessionId === '') {
+      return json(400, { error: 'sessionIdがありません' });
+    }
     const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
     const result = await stub.fetch(
       `https://presence.internal/publisher?room=${encodeURIComponent(room)}`,
       {
         method: 'POST',
-        body: JSON.stringify({ pid: sanitizePid(body.pid), sessionId: String(body.sessionId) }),
+        body: JSON.stringify({
+          pid: sanitizePid(body.pid),
+          sessionId: body.sessionId === null ? null : String(body.sessionId),
+        }),
       },
     );
     if (!result.ok) {
@@ -646,15 +652,27 @@ async function handleAvatarApi(request: Request, env: Env, url: URL): Promise<Re
   }
 
   if (request.method !== 'POST') return json(405, { error: 'method not allowed' });
-  if (!env.VRM_TOKEN) {
-    return json(503, { error: 'VRM_TOKEN未設定のため配信URLを組み立てられません' });
-  }
 
-  const body = (await request.json()) as { key?: string; slot?: number };
+  const body = (await request.json()) as { key?: string | null; slot?: number };
   // 席番号(複数配信者)。省略時は slot 0(=従来の単一配信者)
   const slot =
     typeof body.slot === 'number' && Number.isInteger(body.slot) ? body.slot : 0;
   if (slot < 0 || slot >= MAX_PUBLISHERS) return json(400, { error: 'slotが不正です' });
+
+  // key: null は「席を空ける」(アバターの解除)
+  if (body.key === null) {
+    const stub = env.PRESENCE.get(env.PRESENCE.idFromName(room));
+    const result = await stub.fetch('https://presence.internal/avatar-clear', {
+      method: 'POST',
+      body: JSON.stringify({ slot }),
+    });
+    if (!result.ok) return json(502, { error: 'アバターの解除に失敗しました' });
+    return json(200, { ok: true, slot, cleared: true });
+  }
+
+  if (!env.VRM_TOKEN) {
+    return json(503, { error: 'VRM_TOKEN未設定のため配信URLを組み立てられません' });
+  }
   const key = String(body.key ?? '');
   const prefix = roomVrmPrefix(room);
   const localName = key.startsWith(prefix) ? key.slice(prefix.length) : null;
@@ -1018,21 +1036,37 @@ export class Presence extends DurableObject<Env> {
     }
 
     /**
-     * 配信者(パブリッシャー)の登録と席(slot)の割り当て。
+     * 配信者(パブリッシャー)の登録・登録解除と席(slot)の割り当て。
      * 同じ pid は再接続しても同じ席を保つ。新しい pid には空いている最小の席を配る。
+     * sessionId: null は明示的な退席で、席の持ち物(アバター・音声)も片付ける。
      * 単一スレッドのDOで処理するため、同時登録でも席は競合しない。
      * 一覧はKVへ写し、視聴側の状態確認・購読(Workerだけで完結する経路)が読む
      */
     if (path === '/publisher') {
-      const body = (await request.json()) as { pid?: string; sessionId?: string };
+      const body = (await request.json()) as { pid?: string; sessionId?: string | null };
       const pid = String(body.pid ?? 'default');
-      const sessionId = String(body.sessionId ?? '');
-      if (!sessionId) return new Response('sessionId required', { status: 400 });
 
       const now = Date.now();
       const stored = (await this.ctx.storage.get<PublisherEntry[]>(PUBLISHERS_KEY)) ?? [];
       const fresh = stored.filter((p) => now - p.updatedAt <= PUBLISHER_FRESH_MS);
+      // 失効していた席の持ち物は、この機会に片付ける
+      for (const expired of stored.filter((p) => now - p.updatedAt > PUBLISHER_FRESH_MS)) {
+        await this.cleanupSeat(expired.slot);
+      }
       const beforeFingerprint = fresh.map((p) => `${p.slot}=${p.sessionId}`).join('|');
+
+      // 登録解除(正常終了の退席)
+      if (body.sessionId === null || body.sessionId === undefined) {
+        const leaving = fresh.find((p) => p.pid === pid);
+        const remaining = fresh.filter((p) => p.pid !== pid);
+        if (leaving) await this.cleanupSeat(leaving.slot);
+        await this.savePublishers(remaining, leaving !== undefined);
+        await this.scheduleExpiryAlarm();
+        return Response.json({ ok: true, left: leaving?.slot ?? null });
+      }
+
+      const sessionId = String(body.sessionId);
+      if (!sessionId) return new Response('sessionId required', { status: 400 });
 
       let entry = fresh.find((p) => p.pid === pid);
       if (entry) {
@@ -1047,21 +1081,23 @@ export class Presence extends DurableObject<Env> {
         fresh.push(entry);
       }
       fresh.sort((a, b) => a.slot - b.slot);
-      await this.ctx.storage.put(PUBLISHERS_KEY, fresh);
-
-      const record: PublishersRecord = { publishers: fresh };
-      const roomName = (await this.ctx.storage.get<string>(ROOM_NAME_KEY)) ?? DEFAULT_ROOM;
-      await this.env.SFU_STATE.put(publisherKey(roomName), JSON.stringify(record));
 
       // 顔ぶれ・配信元が変わったときだけ視聴者へ押し出す(ハートビートで毎回配らない)
       const afterFingerprint = fresh.map((p) => `${p.slot}=${p.sessionId}`).join('|');
-      if (afterFingerprint !== beforeFingerprint) {
-        this.broadcastJson({
-          type: 'publishers',
-          publishers: fresh.map(({ slot, sessionId: sid }) => ({ slot, sessionId: sid })),
-        });
-      }
+      await this.savePublishers(fresh, afterFingerprint !== beforeFingerprint);
+      await this.scheduleExpiryAlarm();
       return Response.json({ slot: entry.slot });
+    }
+
+    // アバターを外す(席を空ける)。Worker本体が配信者キーを検証したうえで呼ぶ
+    if (path === '/avatar-clear') {
+      const { slot = 0 } = (await request.json()) as { slot?: number };
+      const key = avatarStorageKey(slot);
+      if ((await this.ctx.storage.get(key)) !== undefined) {
+        await this.ctx.storage.delete(key);
+        this.broadcastJson({ type: 'avatarCleared', slot });
+      }
+      return new Response(null, { status: 204 });
     }
 
     /**
@@ -1087,7 +1123,7 @@ export class Presence extends DurableObject<Env> {
       }
       await this.ctx.storage.put(key, next);
       // 登録が途絶えたまま配信者が落ちた場合に備え、失効時刻に自分で気づく
-      await this.ctx.storage.setAlarm(next.updatedAt + PUBLISHER_FRESH_MS);
+      await this.scheduleExpiryAlarm();
       if (current?.sessionId !== next.sessionId || current?.trackName !== next.trackName) {
         this.broadcastJson({
           type: 'audio',
@@ -1184,6 +1220,58 @@ export class Presence extends DurableObject<Env> {
     );
   }
 
+  /**
+   * 席の持ち物(アバター・音声)を片付ける。退席(明示・失効)のときに呼ぶ。
+   * **席0のアバターだけは残す**——1人配信では「オフライン中も待機モーションで
+   * 立っている」のが仕様で、それを壊さないため
+   */
+  private async cleanupSeat(slot: number): Promise<void> {
+    if (slot > 0) {
+      const avatarKey = avatarStorageKey(slot);
+      if ((await this.ctx.storage.get(avatarKey)) !== undefined) {
+        await this.ctx.storage.delete(avatarKey);
+        this.broadcastJson({ type: 'avatarCleared', slot });
+      }
+    }
+    const audioKey = audioStorageKey(slot);
+    if ((await this.ctx.storage.get(audioKey)) !== undefined) {
+      await this.ctx.storage.delete(audioKey);
+      this.broadcastJson({ type: 'audio', slot, audio: null });
+      await this.syncAudioKv();
+    }
+  }
+
+  /** 配信者一覧の保存とKVへの写し。変わったときだけ視聴者へ押し出す */
+  private async savePublishers(entries: PublisherEntry[], changed: boolean): Promise<void> {
+    await this.ctx.storage.put(PUBLISHERS_KEY, entries);
+    const record: PublishersRecord = { publishers: entries };
+    const roomName = (await this.ctx.storage.get<string>(ROOM_NAME_KEY)) ?? DEFAULT_ROOM;
+    await this.env.SFU_STATE.put(publisherKey(roomName), JSON.stringify(record));
+    if (changed) {
+      this.broadcastJson({
+        type: 'publishers',
+        publishers: entries.map(({ slot, sessionId }) => ({ slot, sessionId })),
+      });
+    }
+  }
+
+  /**
+   * 次に何かが失効する時刻へアラームを合わせる(音声と配信者の両方を見る)。
+   * setAlarmは上書きなので、片方だけを見て設定すると他方の失効を取りこぼす
+   */
+  private async scheduleExpiryAlarm(): Promise<void> {
+    let earliest: number | null = null;
+    const consider = (updatedAt: number): void => {
+      const expiry = updatedAt + PUBLISHER_FRESH_MS;
+      earliest = earliest === null ? expiry : Math.min(earliest, expiry);
+    };
+    const audios = await this.ctx.storage.list<AudioPublisherRecord>({ prefix: AUDIO_KEY });
+    for (const record of audios.values()) consider(record.updatedAt);
+    const publishers = (await this.ctx.storage.get<PublisherEntry[]>(PUBLISHERS_KEY)) ?? [];
+    for (const p of publishers) consider(p.updatedAt);
+    if (earliest !== null) await this.ctx.storage.setAlarm(earliest);
+  }
+
   /** 保存済みの音声パブリッシャー一覧(席ごと)。失効したものは除く */
   private async freshAudios(): Promise<AudioEntry[]> {
     const entries = await this.ctx.storage.list<AudioPublisherRecord>({ prefix: AUDIO_KEY });
@@ -1205,29 +1293,39 @@ export class Presence extends DurableObject<Env> {
   }
 
   /**
-   * 音声パブリッシャーの失効(席ごと)。
-   * 配信者のタブが登録解除を送れずに閉じた場合、これが唯一の終了通知になる
-   * (視聴側のポーリングを廃止したため、サーバーから知らせる必要がある)
+   * 失効の見回り(席ごと)。
+   * 音声は登録が途絶えたら止め、配信者はハートビートが途絶えたら**退席**させて
+   * 席の持ち物(アバター・音声)も片付ける。配信者のタブやブリッジが
+   * 登録解除を送れずに落ちた場合、これが唯一の終了通知になる
    */
   override async alarm(): Promise<void> {
+    const now = Date.now();
+
+    // 音声の失効
     const entries = await this.ctx.storage.list<AudioPublisherRecord>({ prefix: AUDIO_KEY });
-    let nextExpiry: number | null = null;
-    let removed = false;
+    let audioRemoved = false;
     for (const [key, record] of entries) {
       const slot = slotFromStorageKey(key, AUDIO_KEY);
       if (slot === null) continue;
-      const expiry = record.updatedAt + PUBLISHER_FRESH_MS;
-      if (Date.now() >= expiry) {
+      if (now - record.updatedAt > PUBLISHER_FRESH_MS) {
         await this.ctx.storage.delete(key);
         this.broadcastJson({ type: 'audio', slot, audio: null });
-        removed = true;
-      } else {
-        // ハートビートで更新されていた席は、次の失効時刻へ繰り延べる
-        nextExpiry = nextExpiry === null ? expiry : Math.min(nextExpiry, expiry);
+        audioRemoved = true;
       }
     }
-    if (removed) await this.syncAudioKv();
-    if (nextExpiry !== null) await this.ctx.storage.setAlarm(nextExpiry);
+    if (audioRemoved) await this.syncAudioKv();
+
+    // 配信者の失効=退席
+    const stored = (await this.ctx.storage.get<PublisherEntry[]>(PUBLISHERS_KEY)) ?? [];
+    const fresh = stored.filter((p) => now - p.updatedAt <= PUBLISHER_FRESH_MS);
+    if (fresh.length !== stored.length) {
+      for (const gone of stored.filter((p) => now - p.updatedAt > PUBLISHER_FRESH_MS)) {
+        await this.cleanupSeat(gone.slot);
+      }
+      await this.savePublishers(fresh, true);
+    }
+
+    await this.scheduleExpiryAlarm();
   }
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {

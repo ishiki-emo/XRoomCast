@@ -752,6 +752,23 @@ function applyRemoteAvatar(slot: number, url: string, name?: string): void {
   void ensureUnit(slot).load(url);
 }
 
+/** いまポーズ配信元が居る席(退席の片付けの判断に使う) */
+let livePublisherSlots = new Set<number>();
+
+/** 席のユニットと付随する状態(音源・トラック記録)をまとめて畳む */
+function disposeUnit(slot: number): void {
+  const unit = units.get(slot);
+  if (!unit) return;
+  unit.dispose();
+  units.delete(slot);
+  syncedAvatarUrls.delete(slot);
+  remoteAudios.delete(slot);
+  spatialAudio.removeSource(slot);
+  audioTracks.delete(slot);
+  audibleSlots.delete(slot);
+  refreshAudioButton();
+}
+
 /**
  * 配信者の席割り当て。席ぶんのユニットを用意し、消えた席は片付ける。
  * ポーズの購読の張り直しはトランスポート側が指紋比較で判断する
@@ -762,26 +779,32 @@ function applyPublishers(list: { slot: number; sessionId: string }[]): void {
    * アバターが割り当てられている席は、配信元が居なくても表示を残す。
    * 入室直後は「席のアバター」→「配信者の顔ぶれ」の順で届くため、ここで
    * 配信元だけを見ると、アバターを設定しただけの席(待機表示)を
-   * 作った直後に片付けてしまう
+   * 作った直後に片付けてしまう。
+   * 退席時のアバター削除はサーバーが avatarCleared で明示的に指示する
    */
   for (const slot of syncedAvatarUrls.keys()) active.add(slot);
+  livePublisherSlots = new Set<number>();
   for (const p of list) {
     if (typeof p.slot !== 'number' || p.slot < 0 || p.slot >= MAX_SLOTS) continue;
     active.add(p.slot);
+    livePublisherSlots.add(p.slot);
     ensureUnit(p.slot);
   }
-  for (const [slot, unit] of [...units]) {
-    if (active.has(slot)) continue;
-    unit.dispose();
-    units.delete(slot);
-    syncedAvatarUrls.delete(slot);
-    remoteAudios.delete(slot);
-    spatialAudio.removeSource(slot);
-    audioTracks.delete(slot);
-    audibleSlots.delete(slot);
-    refreshAudioButton();
+  for (const slot of [...units.keys()]) {
+    if (!active.has(slot)) disposeUnit(slot);
   }
   if (liveTransport instanceof SfuTransport) liveTransport.notifyPublishers(list);
+}
+
+/**
+ * 席のアバター解除(退席の片付け)。配信元も居ない席はユニットごと畳む。
+ * 席0は主ユニットなので畳まない(1人配信の待機表示を保つ)
+ */
+function applyAvatarCleared(slot: number): void {
+  if (slot < 0 || slot >= MAX_SLOTS) return;
+  syncedAvatarUrls.delete(slot);
+  if (slot === 0 || livePublisherSlots.has(slot)) return;
+  disposeUnit(slot);
 }
 
 /**
@@ -829,6 +852,8 @@ function connectPresence(): void {
         applyRemoteAvatar(typeof data.slot === 'number' ? data.slot : 0, data.url, data.name);
       } else if (data.type === 'publishers' && Array.isArray(data.publishers)) {
         applyPublishers(data.publishers);
+      } else if (data.type === 'avatarCleared' && typeof data.slot === 'number') {
+        applyAvatarCleared(data.slot);
       } else if (data.type === 'audio') {
         // 配信者のマイクの開始/停止(席ごと)。以前は視聴側が30秒ごとに問い合わせていたが、
         // サーバーからの押し出しに変えた(視聴者×1日2,880回のリクエストが消える)
