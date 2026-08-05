@@ -415,6 +415,19 @@ async function handleSfuApi(request: Request, env: Env, url: URL): Promise<Respo
     return json(200, result);
   }
 
+  // 配信者コンソールが「自分のpidの席」を引くための一覧(要配信者キー)。
+  // pid を含むため視聴者には出さない
+  if (request.method === 'GET' && url.pathname === '/api/sfu/publisher') {
+    if (!(await allows(env, request, url, 'broadcaster', room))) {
+      return json(403, { error: 'forbidden' });
+    }
+    const publishers = await readPublishers(env, room);
+    return json(200, {
+      room,
+      publishers: publishers.map((p) => ({ pid: p.pid, slot: p.slot })),
+    });
+  }
+
   // パブリッシャーのセッションID登録。ブリッジ(BRIDGE_TOKEN)か配信者(BROADCAST_KEY)。
   // 席(slot)の割り当ては競合しないようDurable Objectで行う(単一スレッド)
   if (request.method === 'POST' && url.pathname === '/api/sfu/publisher') {

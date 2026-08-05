@@ -236,9 +236,14 @@
       <p class="sub" id="b-room">このページを開いている間だけ、マイク音声が視聴ページへ配信されます</p>
       <div id="b-status">待機中</div>
       <div class="row" style="margin-top: 12px">
+        <label for="b-pid">配信者名</label>
+        <input id="b-pid" maxlength="32" placeholder="例: emo(英数字・-・_)" />
+      </div>
+      <div class="row">
         <label for="m-slot">声の席</label>
         <select id="m-slot">
-          <option value="0">席0(メイン)</option>
+          <option value="auto" selected>自動(自分の席)</option>
+          <option value="0">席0</option>
           <option value="1">席1</option>
           <option value="2">席2</option>
           <option value="3">席3</option>
@@ -249,8 +254,11 @@
         ・音声はCloudflare Realtime SFUの音声トラック(Opus)として配信されます<br />
         ・ポーズ配信(VSeeFace+ブリッジ)とは独立して動きます<br />
         ・タブを閉じる/停止ボタンで配信は止まります<br />
-        ・<strong>声の席</strong>は複数配信者用です。視聴者にはその席のアバターの頭から
-        聞こえます。1人配信なら席0のまま
+        ・<strong>配信者名</strong>は席の割り当ての鍵です。ブリッジを使う場合は
+        .env の <code>PUBLISHER_ID</code> と同じ値にしてください(HMD配信は自動で一致します)。
+        配信中は変えないでください<br />
+        ・<strong>声の席</strong>は「自動」で自分(配信者名)の席に届きます。
+        配信元がまだ無いときは席0に流れ、HMD配信の開始後に自動で席を合わせ直します
       </p>
 
       <h2>👀 プレビューと視聴者</h2>
@@ -367,7 +375,8 @@
       <div class="row">
         <label for="a-slot">席</label>
         <select id="a-slot">
-          <option value="0">席0(メイン)</option>
+          <option value="auto" selected>自動(自分の席)</option>
+          <option value="0">席0</option>
           <option value="1">席1</option>
           <option value="2">席2</option>
           <option value="3">席3</option>
@@ -390,8 +399,8 @@
         ・「切り替え」を押すと、視聴中の全員がそのVRMを読み込み直します<br />
         ・読み込み完了まで各視聴者には元のアバター(初回はクリスタル)が表示されます<br />
         ・アップロードしたVRMはこのルーム専用です。イベント後は削除してください<br />
-        ・<strong>席</strong>は複数配信者用です。2人目の配信元(PUBLISHER_ID を変えたブリッジ
-        またはHMD配信)が席1に入るので、その見た目を席1で選びます。1人配信なら席0のまま
+        ・<strong>席</strong>は「自動」で自分(配信者名)の席に適用されます。
+        自分の配信元(ブリッジ/HMD)がまだ動いていないときは、席番号を手動で選んでください
       </p>
 
       <h2>🎪 ステージ</h2>
