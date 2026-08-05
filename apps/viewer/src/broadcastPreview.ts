@@ -13,7 +13,6 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { decodePacket } from '@xroomcast/protocol';
 import { Avatar } from '@xroomcast/viewer-core';
 import type { AuthProvider } from '@xroomcast/sync';
-import { withRoom } from '@xroomcast/sync';
 import type { HmdBroadcast } from './hmdBroadcast';
 import { IdleMotion, blendPose } from '@xroomcast/viewer-core';
 import { PeerPresence, type PeerState } from '@xroomcast/viewer-core';
@@ -57,10 +56,8 @@ export function setupBroadcastPreview(options: {
   auth: AuthProvider;
   /** HMD配信。XRセッション中に頭・手の姿勢を送る */
   broadcast: HmdBroadcast;
-  /** 自分(配信者名)の席の解決。プレビューは自分の席のアバターだけを映す */
-  resolveOwnSlot?: () => Promise<number | null>;
 }): PreviewHandle {
-  const { canvas, statusEl, room, auth, broadcast, resolveOwnSlot } = options;
+  const { canvas, statusEl, room, auth, broadcast } = options;
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -157,25 +154,8 @@ export function setupBroadcastPreview(options: {
     }
   }
 
-  // 現在のアバターを取りに行く(コンソールを開いた時点の状態に追いつく)。
-  // 自分の席のものを選ぶ(席が未確定なら席0=従来の単一配信者の挙動)
-  void (async () => {
-    try {
-      const [res, ownSlot] = await Promise.all([
-        fetch(withRoom('/api/avatar', room), { headers: await auth.headers() }),
-        resolveOwnSlot ? resolveOwnSlot() : Promise.resolve(null),
-      ]);
-      const data = (await res.json()) as {
-        avatar?: { url?: string } | null;
-        avatars?: Record<string, { url?: string } | undefined>;
-      };
-      const record = data.avatars?.[String(ownSlot ?? 0)] ?? data.avatar;
-      if (record?.url) await loadAvatar(record.url);
-      else setStatus('アバターが未設定です(下の一覧から切り替えてください)');
-    } catch {
-      setStatus('アバターの取得に失敗しました');
-    }
-  })();
+  // 初期表示のアバターは呼び出し側(broadcast.ts)が「操作中の席」に合わせて
+  // setAvatarUrl で流し込む(鏡がどの席を映すかはコンソールの席選択に従う)
 
   function resize(): void {
     const width = canvas.clientWidth;

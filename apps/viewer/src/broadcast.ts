@@ -89,6 +89,23 @@ function micLiveStatus(): string {
 }
 
 /**
+ * 鏡(プレビュー)が映す席。アバター欄で操作中の席に追従する。
+ * pidの解決結果ではなく「操作中の席」を使うのが要点——自分の配信元が
+ * まだ登録されていなくても、席を手動で選んで作業している人の鏡は
+ * その席を映すべきなので
+ */
+let mirrorSlot = 0;
+/** 鏡の読み直し。setupPreview が実体を入れる */
+let refreshMirror: (() => void) | null = null;
+
+function setMirrorSlot(slot: number | null): void {
+  const next = slot ?? 0;
+  if (next === mirrorSlot) return;
+  mirrorSlot = next;
+  refreshMirror?.();
+}
+
+/**
  * 自動選択のまま席がずれていたら登録を移す。
  * HMD配信の開始でポーズ配信元(pid)が席を得た直後に呼ぶ
  */
@@ -396,7 +413,12 @@ if (!key) {
   setStatus('URLにキーがありません(/broadcast/<キー> から開いてください)', 'error');
   toggleButton.disabled = true;
 } else {
-  setupAvatarConsole({ room: config.room, auth, resolveOwnSlot: fetchOwnSlot });
+  setupAvatarConsole({
+    room: config.room,
+    auth,
+    resolveOwnSlot: fetchOwnSlot,
+    onSeatChanged: setMirrorSlot,
+  });
   setupStageConsole({ room: config.room, auth });
   setupPreview();
 }
@@ -411,7 +433,6 @@ function setupPreview(): void {
   hmdBroadcast.onStatus = (text) => (previewStatus.textContent = text);
 
   const preview = setupBroadcastPreview({
-    resolveOwnSlot: fetchOwnSlot,
     canvas: document.getElementById('p-canvas') as HTMLCanvasElement,
     statusEl: previewStatus,
     room: config.room,
@@ -495,17 +516,13 @@ function setupPreview(): void {
         else if (data.type === 'settings' && data.settings) roomSettings.apply(data.settings);
         else if (data.type === 'avatar' && data.url) {
           /**
-           * 鏡に映すのは**自分の席のアバターだけ**。席を見ずに反映すると、
-           * 他の配信者がアバターを変えるたびに全員の鏡が揃ってしまう。
-           * 自分の席が未確定(配信元が未登録)の間は席0を自分とみなす
+           * 鏡に映すのは**操作中の席のアバターだけ**。席を見ずに反映すると、
+           * 他の配信者がアバターを変えるたびに全員の鏡が揃ってしまう
            */
           const messageSlot = typeof (data as { slot?: number }).slot === 'number'
             ? (data as { slot: number }).slot
             : 0;
-          const url = data.url;
-          void fetchOwnSlot().then((own) => {
-            if ((own ?? 0) === messageSlot) preview.setAvatarUrl(url);
-          });
+          if (messageSlot === mirrorSlot) preview.setAvatarUrl(data.url);
         }
       } catch {
         // pong等は無視
@@ -518,4 +535,22 @@ function setupPreview(): void {
     };
   };
   connect();
+
+  /** 鏡を操作中の席のアバターに合わせて読み直す(初期表示と席の切り替え時) */
+  const syncMirrorAvatar = async (): Promise<void> => {
+    try {
+      const res = await fetch(withAuth('/api/avatar', config.room, auth));
+      const data = (await res.json()) as {
+        avatar?: { url?: string } | null;
+        avatars?: Record<string, { url?: string } | undefined>;
+      };
+      const record = data.avatars?.[String(mirrorSlot)] ?? (mirrorSlot === 0 ? data.avatar : null);
+      if (record?.url) preview.setAvatarUrl(record.url);
+      else preview.setStatus(`席${mirrorSlot}はアバター未設定です(下の一覧から切り替えてください)`);
+    } catch {
+      preview.setStatus('アバターの取得に失敗しました');
+    }
+  };
+  refreshMirror = () => void syncMirrorAvatar();
+  void syncMirrorAvatar();
 }

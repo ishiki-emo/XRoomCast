@@ -37,8 +37,10 @@ export function setupAvatarConsole(options: {
   auth: AuthProvider;
   /** 「自動(自分の席)」の解決。自分の配信元が居なければnullを返す */
   resolveOwnSlot?: () => Promise<number | null>;
+  /** 操作対象の席が変わったとき(鏡のプレビューが追従する)。nullは未確定 */
+  onSeatChanged?: (slot: number | null) => void;
 }): void {
-  const { room, auth, resolveOwnSlot } = options;
+  const { room, auth, resolveOwnSlot, onSeatChanged } = options;
 
   const statusEl = document.getElementById('a-status') as HTMLDivElement;
   const fileInput = document.getElementById('a-file') as HTMLInputElement;
@@ -63,6 +65,15 @@ export function setupAvatarConsole(options: {
   /** いま操作対象になっている席番号(自動が未解決ならnull) */
   function effectiveSlot(): number | null {
     return slotChoice === 'auto' ? autoSlot : slotChoice;
+  }
+
+  /** 操作対象の席の変化を外へ知らせる(同じ値の連打は抑える) */
+  let reportedSeat: number | null | undefined;
+  function reportSeat(): void {
+    const seat = effectiveSlot();
+    if (seat === reportedSeat) return;
+    reportedSeat = seat;
+    onSeatChanged?.(seat);
   }
 
   /** いま選択中の席の配信中キー */
@@ -186,6 +197,7 @@ export function setupAvatarConsole(options: {
       }
       render(listed.items ?? []);
       reportCurrent();
+      reportSeat();
     } catch (error) {
       setStatus(`一覧の取得に失敗: ${String(error)}`, 'error');
     }
@@ -312,12 +324,14 @@ export function setupAvatarConsole(options: {
         autoSlot = resolved;
         render(lastItems);
         reportCurrent();
+        reportSeat();
       });
       return;
     }
     slotChoice = Number(slotSelect.value) || 0;
     render(lastItems);
     reportCurrent();
+    reportSeat();
   });
 
   void refresh();
