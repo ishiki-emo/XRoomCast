@@ -411,6 +411,7 @@ function setupPreview(): void {
   hmdBroadcast.onStatus = (text) => (previewStatus.textContent = text);
 
   const preview = setupBroadcastPreview({
+    resolveOwnSlot: fetchOwnSlot,
     canvas: document.getElementById('p-canvas') as HTMLCanvasElement,
     statusEl: previewStatus,
     room: config.room,
@@ -492,7 +493,20 @@ function setupPreview(): void {
         else if (data.type === 'peerLeft' && data.id) preview.removePeer(data.id);
         // 別のコンソールから変更された場合もこちらへ反映される
         else if (data.type === 'settings' && data.settings) roomSettings.apply(data.settings);
-        else if (data.type === 'avatar' && data.url) preview.setAvatarUrl(data.url);
+        else if (data.type === 'avatar' && data.url) {
+          /**
+           * 鏡に映すのは**自分の席のアバターだけ**。席を見ずに反映すると、
+           * 他の配信者がアバターを変えるたびに全員の鏡が揃ってしまう。
+           * 自分の席が未確定(配信元が未登録)の間は席0を自分とみなす
+           */
+          const messageSlot = typeof (data as { slot?: number }).slot === 'number'
+            ? (data as { slot: number }).slot
+            : 0;
+          const url = data.url;
+          void fetchOwnSlot().then((own) => {
+            if ((own ?? 0) === messageSlot) preview.setAvatarUrl(url);
+          });
+        }
       } catch {
         // pong等は無視
       }
