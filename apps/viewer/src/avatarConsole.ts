@@ -51,6 +51,7 @@ export function setupAvatarConsole(options: {
   const defaultButton = document.getElementById('a-default') as HTMLButtonElement;
   const reloadButton = document.getElementById('a-reload') as HTMLButtonElement;
   const slotSelect = document.getElementById('a-slot') as HTMLSelectElement | null;
+  const clearButton = document.getElementById('a-clear') as HTMLButtonElement | null;
 
   /** 操作対象の席。'auto' は自分(配信者名)の配信元の席に追従する */
   let slotChoice: 'auto' | number = slotSelect && slotSelect.value !== 'auto' ? Number(slotSelect.value) || 0 : 'auto';
@@ -93,6 +94,7 @@ export function setupAvatarConsole(options: {
     uploadButton.disabled = on;
     reloadButton.disabled = on;
     defaultButton.disabled = on;
+    if (clearButton) clearButton.disabled = on;
     for (const button of listEl.querySelectorAll('button')) button.disabled = on;
   }
 
@@ -150,6 +152,8 @@ export function setupAvatarConsole(options: {
     defaultButton.disabled = busy || defaultKey === current;
     defaultButton.textContent =
       defaultKey === current ? '既定のVRMを配信中' : '既定のVRMに切り替え';
+    // 空ける対象(そのアバター)が無い席ではボタンを無効化する
+    if (clearButton) clearButton.disabled = busy || current === null;
   }
 
   /** 席の表記(「自動」は解決結果も添える) */
@@ -311,10 +315,36 @@ export function setupAvatarConsole(options: {
       });
   });
 
+  /** 席のアバターを外す(退席の掃除。配信元の居ない席は視聴者からも消える) */
+  async function clearSeat(): Promise<void> {
+    const slot = effectiveSlot();
+    if (slot === null) {
+      setStatus('自分の席が見つかりません。席番号を手動で選んでください', 'error');
+      return;
+    }
+    if (!window.confirm(`${seatLabel()}のアバターを外しますか?`)) return;
+    setBusy(true);
+    try {
+      await callJson('/api/avatar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: null, slot }),
+      });
+      delete currentKeys[String(slot)];
+      setStatus(`${seatLabel()}を空けました`);
+    } catch (error) {
+      setStatus(`席を空けられませんでした: ${String(error)}`, 'error');
+    } finally {
+      setBusy(false);
+      await refresh();
+    }
+  }
+
   reloadButton.addEventListener('click', () => void refresh());
   defaultButton.addEventListener('click', () => {
     if (defaultKey) void switchTo(defaultKey, defaultKey);
   });
+  clearButton?.addEventListener('click', () => void clearSeat());
   // 席の切り替えは表示の対象を変えるだけ(一覧は共通なので取得し直さない)。
   // 「自動」へ戻したときだけ解決し直す
   slotSelect?.addEventListener('change', () => {

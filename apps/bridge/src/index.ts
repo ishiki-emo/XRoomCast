@@ -191,11 +191,35 @@ async function registerPublisher(): Promise<void> {
   }
 }
 
+/** 明示的な退席。席のアバター・音声もサーバー側で片付けられる */
+async function unregisterPublisher(): Promise<void> {
+  if (!VIEWER_ORIGIN || !BRIDGE_TOKEN) return;
+  try {
+    await fetch(`${VIEWER_ORIGIN}/api/sfu/publisher?room=${encodeURIComponent(ROOM)}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${BRIDGE_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ sessionId: null, pid: PUBLISHER_ID }),
+    });
+    console.log('[sfu] 席を空けました');
+  } catch {
+    // 送れなくても15分で自動失効する
+  }
+}
+
 if (publisher) {
   publisher.onConnected = () => void registerPublisher();
   void publisher.connectWithRetry();
   // ハートビート(Worker側は15分無登録でパブリッシャー不在とみなす)
   setInterval(() => void registerPublisher(), 5 * 60 * 1000);
+  // Ctrl+C等の正常終了では席をすぐ空ける(視聴側に15分残さない)
+  const shutdown = (): void => {
+    void unregisterPublisher().finally(() => process.exit(0));
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
   if (!VIEWER_ORIGIN || !BRIDGE_TOKEN) {
     console.log('[sfu] VIEWER_ORIGIN / BRIDGE_TOKEN 未設定のためWorker登録はスキップ(トンネル/ローカルAPIのみ)');
   }
