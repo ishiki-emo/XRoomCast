@@ -1,0 +1,22 @@
+# wrangler dev(ローカルWorker)用のシークレット。
+# このファイルを .dev.vars にコピーして値を入れる(.dev.vars は .gitignore 済み)。
+# 本番のシークレットは `npx wrangler secret put <名前>` で登録する(SETUP.md 2-6)。
+
+# Realtime SFU の認証(ダッシュボード → Realtime → Create App)
+CF_REALTIME_APP_ID=
+CF_REALTIME_APP_SECRET=
+
+# R2のVRM配信トークン(任意の長いランダム文字列)
+VRM_TOKEN=
+
+# /watch/<キー> の視聴キー
+WATCH_KEY=
+
+# 配信者コンソールの鍵
+BROADCAST_KEY=
+
+# ブリッジのパブリッシャー登録用(.env の BRIDGE_TOKEN と同じ値にする)
+BRIDGE_TOKEN=
+
+# ルーム別URLの導出・入室証の署名(実質必須。SETUP.md 2-6 参照)
+ROOM_SECRET=

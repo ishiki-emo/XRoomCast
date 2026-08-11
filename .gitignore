@@ -26,6 +26,14 @@ fixtures/dummy-motion.bin
 # VRM配信トークン(wrangler secretに登録済みの控え)
 .vrm-token.txt
 
+# セットアップウィザードの控え(発行したキーとURL。秘密を含む)
+.setup-keys.json
+# ウィザードの一時ファイル(アップロード中のVRM・シークレット登録用)
+apps/setup/.tmp/
+apps/viewer/.secrets.bulk.tmp.json
+# ウィザードが退避した旧設定
+.env.bak-*
+
 # 視聴URLのQR(秘密キー入りURLを含む)
 qr-watch.png
 
