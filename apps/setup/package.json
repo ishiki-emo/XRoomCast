@@ -1,0 +1,10 @@
+{
+  "name": "@xroomcast/setup",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "ブラウザで動くセットアップウィザード(追加依存なし)",
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

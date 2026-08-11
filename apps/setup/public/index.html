@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XRoomCast セットアップ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>XRoomCast セットアップ</h1>
+    <p>Cloudflare上にあなた専用の配信環境を作ります。所要 約10分(ほとんどは自動)。</p>
+  </header>
+
+  <div id="existing" class="card notice" hidden>
+    <h2>✅ セットアップ済みの環境が見つかりました</h2>
+    <div id="existing-urls"></div>
+    <p>設定を作り直したい場合・デプロイをやり直したい場合は、このまま下のステップを進めてください。
+      発行済みのキーは再利用されるので、<b>URLは変わりません</b>。</p>
+  </div>
+
+  <div id="foreign" class="card warn" hidden>
+    <h2>⚠️ 手動で構築された設定(wrangler.jsonc)が見つかりました</h2>
+    <p>このウィザードを最後まで実行すると <code>apps/viewer/wrangler.jsonc</code> と
+      Workerのシークレットが<b>上書きされ、既存の視聴URL・配信者URLは使えなくなります</b>。</p>
+    <label><input type="checkbox" id="foreign-ok"> 上書きしてよいことを理解しました</label>
+  </div>
+
+  <!-- STEP 1 -->
+  <section class="card step" id="step-login">
+    <h2><span class="num">1</span>Cloudflareにログイン</h2>
+    <p>ボタンを押すとブラウザにCloudflareの認証ページが開きます。
+      「<b>Allow</b>」を押したら、そのタブは閉じてこのページへ戻ってきてください。
+      完了は自動で検知します。</p>
+    <p class="hint">Cloudflareのアカウントをまだ持っていない場合は、先に
+      <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">アカウント作成</a>
+      を済ませてください(無料。ただしR2の利用にクレジットカード登録が必要です)。</p>
+    <button id="login-btn">Cloudflareにログイン</button>
+    <span id="login-status" class="status"></span>
+    <div id="account-pick" hidden>
+      <p>アカウントが複数あります。使うアカウントを選んでください:</p>
+      <select id="account-select"></select>
+      <button id="account-btn">これを使う</button>
+    </div>
+  </section>
+
+  <!-- STEP 2 -->
+  <section class="card step" id="step-realtime" hidden>
+    <h2><span class="num">2</span>Realtime Appを作って貼り付け</h2>
+    <p>モーションと音声の中継に使う「Realtime App」をダッシュボードで作成します
+      (ここだけ手作業が必要です)。</p>
+    <ol>
+      <li><a href="https://dash.cloudflare.com/?to=/:account/realtime" target="_blank" rel="noopener">
+        Realtimeのページを開く</a>(別タブで開きます)</li>
+      <li>「<b>Create App</b>」を押して、名前は自由に付ける(例: xroomcast)</li>
+      <li>表示された <b>App ID</b> と <b>App Secret</b> を下へコピーする</li>
+    </ol>
+    <div class="fields">
+      <label>App ID <input id="rt-appid" autocomplete="off" spellcheck="false" placeholder="32桁の英数字"></label>
+      <label>App Secret <input id="rt-secret" type="password" autocomplete="off" placeholder="長い英数字"></label>
+    </div>
+    <button id="rt-btn">確認して次へ</button>
+    <span id="rt-status" class="status"></span>
+  </section>
+
+  <!-- STEP 3 -->
+  <section class="card step" id="step-vrm" hidden>
+    <h2><span class="num">3</span>アバター(VRM)を選ぶ</h2>
+    <p>最初に表示するVRMファイルを選んでください。
+      あとから配信者コンソールで追加・切り替えできるので、まず1体でOKです。</p>
+    <p class="hint">軽いモデルほど視聴者の読み込みが速くなります(目安 10〜20MB)。上限は80MBです。</p>
+    <input type="file" id="vrm-file" accept=".vrm">
+    <span id="vrm-status" class="status"></span>
+    <p><button id="vrm-skip" class="ghost">VRMは後にして進む</button></p>
+  </section>
+
+  <!-- STEP 4 -->
+  <section class="card step" id="step-run" hidden>
+    <h2><span class="num">4</span>セットアップを実行</h2>
+    <p>ここから先は全部自動です。ビルドとアップロードで数分かかります。
+      終わるまでこのページを開いたままにしてください。</p>
+    <button id="run-btn">セットアップ開始</button>
+    <div id="progress" hidden>
+      <div class="step-title" id="progress-step"></div>
+      <pre id="log"></pre>
+    </div>
+    <div id="error-box" class="warn card" hidden>
+      <h3>エラーが発生しました</h3>
+      <p id="error-hint"></p>
+      <p>原因を直したら「セットアップ開始」でもう一度実行できます(済んだ部分は再利用されます)。</p>
+    </div>
+  </section>
+
+  <!-- STEP 5 -->
+  <section class="card step done" id="step-done" hidden>
+    <h2>🎉 完成です!</h2>
+    <div class="url-row"><span>視聴URL(視聴者に配る)</span>
+      <code id="url-watch"></code><button data-copy="url-watch">コピー</button></div>
+    <div class="url-row"><span>配信者URL(自分だけの秘密)</span>
+      <code id="url-broadcast"></code><button data-copy="url-broadcast">コピー</button></div>
+    <ul>
+      <li>配信者URLを開くと操作コンソールが出ます。<b>視聴URLのQRコードもそこに表示されます</b></li>
+      <li>PCから配信するには VSeeFace 等を起動して <code>配信開始.bat</code> をダブルクリック(設定は済んでいます)</li>
+      <li>HMD(Quest等)からは、HMDのブラウザで配信者URLを開けばそのまま配信できます</li>
+      <li>配信のしかた・お金の話は <code>docs/配信者ガイド.md</code> にまとまっています</li>
+    </ul>
+    <div class="warn card">
+      <b>費用の注意:</b> この環境はあなたのCloudflareアカウントで動くため、請求もあなたに届きます。
+      視聴URLが広まりすぎたときの歯止めとして、配信者コンソールの「ルーム設定」で
+      <b>同時に見られる人数の上限</b>を設定し、Cloudflareダッシュボードで
+      <b>支出上限アラート</b>を設定しておくことを強くおすすめします。
+    </div>
+    <p class="hint">このURLと鍵の控えはリポジトリ内の <code>.setup-keys.json</code> にあります。
+      消すと次回のセットアップでURLが変わります。他人に渡さないでください。</p>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

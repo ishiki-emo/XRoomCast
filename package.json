@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit -p packages/protocol && tsc --noEmit -p packages/sync && tsc --noEmit -p packages/viewer-core && tsc --noEmit -p apps/viewer && tsc --noEmit -p apps/viewer/worker && tsc --noEmit -p apps/bridge",
     "generate:motion": "npm run generate --workspace fixtures",
     "room": "node apps/viewer/scripts/roomLink.mjs",
+    "setup": "node apps/setup/server.mjs",
     "deploy:viewer": "npm run deploy --workspace apps/viewer"
   },
   "description": "VRMアバターのマルチ環境ライブ配信(PC/スマホ/HMD、AR/MR対応)"
