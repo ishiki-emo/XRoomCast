@@ -335,6 +335,7 @@ const arController = new ArController(
     refreshStage();
   },
 );
+arController.onDefaultLightScale = (scale) => scenery.setLightScale(scale);
 // ピンチ/両手グリップで無段階に変えたときもUIの選択状態を追従させる
 arController.onScaleChanged = (scale) => {
   for (const unit of units.values()) unit.applyScale(scale);

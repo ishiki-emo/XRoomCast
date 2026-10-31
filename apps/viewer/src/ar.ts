@@ -11,6 +11,7 @@
  * 結果を返さないため、rAFフレームで結果をキャッシュして設置時に使う。
  */
 import * as THREE from 'three';
+import { ArLighting } from './arLighting';
 import type { ArPanel } from './spatialUI';
 import { TouchAR } from './touchAR';
 
@@ -90,6 +91,9 @@ interface RayHit {
 export class ArController {
   /** スケールが変わったときに呼ばれる(スプリングボーン等の追従用) */
   onScaleChanged: ((scale: number) => void) | null = null;
+  /** 照明推定の開始・終了で、既定のライトへ掛ける倍率が変わったときに呼ばれる */
+  onDefaultLightScale: ((scale: number) => void) | null = null;
+  private readonly lighting: ArLighting;
   /**
    * AR開始時、DOMオーバーレイが実際に有効かを通知する。
    * true(スマホ)なら画面固定のUIを、false(HMD)なら空間パネルを使う
@@ -176,6 +180,7 @@ export class ArController {
     private readonly elements: ArElements,
     private readonly onModeChange: (arActive: boolean) => void,
   ) {
+    this.lighting = new ArLighting(scene, (scale) => this.onDefaultLightScale?.(scale));
     this.reticle = new THREE.Mesh(
       new THREE.RingGeometry(0.12, 0.16, 32).rotateX(-Math.PI / 2),
       new THREE.MeshBasicMaterial({ color: 0xffffff, opacity: 0.9, transparent: true }),
@@ -248,11 +253,14 @@ export class ArController {
           'mesh-detection',
           'plane-detection',
           'anchors',
+          // 部屋の明るさと光の向き(Chrome のみ。arLighting.ts)
+          'light-estimation',
         ],
         domOverlay: { root: this.elements.overlayRoot },
       } as XRSessionInit);
       this.probePending = true;
       this.session = session;
+      this.lighting.start(session);
       this.onModeChange(true);
       this.elements.overlayRoot.hidden = false;
       this.elements.hint.textContent = '床にかざしてタップで設置 / 二本指で伸縮';
@@ -404,6 +412,7 @@ export class ArController {
       `mesh-detection: ${has('mesh-detection', 'detectedMeshes' in frame)}`,
       `plane-detection: ${has('plane-detection', 'detectedPlanes' in frame)}`,
       `anchors: ${has('anchors', 'createAnchor' in frame)}`,
+      `light-estimation: ${has('light-estimation', false)}`,
       `dom-overlay: ${has('dom-overlay', false)}`,
     ];
     console.log('[ar probe]', lines.join(' / '), 'enabledFeatures=', enabled);
@@ -453,6 +462,7 @@ export class ArController {
   private onFrameInner(frame: XRFrame | undefined): void {
     if (!frame || !this.session) return;
     if (this.probePending) this.probeFeatures(frame);
+    this.lighting.update(frame);
 
     // 視点の姿勢はヒットテストの有無に関わらず要る(初期配置・設置時の向き)
     const viewer = this.refSpace ? frame.getViewerPose(this.refSpace) : null;
@@ -870,6 +880,7 @@ export class ArController {
 
   private cleanup(): void {
     this.removeProbeBoard();
+    this.lighting.stop();
     this.probePending = false;
     this.frameErrorShown = false;
     this.exitFullResolution();
