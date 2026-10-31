@@ -12,6 +12,12 @@
  */
 import * as THREE from 'three';
 import { ArLighting } from './arLighting';
+import {
+  DEPTH_SENSING_INIT,
+  depthDescription,
+  shouldRequestDepth,
+  updateDepthOcclusion,
+} from './depthOcclusion';
 import type { ArPanel } from './spatialUI';
 import { TouchAR } from './touchAR';
 
@@ -240,9 +246,10 @@ export class ArController {
   private async start(): Promise<void> {
     if (this.session) return;
     try {
-      // 注意: depth-sensing は要求しない。Chrome(ARCore)では許可されると
+      // 注意: depth-sensing は既定では Quest でだけ要求する。Chrome(ARCore)では許可されると
       // three.js が自動で深度オクルージョン処理を始め、深度データが流れ始める
-      // 瞬間(=床認識確立時)にフリーズする事例があったため、当面無効化
+      // 瞬間(=床認識確立時)にフリーズする事例があった(depthOcclusion.ts)
+      const depth = shouldRequestDepth();
       const session = await navigator.xr!.requestSession('immersive-ar', {
         requiredFeatures: ['hit-test'],
         // local-floor は既定機能ではないため、ここで要求しないと
@@ -255,7 +262,10 @@ export class ArController {
           'anchors',
           // 部屋の明るさと光の向き(Chrome のみ。arLighting.ts)
           'light-estimation',
+          // 現実の人や物でアバターを隠す(Quest 3 等。depthOcclusion.ts)
+          ...(depth ? ['depth-sensing'] : []),
         ],
+        ...(depth ? { depthSensing: DEPTH_SENSING_INIT } : {}),
         domOverlay: { root: this.elements.overlayRoot },
       } as XRSessionInit);
       this.probePending = true;
@@ -413,6 +423,7 @@ export class ArController {
       `plane-detection: ${has('plane-detection', 'detectedPlanes' in frame)}`,
       `anchors: ${has('anchors', 'createAnchor' in frame)}`,
       `light-estimation: ${has('light-estimation', false)}`,
+      `depth-sensing: ${depthDescription(session) ?? '❌'}`,
       `dom-overlay: ${has('dom-overlay', false)}`,
     ];
     console.log('[ar probe]', lines.join(' / '), 'enabledFeatures=', enabled);
@@ -463,6 +474,7 @@ export class ArController {
     if (!frame || !this.session) return;
     if (this.probePending) this.probeFeatures(frame);
     this.lighting.update(frame);
+    updateDepthOcclusion(this.renderer);
 
     // 視点の姿勢はヒットテストの有無に関わらず要る(初期配置・設置時の向き)
     const viewer = this.refSpace ? frame.getViewerPose(this.refSpace) : null;
