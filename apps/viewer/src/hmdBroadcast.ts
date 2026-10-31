@@ -6,19 +6,41 @@
  * (視聴者側の PoseApplier + twoBoneIK が全身を解いている)。
  * ブリッジがVSeeFaceのフルボディを3点へ圧縮しているのと同じ位置づけ。
  *
+ * 素手(ハンドトラッキング)のときは手首関節を手として使い、指の曲がり具合も
+ * 関節から作って送る(handTracking.ts)。コントローラと素手は途中で持ち替えてよい。
+ *
  * SFUへの publish 手順はブリッジ(apps/bridge/src/sfu.ts)と同じで、
  * App SecretはWorkerのプロキシ側にあるためブラウザには出てこない。
  */
 import * as THREE from 'three';
-import { encodePacket, type Packet, type PoseNode, type Quat, type Vec3 } from '@xroomcast/protocol';
+import {
+  encodePacket,
+  type FingerCurls,
+  type Packet,
+  type PoseNode,
+  type Quat,
+  type Vec3,
+} from '@xroomcast/protocol';
 import type { AuthProvider } from '@xroomcast/sync';
 import { withRoom } from '@xroomcast/sync';
+import { HandReader, WRIST_TO_HAND } from './handTracking';
 
 const CF_STUN_URL = 'stun:stun.cloudflare.com:3478';
 const DATA_CHANNEL_NAME = 'pose';
 const SEND_INTERVAL_MS = 1000 / 30;
 /** パブリッシャー登録のハートビート(Worker側は15分で失効とみなす) */
 const HEARTBEAT_MS = 4 * 60 * 1000;
+/** 指は2パケットに1回(15Hz)。ブリッジと同じ頻度で、視聴者側も保持で滑らかに見える */
+const FINGER_EVERY = 2;
+
+/**
+ * 素手でないときの指。
+ * 視聴者は最後に届いた指を保持し続けるため、素手からコントローラへ
+ * 持ち替えたら必ず上書きする(しないと最後の手の形で固まる)
+ */
+const CONTROLLER_CURLS: FingerCurls = [0.3, 0.45, 0.5, 0.5, 0.5];
+/** 手が取れず体側に下ろしているとき(待機モーションと同じ軽い曲げ) */
+const RELAXED_CURLS: FingerCurls = [0.11, 0.16, 0.16, 0.16, 0.18];
 
 const _v = new THREE.Vector3();
 const _q = new THREE.Quaternion();
@@ -111,6 +133,7 @@ export class HmdBroadcast {
   private lastSentAt = 0;
   /** 表示中のアバターの頭の高さ(m)。身長補正に使う */
   private avatarHeight: number | null = null;
+  private readonly handReader = new HandReader();
 
   /** アバターが切り替わったら教える(次のキャリブレーションから反映される) */
   setAvatarHeight(height: number): void {
@@ -288,18 +311,36 @@ export class HmdBroadcast {
     const headRestInverse = _restInverse.copy(this.calibration.headRest).invert();
     const head = this.toNode(viewer.transform, headRestInverse);
 
-    let leftHand: PoseNode | null = null;
-    let rightHand: PoseNode | null = null;
+    const hands: Record<'left' | 'right', PoseNode | null> = { left: null, right: null };
+    const curls: Record<'left' | 'right', FingerCurls> = {
+      left: RELAXED_CURLS,
+      right: RELAXED_CURLS,
+    };
+    const spread = { left: 0.5, right: 0.5 };
     for (const source of session.inputSources) {
-      if (!source.gripSpace || (source.handedness !== 'left' && source.handedness !== 'right')) {
+      const side = source.handedness;
+      if (side !== 'left' && side !== 'right') continue;
+
+      // 素手: 手首関節をそのまま手として使い、指も関節から作る
+      if (source.hand) {
+        const reading = this.handReader.read(frame, source.hand, side, refSpace);
+        if (!reading) {
+          this.handReader.forget(side);
+          continue;
+        }
+        hands[side] = this.toNode(reading.wrist.transform, null, WRIST_TO_HAND[side]);
+        curls[side] = reading.curls;
+        spread[side] = reading.spread;
         continue;
       }
+
+      this.handReader.forget(side);
+      if (!source.gripSpace) continue;
       const pose = frame.getPose(source.gripSpace, refSpace);
       if (!pose) continue;
-      _grip.copy(GRIP_TO_HAND[source.handedness]).multiply(WRIST_OFFSET[source.handedness]);
-      const node = this.toNode(pose.transform, null, _grip);
-      if (source.handedness === 'left') leftHand = node;
-      else rightHand = node;
+      _grip.copy(GRIP_TO_HAND[side]).multiply(WRIST_OFFSET[side]);
+      hands[side] = this.toNode(pose.transform, null, _grip);
+      curls[side] = CONTROLLER_CURLS;
     }
 
     // コントローラが片方でも取れないときは、体側に下ろした位置で埋める
@@ -309,14 +350,23 @@ export class HmdBroadcast {
     });
 
     const packet: Packet = {
-      sequence: this.sequence++ & 0xffff,
+      sequence: this.sequence & 0xffff,
       timestamp: Math.round(now - this.startedAt) >>> 0,
       pose: {
         head,
-        leftHand: leftHand ?? fallback(1),
-        rightHand: rightHand ?? fallback(-1),
+        leftHand: hands.left ?? fallback(1),
+        rightHand: hands.right ?? fallback(-1),
       },
     };
+    if (this.sequence % FINGER_EVERY === 0) {
+      packet.fingers = {
+        leftCurls: curls.left,
+        rightCurls: curls.right,
+        leftSpread: spread.left,
+        rightSpread: spread.right,
+      };
+    }
+    this.sequence++;
     // encodePacketの戻りはUint8Array<ArrayBufferLike>。sendはArrayBufferを要求する
     const bytes = encodePacket(packet);
     this.channel!.send(
