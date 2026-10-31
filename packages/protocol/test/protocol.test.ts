@@ -3,6 +3,8 @@ import {
   decodePacket,
   encodePacket,
   PROTOCOL_VERSION,
+  SECTION_BODY,
+  type BodySection,
   type Packet,
   type PoseNode,
   type Quat,
@@ -170,10 +172,10 @@ describe('encodePacket / decodePacket', () => {
     };
     const bytes = encodePacket(packet);
 
-    // 将来のデコーダだけが知るセクション(予約ビット bit4)が末尾に付いた想定
+    // 将来のデコーダだけが知るセクション(予約ビット bit5)が末尾に付いた想定
     const extended = new Uint8Array(bytes.length + 28);
     extended.set(bytes, 0);
-    extended[1]! |= 1 << 4;
+    extended[1]! |= 1 << 5;
     extended.fill(0x7f, bytes.length);
     expect(decodePacket(extended)).toEqual(packet);
 
@@ -181,6 +183,51 @@ describe('encodePacket / decodePacket', () => {
     const padded = new Uint8Array(bytes.length + 3);
     padded.set(bytes, 0);
     expect(decodePacket(padded)).toEqual(packet);
+  });
+
+  describe('体セクション', () => {
+    const pose = {
+      head: f32Node([0, 1.5, 0], [0, 0, 0, 1]),
+      leftHand: f32Node([0.3, 1, 0], [0, 0, 0, 1]),
+      rightHand: f32Node([-0.3, 1, 0], [0, 0, 0, 1]),
+    };
+    const f32 = <T extends number[]>(v: T): T => v.map(Math.fround) as T;
+    const body: BodySection = {
+      hips: f32Node([0.01, 0.92, -0.03], [0, 0.0998, 0, 0.995]),
+      chest: f32([0.0499, 0, 0, 0.9988] as Quat),
+      leftFoot: f32Node([0.1, 0.08, 0.02], [0, 0.1, 0, 0.995]),
+      rightFoot: f32Node([-0.1, 0.08, 0.05], [0, -0.1, 0, 0.995]),
+      leftKnee: f32([0.1, 0.5, 0.06] as Vec3),
+      rightKnee: f32([-0.1, 0.5, 0.08] as Vec3),
+    };
+
+    it('他のセクションと一緒にラウンドトリップする', () => {
+      const packet: Packet = {
+        sequence: 9,
+        timestamp: 99,
+        pose,
+        dictionary: [{ id: 1, name: 'blink' }],
+        body,
+      };
+      const decoded = decodePacket(encodePacket(packet));
+      expect(decoded.body).toEqual(body);
+      expect(decoded.pose).toEqual(pose);
+      expect(decoded.dictionary).toEqual(packet.dictionary);
+    });
+
+    it('体セクションを知らないデコーダは末尾として読み飛ばせる', () => {
+      const bytes = encodePacket({ sequence: 1, timestamp: 1, pose, body });
+      // 旧デコーダの見え方を再現: フラグを落とすと、体のバイトは未知の末尾になる
+      bytes[1]! &= ~SECTION_BODY;
+      const decoded = decodePacket(bytes);
+      expect(decoded.pose).toEqual(pose);
+      expect(decoded.body).toBeUndefined();
+    });
+
+    it('途中で切れた体セクションを拒否する', () => {
+      const bytes = encodePacket({ sequence: 1, timestamp: 1, pose, body });
+      expect(() => decodePacket(bytes.subarray(0, bytes.length - 4))).toThrow();
+    });
   });
 
   it('Uint8Array と ArrayBuffer のどちらも受け付ける', () => {

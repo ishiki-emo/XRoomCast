@@ -10,6 +10,8 @@ export const SECTION_POSE = 1 << 0;
 export const SECTION_EXPRESSION = 1 << 1;
 export const SECTION_FINGERS = 1 << 2;
 export const SECTION_DICTIONARY = 1 << 3;
+/** 体(腰・胸・足)。末尾に追加したセクションなので、旧デコーダは未知の末尾として無視する */
+export const SECTION_BODY = 1 << 4;
 
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
@@ -43,6 +45,22 @@ export interface FingerSection {
   rightSpread: number;
 }
 
+/**
+ * 体(ボディトラッキングがある送信側だけが送る)。座標系は PoseSection と同じ。
+ * 回転はいずれも「Tポーズのレスト(正面+Z・直立)からの差分」で、親に対する相対ではない。
+ * 無いときの受信側は従来どおり頭から腰を推定し、足は接地固定にする
+ */
+export interface BodySection {
+  hips: PoseNode;
+  chest: Quat;
+  /** 足首の位置と向き */
+  leftFoot: PoseNode;
+  rightFoot: PoseNode;
+  /** 膝の位置。足のIKで膝を曲げる向きに使う */
+  leftKnee: Vec3;
+  rightKnee: Vec3;
+}
+
 /** 表情ID → 表情名(§6.5) */
 export interface DictionaryEntry {
   id: number;
@@ -58,11 +76,14 @@ export interface Packet {
   expressions?: ExpressionEntry[];
   fingers?: FingerSection;
   dictionary?: DictionaryEntry[];
+  body?: BodySection;
 }
 
 const HEADER_SIZE = 8;
 const POSE_SECTION_SIZE = 84;
 const FINGER_SECTION_SIZE = 12;
+/** 腰(28) + 胸(16) + 両足首(28×2) + 両膝(12×2) */
+const BODY_SECTION_SIZE = 124;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -103,6 +124,11 @@ export function encodePacket(packet: Packet): Uint8Array {
     if (dictEntries.length > 255) throw new Error('辞書セクションは255エントリまで');
     flags |= SECTION_DICTIONARY;
     size += 1 + dictEntries.reduce((sum, e) => sum + 2 + e.nameBytes.length, 0);
+  }
+
+  if (packet.body) {
+    flags |= SECTION_BODY;
+    size += BODY_SECTION_SIZE;
   }
 
   const bytes = new Uint8Array(size);
@@ -167,6 +193,25 @@ export function encodePacket(packet: Packet): Uint8Array {
     }
   }
 
+  if (packet.body) {
+    const b = packet.body;
+    const floats = [
+      ...b.hips.position,
+      ...b.hips.rotation,
+      ...b.chest,
+      ...b.leftFoot.position,
+      ...b.leftFoot.rotation,
+      ...b.rightFoot.position,
+      ...b.rightFoot.rotation,
+      ...b.leftKnee,
+      ...b.rightKnee,
+    ];
+    for (const v of floats) {
+      view.setFloat32(o, v, true);
+      o += 4;
+    }
+  }
+
   return bytes;
 }
 
@@ -190,22 +235,24 @@ export function decodePacket(data: Uint8Array | ArrayBuffer): Packet {
 
   const packet: Packet = { sequence, timestamp };
 
+  const readVec3 = (): Vec3 => {
+    const v: Vec3 = [view.getFloat32(o, true), view.getFloat32(o + 4, true), view.getFloat32(o + 8, true)];
+    o += 12;
+    return v;
+  };
+  const readQuat = (): Quat => {
+    const q: Quat = [
+      view.getFloat32(o, true),
+      view.getFloat32(o + 4, true),
+      view.getFloat32(o + 8, true),
+      view.getFloat32(o + 12, true),
+    ];
+    o += 16;
+    return q;
+  };
+  const readNode = (): PoseNode => ({ position: readVec3(), rotation: readQuat() });
+
   if (flags & SECTION_POSE) {
-    const readNode = (): PoseNode => {
-      const position: Vec3 = [
-        view.getFloat32(o, true),
-        view.getFloat32(o + 4, true),
-        view.getFloat32(o + 8, true),
-      ];
-      const rotation: Quat = [
-        view.getFloat32(o + 12, true),
-        view.getFloat32(o + 16, true),
-        view.getFloat32(o + 20, true),
-        view.getFloat32(o + 24, true),
-      ];
-      o += 28;
-      return { position, rotation };
-    };
     packet.pose = { head: readNode(), leftHand: readNode(), rightHand: readNode() };
   }
 
@@ -244,6 +291,21 @@ export function decodePacket(data: Uint8Array | ArrayBuffer): Packet {
       o += len;
     }
     packet.dictionary = dictionary;
+  }
+
+  if (flags & SECTION_BODY) {
+    // 読む前に長さを確かめる(DataView の範囲外読み出しは RangeError になるため)
+    if (o + BODY_SECTION_SIZE > bytes.byteLength) {
+      throw new Error('パケットが短すぎます(体セクションの途中で終わっています)');
+    }
+    packet.body = {
+      hips: readNode(),
+      chest: readQuat(),
+      leftFoot: readNode(),
+      rightFoot: readNode(),
+      leftKnee: readVec3(),
+      rightKnee: readVec3(),
+    };
   }
 
   if (o > bytes.byteLength) {

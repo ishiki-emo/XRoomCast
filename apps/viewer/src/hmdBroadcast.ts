@@ -9,6 +9,9 @@
  * 素手(ハンドトラッキング)のときは手首関節を手として使い、指の曲がり具合も
  * 関節から作って送る(handTracking.ts)。コントローラと素手は途中で持ち替えてよい。
  *
+ * ボディトラッキングが使える端末(Quest)では、腰・胸・足も体セクションで送る
+ * (bodyTracking.ts)。視聴者側は頭からの腰の推定をやめ、送られた体をそのまま使う。
+ *
  * SFUへの publish 手順はブリッジ(apps/bridge/src/sfu.ts)と同じで、
  * App SecretはWorkerのプロキシ側にあるためブラウザには出てこない。
  */
@@ -23,6 +26,7 @@ import {
 } from '@xroomcast/protocol';
 import type { AuthProvider } from '@xroomcast/sync';
 import { withRoom } from '@xroomcast/sync';
+import { readBody, type BodyFrame } from './bodyTracking';
 import { HandReader, WRIST_TO_HAND } from './handTracking';
 
 const CF_STUN_URL = 'stun:stun.cloudflare.com:3478';
@@ -276,18 +280,24 @@ export class HmdBroadcast {
     return true;
   }
 
+  /** XR空間の位置をワイヤ座標(足元が原点・正面+Z・身長補正済み)へ */
+  private toWirePosition(p: DOMPointReadOnly, out: THREE.Vector3): THREE.Vector3 {
+    const calibration = this.calibration!;
+    return out
+      .set(p.x, p.y, p.z)
+      .sub(calibration.origin)
+      .applyQuaternion(calibration.yaw)
+      .multiplyScalar(calibration.scale);
+  }
+
   private toNode(
     transform: XRRigidTransform,
     restInverse: THREE.Quaternion | null,
     extra?: THREE.Quaternion,
   ): PoseNode {
     const calibration = this.calibration!;
-    const p = transform.position;
     const o = transform.orientation;
-    _v.set(p.x, p.y, p.z)
-      .sub(calibration.origin)
-      .applyQuaternion(calibration.yaw)
-      .multiplyScalar(calibration.scale);
+    this.toWirePosition(transform.position, _v);
     _q.set(o.x, o.y, o.z, o.w).premultiply(calibration.yaw);
     if (extra) _q.multiply(extra);
     if (restInverse) _q.premultiply(restInverse);
@@ -358,6 +368,9 @@ export class HmdBroadcast {
         rightHand: hands.right ?? fallback(-1),
       },
     };
+    // 体は補間の要なので毎パケット送る(取れないフレームは送らず、視聴者側は頭からの推定に戻る)
+    const body = readBody(frame as BodyFrame, refSpace, (p, out) => this.toWirePosition(p, out));
+    if (body) packet.body = body;
     if (this.sequence % FINGER_EVERY === 0) {
       packet.fingers = {
         leftCurls: curls.left,

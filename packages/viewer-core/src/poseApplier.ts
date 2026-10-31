@@ -4,11 +4,13 @@
  * - 手: 手首位置・回転を目標に2ボーンIK。肘のポールは「体側やや後方・下方」固定
  * - 表情: expressionManagerへ適用
  * - 手指: カール値を各指3関節の回転に展開(カール1.0で握り込み)
+ * - 体(ボディトラッキングの送信側だけ): 腰の位置・回転、胸の回転、足首目標と膝で足のIK。
+ *   無いときは頭から腰を推定し、足は接地固定にする
  * three-vrmの正規化ボーン(レスト=Tポーズ、正面+Z、左=+X)に対して適用する。
  */
 import * as THREE from 'three';
 import type { VRM, VRMHumanBoneName } from '@pixiv/three-vrm';
-import type { FingerSection, PoseSection } from '@xroomcast/protocol';
+import type { BodySection, FingerSection, PoseSection } from '@xroomcast/protocol';
 import type { SampledFrame } from '@xroomcast/sync';
 import { createTwoBoneChain, solveTwoBoneIK, type TwoBoneChain } from './twoBoneIK';
 
@@ -37,6 +39,15 @@ const _frameQuat = new THREE.Quaternion();
 const _frameQuatInv = new THREE.Quaternion();
 const _frameScale = new THREE.Vector3();
 const _spreadQuat = new THREE.Quaternion();
+const _hipsQuat = new THREE.Quaternion();
+const _headQuat = new THREE.Quaternion();
+const _identity = new THREE.Quaternion();
+const _chestQuat = new THREE.Quaternion();
+const _bendQuat = new THREE.Quaternion();
+const _hipsTarget = new THREE.Vector3();
+const _bodyForward = new THREE.Vector3();
+/** 膝のポールを体の前方へ寄せる距離(m)。脚が伸びきると膝が股と足首の線上に乗り、向きが決まらないため */
+const KNEE_FORWARD_BIAS = 0.3;
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
@@ -45,6 +56,10 @@ export class PoseApplier {
   private readonly vrm: VRM;
   private readonly hips: THREE.Object3D | null;
   private readonly head: THREE.Object3D | null;
+  private readonly spine: THREE.Object3D | null;
+  private readonly chest: THREE.Object3D | null;
+  /** 直前のフレームで体を適用したか。体が途切れたら腰・背骨の回転をレストへ戻す */
+  private bodyApplied = false;
   private readonly restHipsPos = new THREE.Vector3();
   /**
    * 正規化リグのワールド回転。VRM 0.xでは VRMUtils.rotateVRM0 による
@@ -74,6 +89,8 @@ export class PoseApplier {
 
     this.hips = bone('hips');
     this.head = bone('head');
+    this.spine = bone('spine');
+    this.chest = bone('chest');
     if (this.hips) {
       this.restHipsPos.copy(this.hips.position);
       // rootQuat はフレームを除いたリグ固有の回転(VRM0.xのπ回転)だけを持つ
@@ -109,7 +126,7 @@ export class PoseApplier {
   }
 
   apply(frame: SampledFrame): void {
-    if (frame.pose) this.applyPose(frame.pose);
+    if (frame.pose) this.applyPose(frame.pose, frame.body);
     if (frame.expressions) this.applyExpressions(frame.expressions);
     if (frame.fingers) this.applyFingers(frame.fingers);
   }
@@ -122,13 +139,98 @@ export class PoseApplier {
     return q.premultiply(this.rootQuatInv).multiply(this.rootQuat);
   }
 
-  private applyPose(pose: PoseSection): void {
+  private applyPose(pose: PoseSection, body: BodySection | undefined): void {
     // 配置フレーム(AR設置・卓上スケール)を分解しておく。
     // ワイヤ座標は「フレームのローカル系(等身大)」として解釈し、都度ワールドへ変換する
     this.frame.updateWorldMatrix(true, false);
     this.frame.matrixWorld.decompose(_framePos, _frameQuat, _frameScale);
     const scale = _frameScale.x || 1;
     _frameQuatInv.copy(_frameQuat).invert();
+
+    if (body) {
+      this.applyBody(pose, body, scale);
+    } else {
+      this.applyHeadDriven(pose, scale);
+    }
+
+    // 手: 2ボーンIK。肘のポールは肩から見て「体側やや後方・下方」の固定ヒューリスティック
+    for (const side of ['left', 'right'] as const) {
+      const chain = this.armChains[side];
+      if (!chain) continue;
+      const node = side === 'left' ? pose.leftHand : pose.rightHand;
+      _handTarget.fromArray(node.position).applyMatrix4(this.frame.matrixWorld);
+      // フレーム回転 × ワイヤ回転(レスト差分)× リグ固有回転 = 目標ワールド回転
+      _handQuat.fromArray(node.rotation).premultiply(_frameQuat).multiply(this.rootQuat);
+      chain.upper.getWorldPosition(_pole);
+      _poleOffset
+        .set(side === 'left' ? 0.15 : -0.15, -0.6, -0.35)
+        .applyQuaternion(_frameQuat)
+        .multiplyScalar(scale);
+      _pole.add(_poleOffset);
+      solveTwoBoneIK(chain, _handTarget, _handQuat, _pole);
+    }
+  }
+
+  /**
+   * 体がある場合。回転はすべてワールド系の意味(レスト差分)で届くので、
+   * 親の回転を外してから各ボーンのローカル回転にする
+   */
+  private applyBody(pose: PoseSection, body: BodySection, scale: number): void {
+    this.bodyApplied = true;
+    _hipsQuat.fromArray(body.hips.rotation);
+    _chestQuat.fromArray(body.chest);
+
+    if (this.hips) {
+      this.toRigLocal(this.hips.quaternion.copy(_hipsQuat));
+      // 腰の位置は親の系へ直接置く(頭からの推定は使わない)
+      const parent = this.hips.parent;
+      _hipsTarget.fromArray(body.hips.position).applyMatrix4(this.frame.matrixWorld);
+      if (parent) {
+        parent.updateWorldMatrix(true, false);
+        parent.worldToLocal(_hipsTarget);
+      }
+      this.hips.position.copy(_hipsTarget);
+    }
+
+    // 胸の曲げ(腰に対する相対)を背骨と胸へ半分ずつ配る。胸ボーンが無いモデルは背骨だけで受ける
+    _bendQuat.copy(_hipsQuat).invert().multiply(_chestQuat);
+    if (this.spine && this.chest) _bendQuat.slerp(_identity, 0.5);
+    if (this.spine) this.toRigLocal(this.spine.quaternion.copy(_bendQuat));
+    if (this.chest) this.toRigLocal(this.chest.quaternion.copy(_bendQuat));
+
+    // 頭はワールド系の向きで届くので、胸までの回転を外して首から先のローカルにする
+    // (上胸・首はレストのまま)
+    if (this.head) {
+      this.toRigLocal(
+        this.head.quaternion.copy(_chestQuat).invert().multiply(_headQuat.fromArray(pose.head.rotation)),
+      );
+    }
+
+    // 足: 足首を目標に2ボーンIK。膝の位置をポールにし、体の前方へ少し寄せて伸びきりに備える
+    _bodyForward.set(0, 0, 1).applyQuaternion(_hipsQuat).applyQuaternion(_frameQuat);
+    for (const side of ['left', 'right'] as const) {
+      const chain = this.legChains[side];
+      if (!chain) continue;
+      const foot = side === 'left' ? body.leftFoot : body.rightFoot;
+      _anchorWorld.fromArray(foot.position).applyMatrix4(this.frame.matrixWorld);
+      _footQuat.fromArray(foot.rotation).premultiply(_frameQuat).multiply(this.rootQuat);
+      _pole
+        .fromArray(side === 'left' ? body.leftKnee : body.rightKnee)
+        .applyMatrix4(this.frame.matrixWorld)
+        .addScaledVector(_bodyForward, KNEE_FORWARD_BIAS * scale);
+      solveTwoBoneIK(chain, _anchorWorld, _footQuat, _pole);
+    }
+  }
+
+  /** 体が無い場合(VMC・HMDの3点だけ)。頭から腰を動かし、足は接地固定 */
+  private applyHeadDriven(pose: PoseSection, scale: number): void {
+    if (this.bodyApplied) {
+      // 体が途切れたら、体の経路でだけ回していたボーンをレストへ戻す
+      this.bodyApplied = false;
+      this.hips?.quaternion.identity();
+      this.spine?.quaternion.identity();
+      this.chest?.quaternion.identity();
+    }
 
     // 頭: ワイヤ回転は「レストからの差分」。リグ固有回転の共役変換はフレーム非依存
     if (this.head) {
@@ -160,23 +262,6 @@ export class PoseApplier {
       _poleOffset.set(0, -0.4, 0.6).applyQuaternion(_frameQuat).multiplyScalar(scale);
       _pole.add(_poleOffset); // 膝は前方(フレームの+Z)へ曲げる
       solveTwoBoneIK(chain, _anchorWorld, _footQuat, _pole);
-    }
-
-    // 手: 2ボーンIK。肘のポールは肩から見て「体側やや後方・下方」の固定ヒューリスティック
-    for (const side of ['left', 'right'] as const) {
-      const chain = this.armChains[side];
-      if (!chain) continue;
-      const node = side === 'left' ? pose.leftHand : pose.rightHand;
-      _handTarget.fromArray(node.position).applyMatrix4(this.frame.matrixWorld);
-      // フレーム回転 × ワイヤ回転(レスト差分)× リグ固有回転 = 目標ワールド回転
-      _handQuat.fromArray(node.rotation).premultiply(_frameQuat).multiply(this.rootQuat);
-      chain.upper.getWorldPosition(_pole);
-      _poleOffset
-        .set(side === 'left' ? 0.15 : -0.15, -0.6, -0.35)
-        .applyQuaternion(_frameQuat)
-        .multiplyScalar(scale);
-      _pole.add(_poleOffset);
-      solveTwoBoneIK(chain, _handTarget, _handQuat, _pole);
     }
   }
 
@@ -231,7 +316,13 @@ export class PoseApplier {
   /** デモ停止時などにレスト(Tポーズ・無表情)へ戻す */
   reset(): void {
     if (this.head) this.head.quaternion.identity();
-    if (this.hips) this.hips.position.copy(this.restHipsPos);
+    if (this.hips) {
+      this.hips.position.copy(this.restHipsPos);
+      this.hips.quaternion.identity();
+    }
+    this.spine?.quaternion.identity();
+    this.chest?.quaternion.identity();
+    this.bodyApplied = false;
     for (const side of ['left', 'right'] as const) {
       for (const chain of [this.armChains[side], this.legChains[side]]) {
         if (chain) {

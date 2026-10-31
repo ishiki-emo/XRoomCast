@@ -4,6 +4,7 @@
  * 位置はlerp、回転はslerp。表情・手指は再生時刻までのイベントを畳み込んで保持する。
  */
 import type {
+  BodySection,
   ExpressionEntry,
   FingerSection,
   Packet,
@@ -19,6 +20,8 @@ const CLOCK_RESET_THRESHOLD_MS = 3000;
 
 export interface SampledFrame {
   pose?: PoseSection;
+  /** 体。送信側にボディトラッキングがあるときだけ */
+  body?: BodySection;
   /** 表情名 → 値。辞書未受信のIDは含まれない */
   expressions?: ReadonlyMap<string, number>;
   fingers?: FingerSection;
@@ -46,8 +49,25 @@ function interpolateNode(a: PoseNode, b: PoseNode, t: number): PoseNode {
   };
 }
 
+function interpolateBody(a: BodySection, b: BodySection, t: number): BodySection {
+  return {
+    hips: interpolateNode(a.hips, b.hips, t),
+    chest: slerpQuat(a.chest, b.chest, t),
+    leftFoot: interpolateNode(a.leftFoot, b.leftFoot, t),
+    rightFoot: interpolateNode(a.rightFoot, b.rightFoot, t),
+    leftKnee: lerpVec3(a.leftKnee, b.leftKnee, t),
+    rightKnee: lerpVec3(a.rightKnee, b.rightKnee, t),
+  };
+}
+
+/** 体は同じパケットのポーズと組で届くので、組のまま補間する */
+interface PoseEvent {
+  pose: PoseSection;
+  body?: BodySection;
+}
+
 export class PoseStreamPlayer {
-  private poseEvents: Timed<PoseSection>[] = [];
+  private poseEvents: Timed<PoseEvent>[] = [];
   private expressionEvents: Timed<ExpressionEntry[]>[] = [];
   private fingerEvents: Timed<FingerSection>[] = [];
   private dictionary = new Map<number, string>();
@@ -77,7 +97,10 @@ export class PoseStreamPlayer {
       for (const e of packet.dictionary) this.dictionary.set(e.id, e.name);
     }
     if (packet.pose) {
-      insertByTimestamp(this.poseEvents, { timestamp: packet.timestamp, data: packet.pose });
+      insertByTimestamp(this.poseEvents, {
+        timestamp: packet.timestamp,
+        data: { pose: packet.pose, body: packet.body },
+      });
     }
     if (packet.expressions) {
       insertByTimestamp(this.expressionEvents, {
@@ -114,21 +137,28 @@ export class PoseStreamPlayer {
       this.poseEvents.shift();
     }
     let pose: PoseSection | undefined;
+    let body: BodySection | undefined;
     if (this.poseEvents.length === 1 || (this.poseEvents.length > 0 && playTs <= this.poseEvents[0]!.timestamp)) {
-      pose = this.poseEvents[0]!.data;
+      ({ pose, body } = this.poseEvents[0]!.data);
     } else if (this.poseEvents.length >= 2) {
-      const prev = this.poseEvents[0]!;
-      const next = this.poseEvents[1]!;
-      const t = (playTs - prev.timestamp) / (next.timestamp - prev.timestamp);
+      const prev = this.poseEvents[0]!.data;
+      const next = this.poseEvents[1]!.data;
+      const t =
+        (playTs - this.poseEvents[0]!.timestamp) /
+        (this.poseEvents[1]!.timestamp - this.poseEvents[0]!.timestamp);
       pose = {
-        head: interpolateNode(prev.data.head, next.data.head, t),
-        leftHand: interpolateNode(prev.data.leftHand, next.data.leftHand, t),
-        rightHand: interpolateNode(prev.data.rightHand, next.data.rightHand, t),
+        head: interpolateNode(prev.pose.head, next.pose.head, t),
+        leftHand: interpolateNode(prev.pose.leftHand, next.pose.leftHand, t),
+        rightHand: interpolateNode(prev.pose.rightHand, next.pose.rightHand, t),
       };
+      // 体が片側にしか無い(トラッキングの開始・途切れ)ときは、時刻の近い方に従う
+      if (prev.body && next.body) body = interpolateBody(prev.body, next.body, t);
+      else body = t < 0.5 ? prev.body : next.body;
     }
 
     return {
       pose,
+      body,
       expressions: this.expressionState.size > 0 ? this.expressionState : undefined,
       fingers: this.currentFingers,
     };

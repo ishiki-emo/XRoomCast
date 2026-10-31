@@ -249,8 +249,9 @@ export function setupBroadcastPreview(options: {
     if (xrSession) return;
     const session = await navigator.xr!.requestSession(
       mode === 'ar' ? 'immersive-ar' : 'immersive-vr',
-      // hand-tracking は要求しないと素手の関節が取れない(コントローラだけになる)
-      { optionalFeatures: ['local-floor', 'hand-tracking'] },
+      // hand-tracking は要求しないと素手の関節が取れない(コントローラだけになる)。
+      // body-tracking は Quest の実験機能で、開始時に許可を求められる
+      { optionalFeatures: ['local-floor', 'hand-tracking', 'body-tracking'] },
     );
     xrSession = session;
     // パススルーでは背景を消して現実を見せる。VRは暗い背景とグリッドを残す
