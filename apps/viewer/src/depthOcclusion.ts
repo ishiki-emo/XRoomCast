@@ -47,6 +47,34 @@ export function depthDescription(session: XRSession): string | null {
   return `${s.depthUsage ?? '?'} / ${s.depthDataFormat ?? '?'}`;
 }
 
+/** 有限に直すときの far(メートル)。部屋の中で使うので十分に遠い */
+const FINITE_FAR = 1000;
+
+/**
+ * three.js は深度の near/far をそのまま `updateRenderState` へ渡す(WebXRManager)。
+ * 仕様上 depthNear/depthFar は有限の数でないと例外になり、three.js はそれを毎フレーム繰り返すため、
+ * 描画が丸ごと止まる。端末が far を無限大で返しても通るよう、渡す直前で有限に直す。
+ * 直したら onFixed を呼ぶ(診断用)
+ */
+export function guardDepthRenderState(session: XRSession, onFixed: (note: string) => void): void {
+  const original = session.updateRenderState.bind(session);
+  let reported = false;
+  session.updateRenderState = (init?: XRRenderStateInit) => {
+    if (init && (init.depthNear !== undefined || init.depthFar !== undefined)) {
+      const fixed = { ...init };
+      if (fixed.depthFar !== undefined && !Number.isFinite(fixed.depthFar))
+        fixed.depthFar = FINITE_FAR;
+      if (fixed.depthNear !== undefined && !(fixed.depthNear > 0)) fixed.depthNear = 0.01;
+      if (!reported && (fixed.depthFar !== init.depthFar || fixed.depthNear !== init.depthNear)) {
+        reported = true;
+        onFixed(`near/far を補正: ${init.depthNear} / ${init.depthFar}`);
+      }
+      return original(fixed);
+    }
+    return original(init);
+  };
+}
+
 /**
  * 深度テクスチャの中身の手がかり(診断用)。three.js と同じく1つ目のビューの深度情報を引く。
  * 深度はセッション開始から少し遅れて届くので、取れるまでは null

@@ -16,6 +16,7 @@ import {
   DEPTH_SENSING_INIT,
   depthDescription,
   depthInfoLines,
+  guardDepthRenderState,
   shouldRequestDepth,
   updateDepthOcclusion,
 } from './depthOcclusion';
@@ -275,6 +276,13 @@ export class ArController {
       this.probePending = true;
       this.session = session;
       this.lighting.start(session);
+      if (depth) {
+        guardDepthRenderState(session, (note) => {
+          console.warn('[ar depth]', note);
+          this.probeLines = [...this.probeLines, note];
+          this.drawProbeBoard();
+        });
+      }
       this.onModeChange(true);
       this.elements.overlayRoot.hidden = false;
       this.elements.hint.textContent = '床にかざしてタップで設置 / 二本指で伸縮';
@@ -479,6 +487,23 @@ export class ArController {
     console.log('[ar probe]', lines.join(' / '));
     this.probeLines = [...this.probeLines, ...lines];
     this.drawProbeBoard();
+  }
+
+  /**
+   * 描画で例外が続いたとき(main.ts の描画ループから呼ぶ)。AR中は何も見えなくなるので、
+   * ARを終了して、エラーと対応状況(深度の診断を含む)を通常画面で見せる
+   */
+  abortOnRenderError(error: unknown): void {
+    if (!this.session) return;
+    const text = [
+      'ARの描画でエラーが続いたため、ARを終了しました。',
+      String(error),
+      ...this.probeLines,
+    ].join('\n');
+    console.error('[ar]', text);
+    void this.session.end().catch(() => undefined);
+    // セッションが閉じて通常画面へ戻ってから出す
+    window.setTimeout(() => window.alert(text), 500);
   }
 
   private removeProbeBoard(): void {

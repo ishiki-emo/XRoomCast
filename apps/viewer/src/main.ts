@@ -1031,6 +1031,9 @@ function resizeToStage(): void {
 new ResizeObserver(resizeToStage).observe(stage);
 
 const clock = new THREE.Clock();
+/** 描画の例外が続いた回数。AR中に続いたら何も見えないので、ARを終了して知らせる */
+let renderErrors = 0;
+const RENDER_ERROR_LIMIT = 60;
 
 renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
   netStats.frames += 1;
@@ -1068,7 +1071,16 @@ renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
   }
 
   controls.update();
-  renderer.render(scene, camera);
+  try {
+    renderer.render(scene, camera);
+    renderErrors = 0;
+  } catch (error) {
+    renderErrors += 1;
+    if (renderErrors === 1) console.error('[render]', error);
+    if (renderErrors === RENDER_ERROR_LIMIT && renderer.xr.isPresenting) {
+      arController.abortOnRenderError(error);
+    }
+  }
 });
 
 // 受け入れ確認(メモリリーク・デモ再生の滑らかさ検証)用に公開
