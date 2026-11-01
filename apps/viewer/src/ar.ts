@@ -12,6 +12,7 @@
  */
 import * as THREE from 'three';
 import { ArLighting } from './arLighting';
+import { HandOccluder } from './handOccluder';
 import {
   DEPTH_SENSING_INIT,
   DepthOcclusion,
@@ -100,6 +101,7 @@ export class ArController {
   onDefaultLightScale: ((scale: number) => void) | null = null;
   private readonly lighting: ArLighting;
   private readonly depth: DepthOcclusion;
+  private readonly handOccluder: HandOccluder;
   /**
    * AR開始時、DOMオーバーレイが実際に有効かを通知する。
    * true(スマホ)なら画面固定のUIを、false(HMD)なら空間パネルを使う
@@ -191,6 +193,7 @@ export class ArController {
   ) {
     this.lighting = new ArLighting(scene, (scale) => this.onDefaultLightScale?.(scale));
     this.depth = new DepthOcclusion(renderer, scene);
+    this.handOccluder = new HandOccluder(scene);
     this.reticle = new THREE.Mesh(
       new THREE.RingGeometry(0.12, 0.16, 32).rotateX(-Math.PI / 2),
       new THREE.MeshBasicMaterial({ color: 0xffffff, opacity: 0.9, transparent: true }),
@@ -268,6 +271,8 @@ export class ArController {
           'light-estimation',
           // 現実の人や物でアバターを隠す(Quest 3 等。depthOcclusion.ts)
           ...(depth ? ['depth-sensing'] : []),
+          // 視聴者自身の手でアバターを隠す(関節から手の形を作る。handOccluder.ts)
+          'hand-tracking',
         ],
         ...(depth ? { depthSensing: DEPTH_SENSING_INIT } : {}),
         domOverlay: { root: this.elements.overlayRoot },
@@ -430,6 +435,7 @@ export class ArController {
       `anchors: ${has('anchors', 'createAnchor' in frame)}`,
       `light-estimation: ${has('light-estimation', false)}`,
       `depth-sensing: ${this.depth.description ?? '❌'}`,
+      `hand-tracking: ${has('hand-tracking', false)}`,
       `dom-overlay: ${has('dom-overlay', false)}`,
     ];
     console.log('[ar probe]', lines.join(' / '), 'enabledFeatures=', enabled);
@@ -526,6 +532,7 @@ export class ArController {
     if (this.probePending) this.probeFeatures(frame);
     this.lighting.update(frame);
     this.depth.update(frame);
+    this.handOccluder.update(frame, this.renderer.xr.getReferenceSpace());
     if (this.depthProbePending && this.probeBoard) this.probeDepth();
 
     // 視点の姿勢はヒットテストの有無に関わらず要る(初期配置・設置時の向き)
@@ -946,6 +953,7 @@ export class ArController {
     this.removeProbeBoard();
     this.lighting.stop();
     this.depth.stop();
+    this.handOccluder.hide();
     this.probePending = false;
     this.depthProbePending = false;
     this.frameErrorShown = false;
