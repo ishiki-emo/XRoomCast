@@ -13,6 +13,7 @@
 import * as THREE from 'three';
 import { ArLighting } from './arLighting';
 import { HandOccluder } from './handOccluder';
+import { MeshOccluder } from './meshOccluder';
 import {
   DEPTH_SENSING_INIT,
   DepthOcclusion,
@@ -102,6 +103,7 @@ export class ArController {
   private readonly lighting: ArLighting;
   private readonly depth: DepthOcclusion;
   private readonly handOccluder: HandOccluder;
+  private readonly meshOccluder: MeshOccluder;
   /**
    * AR開始時、DOMオーバーレイが実際に有効かを通知する。
    * true(スマホ)なら画面固定のUIを、false(HMD)なら空間パネルを使う
@@ -194,6 +196,7 @@ export class ArController {
     this.lighting = new ArLighting(scene, (scale) => this.onDefaultLightScale?.(scale));
     this.depth = new DepthOcclusion(renderer, scene);
     this.handOccluder = new HandOccluder(scene);
+    this.meshOccluder = new MeshOccluder(scene);
     this.reticle = new THREE.Mesh(
       new THREE.RingGeometry(0.12, 0.16, 32).rotateX(-Math.PI / 2),
       new THREE.MeshBasicMaterial({ color: 0xffffff, opacity: 0.9, transparent: true }),
@@ -573,6 +576,14 @@ export class ArController {
     }
 
     this.updatePlaneOccluders(frame);
+    this.meshOccluder.update(frame, this.renderer.xr.getReferenceSpace());
+    if (this.probeBoard) {
+      const summary = this.meshOccluder.takeSummary();
+      if (summary) {
+        this.probeLines = [...this.probeLines, summary];
+        this.drawProbeBoard();
+      }
+    }
     this.updateRays();
     this.updateGrab();
   }
@@ -960,6 +971,7 @@ export class ArController {
     this.exitFullResolution();
     this.touchAR.setEnabled(false);
     for (const entry of this.planeOccluders.values()) this.disposeOccluder(entry.mesh);
+    this.meshOccluder.clear();
     this.planeOccluders.clear();
     this.session = null;
     this.hitTestSource = null;
