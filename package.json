@@ -12,7 +12,7 @@
     "build": "npm run build --workspace apps/viewer",
     "bridge": "npm run dev --workspace apps/bridge",
     "sim": "npm run sim --workspace apps/bridge",
-    "test": "npm run test --workspace packages/protocol --workspace packages/sync",
+    "test": "npm run test --workspace packages/protocol --workspace packages/sync --workspace packages/viewer-core",
     "typecheck": "tsc --noEmit -p packages/protocol && tsc --noEmit -p packages/sync && tsc --noEmit -p packages/viewer-core && tsc --noEmit -p apps/viewer && tsc --noEmit -p apps/viewer/worker && tsc --noEmit -p apps/bridge",
     "generate:motion": "npm run generate --workspace fixtures",
     "room": "node apps/viewer/scripts/roomLink.mjs",
