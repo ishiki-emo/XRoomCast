@@ -52,6 +52,10 @@ const SMOOTHING = 0.5;
  * Xは右手系で決まる(右手は小指側、左手は親指側)
  * VRMのTポーズ: 指先=左は+X・右は-X、手のひら=-Y、親指=+Z
  *
+ * 下の basis は「Tポーズでの関節の各軸が、ワイヤ座標でどこを向くか」=Tポーズでの関節の向きそのもの。
+ * ワイヤの手の回転は「レストからの差分」なので、関節の向きに**その逆**を右から掛ける
+ * (そのまま掛けると、Tポーズで手が180°ねじれる。Quest 実機で手首が折れて見えた)
+ *
  * コントローラ(gripToHand)と違って握りによる手首の傾きが乗らないので、
  * 手首オフセット(WRIST_OFFSET)は掛けない
  */
@@ -70,7 +74,7 @@ function wristToHand(side: 'left' | 'right'): THREE.Quaternion {
           new THREE.Vector3(0, 1, 0),
           new THREE.Vector3(1, 0, 0),
         );
-  return new THREE.Quaternion().setFromRotationMatrix(basis);
+  return new THREE.Quaternion().setFromRotationMatrix(basis).invert();
 }
 
 export const WRIST_TO_HAND: Record<'left' | 'right', THREE.Quaternion> = {
