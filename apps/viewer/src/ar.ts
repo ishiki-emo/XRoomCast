@@ -14,11 +14,8 @@ import * as THREE from 'three';
 import { ArLighting } from './arLighting';
 import {
   DEPTH_SENSING_INIT,
-  depthDescription,
-  depthInfoLines,
-  guardDepthRenderState,
+  DepthOcclusion,
   shouldRequestDepth,
-  updateDepthOcclusion,
 } from './depthOcclusion';
 import type { ArPanel } from './spatialUI';
 import { TouchAR } from './touchAR';
@@ -102,6 +99,7 @@ export class ArController {
   /** 照明推定の開始・終了で、既定のライトへ掛ける倍率が変わったときに呼ばれる */
   onDefaultLightScale: ((scale: number) => void) | null = null;
   private readonly lighting: ArLighting;
+  private readonly depth: DepthOcclusion;
   /**
    * AR開始時、DOMオーバーレイが実際に有効かを通知する。
    * true(スマホ)なら画面固定のUIを、false(HMD)なら空間パネルを使う
@@ -192,6 +190,7 @@ export class ArController {
     private readonly onModeChange: (arActive: boolean) => void,
   ) {
     this.lighting = new ArLighting(scene, (scale) => this.onDefaultLightScale?.(scale));
+    this.depth = new DepthOcclusion(renderer, scene);
     this.reticle = new THREE.Mesh(
       new THREE.RingGeometry(0.12, 0.16, 32).rotateX(-Math.PI / 2),
       new THREE.MeshBasicMaterial({ color: 0xffffff, opacity: 0.9, transparent: true }),
@@ -276,13 +275,8 @@ export class ArController {
       this.probePending = true;
       this.session = session;
       this.lighting.start(session);
-      if (depth) {
-        guardDepthRenderState(session, (note) => {
-          console.warn('[ar depth]', note);
-          this.probeLines = [...this.probeLines, note];
-          this.drawProbeBoard();
-        });
-      }
+      // three.js の深度処理を避けるため、setSession より前に呼ぶ(depthOcclusion.ts)
+      this.depth.start(session);
       this.onModeChange(true);
       this.elements.overlayRoot.hidden = false;
       this.elements.hint.textContent = '床にかざしてタップで設置 / 二本指で伸縮';
@@ -435,12 +429,12 @@ export class ArController {
       `plane-detection: ${has('plane-detection', 'detectedPlanes' in frame)}`,
       `anchors: ${has('anchors', 'createAnchor' in frame)}`,
       `light-estimation: ${has('light-estimation', false)}`,
-      `depth-sensing: ${depthDescription(session) ?? '❌'}`,
+      `depth-sensing: ${this.depth.description ?? '❌'}`,
       `dom-overlay: ${has('dom-overlay', false)}`,
     ];
     console.log('[ar probe]', lines.join(' / '), 'enabledFeatures=', enabled);
     this.probeLines = lines;
-    this.depthProbePending = depthDescription(session) !== null;
+    this.depthProbePending = this.depth.description !== null;
 
     const canvas = document.createElement('canvas');
     canvas.width = 800;
@@ -478,10 +472,8 @@ export class ArController {
   }
 
   /** 深度が届いたら、その中身の手がかりをボードへ足す */
-  private probeDepth(frame: XRFrame): void {
-    const refSpace = this.renderer.xr.getReferenceSpace();
-    if (!refSpace) return;
-    const lines = depthInfoLines(this.renderer, frame, refSpace);
+  private probeDepth(): void {
+    const lines = this.depth.takeInfoLines();
     if (!lines) return;
     this.depthProbePending = false;
     console.log('[ar probe]', lines.join(' / '));
@@ -532,9 +524,9 @@ export class ArController {
   private onFrameInner(frame: XRFrame | undefined): void {
     if (!frame || !this.session) return;
     if (this.probePending) this.probeFeatures(frame);
-    if (this.depthProbePending && this.probeBoard) this.probeDepth(frame);
     this.lighting.update(frame);
-    updateDepthOcclusion(this.renderer);
+    this.depth.update(frame);
+    if (this.depthProbePending && this.probeBoard) this.probeDepth();
 
     // 視点の姿勢はヒットテストの有無に関わらず要る(初期配置・設置時の向き)
     const viewer = this.refSpace ? frame.getViewerPose(this.refSpace) : null;
@@ -953,6 +945,7 @@ export class ArController {
   private cleanup(): void {
     this.removeProbeBoard();
     this.lighting.stop();
+    this.depth.stop();
     this.probePending = false;
     this.depthProbePending = false;
     this.frameErrorShown = false;
