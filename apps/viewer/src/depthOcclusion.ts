@@ -37,6 +37,8 @@ export const DEPTH_SENSING_INIT = {
   usagePreference: ['gpu-optimized'],
   // 空にすると形式はブラウザに任せる
   dataFormatPreference: [],
+  // 新しい仕様の「なめらかな深度」。対応していない端末では無視される
+  depthTypeRequest: ['smooth'],
 } as const;
 
 // @types/webxr の型は depthNear/depthFar を持たないので、読む分だけの形で受ける
@@ -59,7 +61,11 @@ interface DepthBinding {
 /**
  * 深度テクスチャの値(深度バッファと同じ非線形の [0, 1])を、一度メートルへ戻して
  * 下駄を足し、描画の投影の深度へ書き直す。深度データの near/far と描画の near/far は
- * 別物なので分けて受ける。far が0以下なら無限遠の投影として扱う
+ * 別物なので分けて受ける。far が0以下なら無限遠の投影として扱う。
+ *
+ * 深度テクスチャは画面よりずっと粗いので、一番近い画素をそのまま使うと、隠れた部分の境界が
+ * 画素1つ分の段々(ジャギー)になる。周囲4画素をメートルで線形補間して、境界をなめらかな線にする。
+ * 非線形のまま補間すると手前側へ偏るので、必ずメートルに直してから混ぜる
  */
 const FRAGMENT = `
 uniform sampler2DArray depthColor;
@@ -81,17 +87,32 @@ float toDepth( float z, float n, float f ) {
 	return f * ( z - n ) / ( z * ( f - n ) );
 }
 
+// 何も取れていない画素(遠すぎる・センサー外)は、遮らないよう十分遠い扱いにする
+const float NO_DEPTH = 1000.0;
+
+float metersAt( ivec2 p, int layer, ivec2 size ) {
+	float d = texelFetch( depthColor, ivec3( clamp( p, ivec2( 0 ), size - 1 ), layer ), 0 ).r;
+	return d >= 1.0 ? NO_DEPTH : toMeters( d, dataNear, dataFar );
+}
+
 void main() {
 
 	vec2 coord = vec2( gl_FragCoord.x / depthWidth, gl_FragCoord.y / depthHeight );
-	float d = coord.x >= 1.0
-		? texture( depthColor, vec3( coord.x - 1.0, coord.y, 1 ) ).r
-		: texture( depthColor, vec3( coord.x, coord.y, 0 ) ).r;
+	int layer = coord.x >= 1.0 ? 1 : 0;
+	if ( layer == 1 ) coord.x -= 1.0;
 
-	// 何も取れていない画素(遠すぎる・センサー外)は遮らない
-	if ( d >= 1.0 ) discard;
-	float meters = toMeters( d, dataNear, dataFar ) + depthBias;
-	gl_FragDepth = clamp( toDepth( meters, renderNear, renderFar ), 0.0, 1.0 );
+	ivec2 size = textureSize( depthColor, 0 ).xy;
+	vec2 st = coord * vec2( size ) - 0.5;
+	ivec2 p = ivec2( floor( st ) );
+	vec2 f = fract( st );
+	float meters = mix(
+		mix( metersAt( p, layer, size ), metersAt( p + ivec2( 1, 0 ), layer, size ), f.x ),
+		mix( metersAt( p + ivec2( 0, 1 ), layer, size ), metersAt( p + ivec2( 1, 1 ), layer, size ), f.x ),
+		f.y
+	);
+
+	if ( meters >= NO_DEPTH * 0.5 ) discard;
+	gl_FragDepth = clamp( toDepth( meters + depthBias, renderNear, renderFar ), 0.0, 1.0 );
 
 }`;
 
