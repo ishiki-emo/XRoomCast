@@ -52,15 +52,31 @@ function currentPid(): string {
 }
 
 /** 自分のpidの席をサーバーの配信者一覧から引く(配信元が居なければnull) */
-async function fetchOwnSlot(): Promise<number | null> {
+/** ルームの配信元(pidと席)の一覧。取れなければnull */
+async function fetchPublishers(): Promise<{ pid: string; slot: number }[] | null> {
   try {
     const res = await fetch(withAuth('/api/sfu/publisher', config.room, auth));
     if (!res.ok) return null;
     const data = (await res.json()) as { publishers?: { pid: string; slot: number }[] };
-    return data.publishers?.find((p) => p.pid === currentPid())?.slot ?? null;
+    return data.publishers ?? [];
   } catch {
     return null;
   }
+}
+
+async function fetchOwnSlot(): Promise<number | null> {
+  return (await fetchPublishers())?.find((p) => p.pid === currentPid())?.slot ?? null;
+}
+
+/**
+ * 自分の配信元がまだ居ないときに、アバター設定を当てておく席。
+ * 席0が空いていれば席0(配信を始めると最小の空き席=席0を得るため)。
+ * 埋まっていれば、どの席になるか分からないのでnull(手動で選んでもらう)
+ */
+async function fetchVacantSlot(): Promise<number | null> {
+  const publishers = await fetchPublishers();
+  if (!publishers) return null;
+  return publishers.some((p) => p.slot === 0) ? null : 0;
 }
 
 /** マイク配信中の席(配信中は固定する)と、自動解決の状態メモ */
@@ -447,6 +463,7 @@ if (!key) {
     room: config.room,
     auth,
     resolveOwnSlot: fetchOwnSlot,
+    resolveVacantSlot: fetchVacantSlot,
     onSeatChanged: setMirrorSlot,
   });
   setupStageConsole({ room: config.room, auth });
