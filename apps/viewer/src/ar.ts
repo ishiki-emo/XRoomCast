@@ -15,6 +15,7 @@ import { ArLighting } from './arLighting';
 import {
   DEPTH_SENSING_INIT,
   depthDescription,
+  depthInfoLines,
   shouldRequestDepth,
   updateDepthOcclusion,
 } from './depthOcclusion';
@@ -167,6 +168,9 @@ export class ArController {
   /** AR機能の探りボード(初回フレームで判定して表示) */
   private probePending = false;
   private probeBoard: THREE.Mesh | null = null;
+  private probeLines: string[] = [];
+  /** 深度の中身をボードへ足すのを待っているか(深度は開始から遅れて届く) */
+  private depthProbePending = false;
 
   /**
    * 平面ベースのオクルージョン: plane-detectionで検出した現実の面
@@ -427,24 +431,54 @@ export class ArController {
       `dom-overlay: ${has('dom-overlay', false)}`,
     ];
     console.log('[ar probe]', lines.join(' / '), 'enabledFeatures=', enabled);
+    this.probeLines = lines;
+    this.depthProbePending = depthDescription(session) !== null;
 
     const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 320;
+    canvas.width = 800;
+    canvas.height = 560;
+    const board = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.8, 0.56),
+      new THREE.MeshBasicMaterial({
+        map: new THREE.CanvasTexture(canvas),
+        transparent: true,
+        // 深度オクルージョンが誤って全部を隠すときでも読めるよう、深度を見ずに最前面へ出す
+        depthTest: false,
+      }),
+    );
+    board.renderOrder = 10;
+    board.position.set(0, 1.5, -1.2); // 開始時の正面・目の高さ
+    this.probeBoard = board;
+    this.drawProbeBoard();
+    this.scene.add(board);
+    window.setTimeout(() => this.removeProbeBoard(), 20000);
+  }
+
+  private drawProbeBoard(): void {
+    const material = this.probeBoard?.material as THREE.MeshBasicMaterial | undefined;
+    const texture = material?.map as THREE.CanvasTexture | undefined;
+    const canvas = texture?.image as HTMLCanvasElement | undefined;
+    if (!texture || !canvas) return;
     const ctx = canvas.getContext('2d')!;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#ffffff';
-    ctx.font = '30px sans-serif';
-    lines.forEach((line, i) => ctx.fillText(line, 24, 52 + i * 44));
-    const board = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.8, 0.4),
-      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true }),
-    );
-    board.position.set(0, 1.5, -1.2); // 開始時の正面・目の高さ
-    this.probeBoard = board;
-    this.scene.add(board);
-    window.setTimeout(() => this.removeProbeBoard(), 20000);
+    ctx.font = '26px sans-serif';
+    this.probeLines.forEach((line, i) => ctx.fillText(line, 20, 42 + i * 40));
+    texture.needsUpdate = true;
+  }
+
+  /** 深度が届いたら、その中身の手がかりをボードへ足す */
+  private probeDepth(frame: XRFrame): void {
+    const refSpace = this.renderer.xr.getReferenceSpace();
+    if (!refSpace) return;
+    const lines = depthInfoLines(this.renderer, frame, refSpace);
+    if (!lines) return;
+    this.depthProbePending = false;
+    console.log('[ar probe]', lines.join(' / '));
+    this.probeLines = [...this.probeLines, ...lines];
+    this.drawProbeBoard();
   }
 
   private removeProbeBoard(): void {
@@ -473,6 +507,7 @@ export class ArController {
   private onFrameInner(frame: XRFrame | undefined): void {
     if (!frame || !this.session) return;
     if (this.probePending) this.probeFeatures(frame);
+    if (this.depthProbePending && this.probeBoard) this.probeDepth(frame);
     this.lighting.update(frame);
     updateDepthOcclusion(this.renderer);
 
@@ -894,6 +929,7 @@ export class ArController {
     this.removeProbeBoard();
     this.lighting.stop();
     this.probePending = false;
+    this.depthProbePending = false;
     this.frameErrorShown = false;
     this.exitFullResolution();
     this.touchAR.setEnabled(false);

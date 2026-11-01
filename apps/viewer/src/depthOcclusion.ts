@@ -13,7 +13,7 @@
  *   誤差が「隠しすぎ」でなく「隠し足りない」側に倒れる(空中でアバターが欠けるほうが目立つ)
  * - 診断用に、許可された形式を返す
  */
-import type * as THREE from "three";
+import type * as THREE from 'three';
 
 /** 現実の深度を奥へずらす量(メートル)。Quest の深度の揺れと、足の接地ぶん */
 const DEPTH_BIAS_METERS = 0.05;
@@ -23,15 +23,15 @@ const DEPTH_BIAS_METERS = 0.05;
  * Android で `?depth=1` にするとフリーズの再現確認になるので、普段は使わない
  */
 export function shouldRequestDepth(): boolean {
-  const param = new URLSearchParams(location.search).get("depth");
-  if (param === "1") return true;
-  if (param === "0") return false;
+  const param = new URLSearchParams(location.search).get('depth');
+  if (param === '1') return true;
+  if (param === '0') return false;
   return /OculusBrowser/.test(navigator.userAgent);
 }
 
 /** requestSession に足す設定。gpu-optimized だけを望む(three.js が使えるのはこれだけ) */
 export const DEPTH_SENSING_INIT = {
-  usagePreference: ["gpu-optimized"],
+  usagePreference: ['gpu-optimized'],
   // 空にすると形式はブラウザに任せる(Quest は深度バッファ形式を返す)
   dataFormatPreference: [],
 } as const;
@@ -43,8 +43,45 @@ export function depthDescription(session: XRSession): string | null {
     depthUsage?: string;
     depthDataFormat?: string;
   };
-  if (!s.enabledFeatures?.includes("depth-sensing")) return null;
-  return `${s.depthUsage ?? "?"} / ${s.depthDataFormat ?? "?"}`;
+  if (!s.enabledFeatures?.includes('depth-sensing')) return null;
+  return `${s.depthUsage ?? '?'} / ${s.depthDataFormat ?? '?'}`;
+}
+
+/**
+ * 深度テクスチャの中身の手がかり(診断用)。three.js と同じく1つ目のビューの深度情報を引く。
+ * 深度はセッション開始から少し遅れて届くので、取れるまでは null
+ */
+export function depthInfoLines(
+  renderer: THREE.WebGLRenderer,
+  frame: XRFrame,
+  refSpace: XRReferenceSpace,
+): string[] | null {
+  // @types/webxr の型は depthNear/depthFar を持たないので、読む分だけの形で受ける
+  const binding = renderer.xr.getBinding() as unknown as {
+    getDepthInformation?: (view: XRView) => DepthInfoLike | null;
+  };
+  const view = frame.getViewerPose(refSpace)?.views[0];
+  const info = view ? binding.getDepthInformation?.(view) : null;
+  if (!info) return null;
+  const state = frame.session.renderState;
+  const camera = renderer.xr.getCamera();
+  const fmt = (v: number | undefined): string => (v === undefined ? '?' : String(+v.toFixed(4)));
+  return [
+    `深度: ${info.width}x${info.height} ${info.textureType ?? '?'} 層${info.imageIndex ?? '?'} 生値→m ${fmt(info.rawValueToMeters)}`,
+    `深度 near/far: ${fmt(info.depthNear)} / ${fmt(info.depthFar)}`,
+    `描画 near/far: ${fmt(state.depthNear)} / ${fmt(state.depthFar)} カメラ ${fmt(camera.near)} / ${fmt(camera.far)}`,
+  ];
+}
+
+interface DepthInfoLike {
+  width: number;
+  height: number;
+  rawValueToMeters?: number;
+  /** 'texture' か 'texture-array' */
+  textureType?: string;
+  imageIndex?: number;
+  depthNear?: number;
+  depthFar?: number;
 }
 
 /**
@@ -85,6 +122,12 @@ void main() {
 
 }`;
 
+/**
+ * `?depthshader=three` なら three.js の元のシェーダのまま使う(検証用)。
+ * 下駄の変換が悪いのか、深度の受け取り自体が噛み合っていないのかを切り分ける
+ */
+const KEEP_THREE_SHADER = new URLSearchParams(location.search).get('depthshader') === 'three';
+
 /** far がこれ以上なら無限遠として扱う(浮動小数の桁落ちを避ける) */
 const FAR_AS_INFINITE = 1000;
 
@@ -97,7 +140,7 @@ export function updateDepthOcclusion(renderer: THREE.WebGLRenderer): void {
     hasDepthSensing?: () => boolean;
     getDepthSensingMesh?: () => THREE.Mesh | null;
   };
-  if (!xr.hasDepthSensing?.()) return;
+  if (KEEP_THREE_SHADER || !xr.hasDepthSensing?.()) return;
   const mesh = xr.getDepthSensingMesh?.();
   if (!mesh) return;
   const material = mesh.material as THREE.ShaderMaterial;
@@ -111,7 +154,5 @@ export function updateDepthOcclusion(renderer: THREE.WebGLRenderer): void {
   const camera = xr.getCamera();
   material.uniforms.depthNear!.value = camera.near;
   material.uniforms.depthFar!.value =
-    Number.isFinite(camera.far) && camera.far < FAR_AS_INFINITE
-      ? camera.far
-      : 0;
+    Number.isFinite(camera.far) && camera.far < FAR_AS_INFINITE ? camera.far : 0;
 }
