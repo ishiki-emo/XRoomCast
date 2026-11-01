@@ -267,7 +267,10 @@ export class HmdBroadcast {
       .multiplyScalar(calibration.scale);
     _q.set(o.x, o.y, o.z, o.w).premultiply(calibration.yaw);
     if (extra) _q.multiply(extra);
-    if (restInverse) _q.premultiply(restInverse);
+    // 差分はワールド系(ワイヤ座標)でとる: 現在 × 開始時の逆。受信側はワイヤ回転を
+    // 「レストに左から掛けるワールド系の回転」として使うため。逆順(開始時の逆 × 現在)だと
+    // 頭自身の系での差分になり、開始時の頭は正面+Zへ180°回っているので、うなずき・首かしげが反転する
+    if (restInverse) _q.multiply(restInverse);
     return {
       position: [_v.x, _v.y, _v.z] as Vec3,
       rotation: [_q.x, _q.y, _q.z, _q.w] as Quat,
