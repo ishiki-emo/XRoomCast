@@ -18,6 +18,7 @@ import type {
   Vec3,
 } from '@xroomcast/protocol';
 import type { AuthProvider } from '@xroomcast/sync';
+import { OneEuroFilter } from './oneEuroFilter';
 import { PosePublisher } from './posePublisher';
 import {
   EXPRESSION_NAMES,
@@ -43,9 +44,26 @@ const FACE_LOST_MS = 1500;
 const HEAD_MOVE_LIMIT = 0.35;
 /** アバターが未読み込みのときの頭の高さ(m) */
 const DEFAULT_HEAD_HEIGHT = 1.45;
-/** 前回値へ寄せる割合。推定の細かい震えを抑える(大きいほど滑らかだが遅れる) */
-const SMOOTH_POSE = 0.45;
-const SMOOTH_EXPRESSION = 0.4;
+/**
+ * 揺れ取り(One Euro)の設定。[止まっているときのならし(Hz), 速さに応じてならしを弱める度合い]。
+ * 位置はメートル、回転はクォータニオンの成分で測る。手は頭より推定の揺れが大きいので強めにならす
+ */
+const HEAD_POSITION_FILTER = [1.2, 8] as const;
+const HEAD_ROTATION_FILTER = [1.5, 4] as const;
+const HAND_POSITION_FILTER = [0.8, 6] as const;
+const HAND_ROTATION_FILTER = [1, 3] as const;
+const FINGER_FILTER = [1.5, 2] as const;
+/** まばたきが遅れないよう、表情は軽めにならす */
+const EXPRESSION_FILTER = [2.5, 4] as const;
+/**
+ * 手の前後(奥行き)の動きを縮める割合。単眼カメラの奥行きは揺れが大きく、
+ * そのままだと手が前後にがたつく
+ */
+const HAND_DEPTH_SCALE = 0.6;
+/** 見えなくなった手を体側へ下ろしていく割合(1フレームあたり) */
+const HAND_RETURN_RATE = 0.15;
+/** 推定の速さを表示する間隔 */
+const RATE_REPORT_MS = 1000;
 /** 手が見えないときの指(待機モーションと同じ軽い曲げ) */
 const RELAXED_CURLS: FingerCurls = [0.11, 0.16, 0.16, 0.16, 0.18];
 
@@ -54,8 +72,42 @@ interface HandState {
   rotation: THREE.Quaternion;
   curls: FingerCurls;
   spread: number;
-  /** 前のフレームで見えていたか(見えなくなったら下ろした位置へ戻していく) */
-  seen: boolean;
+  positionFilter: OneEuroFilter;
+  rotationFilter: OneEuroFilter;
+  fingerFilter: OneEuroFilter;
+}
+
+const filterOf = ([minCutoff, beta]: readonly [number, number]) =>
+  new OneEuroFilter(minCutoff, beta);
+
+/** ベクトルを揺れ取りに通す(out へ書く) */
+function filterVector(
+  filter: OneEuroFilter,
+  v: THREE.Vector3,
+  time: number,
+  out: THREE.Vector3,
+): void {
+  const [x, y, z] = filter.filter([v.x, v.y, v.z], time, _values);
+  out.set(x!, y!, z!);
+}
+
+/**
+ * 回転を揺れ取りに通す。q と -q は同じ回転なので、前回の出力と同じ半球にそろえてから成分ごとにならす
+ * (そろえないと、半球をまたいだ瞬間に成分が反転して大きく回る)
+ */
+function filterRotation(
+  filter: OneEuroFilter,
+  q: THREE.Quaternion,
+  time: number,
+  out: THREE.Quaternion,
+): void {
+  const sign = q.dot(out) < 0 ? -1 : 1;
+  const [x, y, z, w] = filter.filter(
+    [q.x * sign, q.y * sign, q.z * sign, q.w * sign],
+    time,
+    _values,
+  );
+  out.set(x!, y!, z!, w!).normalize();
 }
 
 export class WebcamBroadcast {
@@ -74,6 +126,12 @@ export class WebcamBroadcast {
   private rest: { rotation: THREE.Quaternion; position: THREE.Vector3 } | null = null;
 
   private readonly head = { position: new THREE.Vector3(), rotation: new THREE.Quaternion() };
+  private readonly headPositionFilter = filterOf(HEAD_POSITION_FILTER);
+  private readonly headRotationFilter = filterOf(HEAD_ROTATION_FILTER);
+  private readonly expressionFilter = filterOf(EXPRESSION_FILTER);
+  /** 推定の回数(速さの表示用) */
+  private detections = 0;
+  private lastRateAt = 0;
   private readonly hands: Record<'left' | 'right', HandState> = {
     left: restHand('left', DEFAULT_HEAD_HEIGHT),
     right: restHand('right', DEFAULT_HEAD_HEIGHT),
@@ -123,6 +181,8 @@ export class WebcamBroadcast {
     this.rest = null;
     this.lastFaceAt = performance.now();
     this.lastKeyframeAt = -Infinity;
+    this.detections = 0;
+    this.lastRateAt = performance.now();
     this.onStatus?.('Webカメラから配信中(正面を向いてください)');
     this.loop();
   }
@@ -138,13 +198,31 @@ export class WebcamBroadcast {
     const now = performance.now();
     const result = this.tracker.detect(video, now);
     this.update(result, now);
+    this.reportRate(now, result.face !== null);
     if (now - this.lastSentAt >= SEND_INTERVAL_MS) {
       this.lastSentAt = now;
       this.send(now);
     }
   }
 
+  /**
+   * 推定が1秒に何回回っているかを出す。少ない(15回を切る)と動きが飛び飛びになるので、
+   * カクつきが「揺れ」なのか「PCの速さ」なのかを見分ける手がかりにする
+   */
+  private reportRate(now: number, faceFound: boolean): void {
+    this.detections++;
+    if (now - this.lastRateAt < RATE_REPORT_MS) return;
+    const rate = Math.round((this.detections * 1000) / (now - this.lastRateAt));
+    this.detections = 0;
+    this.lastRateAt = now;
+    if (!faceFound) return; // 「顔が見つかりません」を上書きしない
+    const slow =
+      rate < 15 ? '。PCの処理が追いついていません(ほかのアプリを閉じると改善します)' : '';
+    this.onStatus?.(`Webカメラから配信中(推定 ${rate}回/秒${slow})`);
+  }
+
   private update(result: TrackingResult, now: number): void {
+    const time = now / 1000;
     const face = result.face;
     if (face) {
       this.lastFaceAt = now;
@@ -154,24 +232,27 @@ export class WebcamBroadcast {
       }
       // 向きは「今 × 開始時の逆」(ワールド系の差分。HMD配信と同じ約束)
       _q.copy(face.rotation).multiply(_qInverse.copy(this.rest.rotation).invert());
-      this.head.rotation.slerp(_q, 1 - SMOOTH_POSE);
+      filterRotation(this.headRotationFilter, _q, time, this.head.rotation);
       _v.subVectors(face.position, this.rest.position).clampScalar(
         -HEAD_MOVE_LIMIT,
         HEAD_MOVE_LIMIT,
       );
       _v.y += this.headHeight;
-      this.head.position.lerp(_v, 1 - SMOOTH_POSE);
+      filterVector(this.headPositionFilter, _v, time, this.head.position);
 
       const next = expressionsFromBlendshapes(face.blendshapes);
-      for (const name of EXPRESSION_NAMES) {
-        const previous = this.expressions.get(name) ?? 0;
-        this.expressions.set(name, previous + (next[name] - previous) * (1 - SMOOTH_EXPRESSION));
-      }
+      const filtered = this.expressionFilter.filter(
+        EXPRESSION_NAMES.map((name) => next[name]),
+        time,
+        _values,
+      );
+      EXPRESSION_NAMES.forEach((name, i) => {
+        this.expressions.set(name, Math.min(1, Math.max(0, filtered[i]!)));
+      });
     }
 
     // 手: 位置は体の推定の手首(頭からの相対)、向き・指は手の推定
     const pose = result.pose;
-    const seen = { left: false, right: false };
     const handOf: Record<'left' | 'right', (typeof result.hands)[number] | null> = {
       left: null,
       right: null,
@@ -184,19 +265,20 @@ export class WebcamBroadcast {
       const leftEar = pose?.world[POSE.leftEar];
       const rightEar = pose?.world[POSE.rightEar];
       const visible = (wrist?.visibility ?? 0) > 0.5 && leftEar && rightEar;
+      let curls: FingerCurls = RELAXED_CURLS;
       if (visible && wrist) {
-        // 耳の中点(=頭の中心)からの位置を、ワイヤの頭の位置に足す
+        // 耳の中点(=頭の中心)からの位置を、ワイヤの頭の位置に足す。奥行きは縮める
         toWire(leftEar, _a).add(toWire(rightEar, _b)).multiplyScalar(0.5);
-        toWire(wrist, _v).sub(_a).add(this.head.position);
-        state.position.lerp(_v, state.seen ? 1 - SMOOTH_POSE : 0.3);
-        seen[side] = true;
+        toWire(wrist, _v).sub(_a);
+        _v.z *= HAND_DEPTH_SCALE;
+        _v.add(this.head.position);
 
         const hand = handOf[side];
         if (hand) {
           handAxes(hand.world, _finger, _thumb);
           handRotation(side, _finger, _thumb, _q);
           const fingers = fingersFromHand(hand.world);
-          state.curls = fingers.curls;
+          curls = fingers.curls;
           state.spread = fingers.spread;
         } else {
           // 手の形が取れないときは、前腕の向きに指先を伸ばし、親指を上にした形にする
@@ -204,17 +286,19 @@ export class WebcamBroadcast {
           const elbow = pose.world[side === 'left' ? POSE.leftElbow : POSE.rightElbow]!;
           toWire(wrist, _finger).sub(toWire(elbow, _a));
           handRotation(side, _finger, _thumb.set(0, 1, 0), _q);
-          state.curls = RELAXED_CURLS;
         }
-        state.rotation.slerp(_q, state.seen ? 1 - SMOOTH_POSE : 1);
       } else {
         // 見えない手は体側へ下ろしていく(画面外に出した手で固まらないように)
         const rest = restHand(side, this.head.position.y);
-        state.position.lerp(rest.position, 0.15);
-        state.rotation.slerp(rest.rotation, 0.15);
-        state.curls = RELAXED_CURLS;
+        _v.copy(state.position).lerp(rest.position, HAND_RETURN_RATE);
+        _q.copy(state.rotation).slerp(rest.rotation, HAND_RETURN_RATE);
       }
-      state.seen = seen[side];
+      // 見えていても見えていなくても揺れ取りに通す(見え隠れの境目で位置が飛ばないように)
+      filterVector(state.positionFilter, _v, time, state.position);
+      filterRotation(state.rotationFilter, _q, time, state.rotation);
+      state.curls = state.fingerFilter
+        .filter(curls, time, _values)
+        .map((c) => Math.min(1, Math.max(0, c))) as FingerCurls;
     }
   }
 
@@ -296,10 +380,13 @@ function restHand(side: 'left' | 'right', headY: number): HandState {
     rotation: new THREE.Quaternion(0, 0, sign * -0.707, 0.707).normalize(),
     curls: RELAXED_CURLS,
     spread: 0.5,
-    seen: false,
+    positionFilter: filterOf(HAND_POSITION_FILTER),
+    rotationFilter: filterOf(HAND_ROTATION_FILTER),
+    fingerFilter: filterOf(FINGER_FILTER),
   };
 }
 
+const _values: number[] = [];
 const _q = new THREE.Quaternion();
 const _qInverse = new THREE.Quaternion();
 const _v = new THREE.Vector3();
