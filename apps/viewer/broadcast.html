@@ -217,6 +217,23 @@
         height: min(70vw, 70vh);
         image-rendering: pixelated; /* 拡大してもエッジをぼかさない */
       }
+      #qr-stage .title {
+        color: #111;
+        font-size: clamp(16px, 2.4vw, 28px);
+        font-weight: bold;
+        text-align: center;
+        padding: 0 16px;
+        max-width: 92vw;
+        overflow-wrap: anywhere;
+      }
+      #qr-stage.secret .title {
+        color: #b00020;
+      }
+      /* Quest のカメラでモニタから読むので、できるだけ大きく出す */
+      #qr-stage.secret img {
+        width: min(86vw, 66vh);
+        height: min(86vw, 66vh);
+      }
       #qr-stage .url {
         color: #111;
         font-size: clamp(14px, 2.2vw, 24px);
@@ -342,6 +359,15 @@
         ・視聴URLと配信者URLは別の鍵です。<strong>視聴URLを渡しても配信は操作されません</strong>
       </p>
 
+      <h2>🥽 Questでこのページを開く</h2>
+      <div class="row">
+        <button class="small" id="s-host-qr">配信者URLのQRを大きく表示</button>
+      </div>
+      <p class="note">
+        ・QuestのQR読み取り(カメラ)で読むと、Questのブラウザでこのページが開きます。そのままHMD配信を始められます<br />
+        ・<strong>配信者URLは配信を操作できる鍵です。</strong>配信画面に映したり、他人に見せたりしないでください
+      </p>
+
       <h2>⚙️ ルーム設定</h2>
       <div id="s-status">読み込み中...</div>
       <div class="row">
@@ -449,6 +475,7 @@
     </div>
     <!-- 会場掲示用の全画面QR。白背景・余白ありでスマホから読み取りやすくする -->
     <div id="qr-stage" hidden>
+      <div class="title" id="qr-stage-title"></div>
       <div id="qr-stage-image"></div>
       <div class="url" id="qr-stage-url"></div>
       <div class="close">画面のどこかをクリック / Esc で閉じます</div>

@@ -11,12 +11,12 @@ import { withRoom, type AuthProvider } from '@xroomcast/sync';
 import type { RoomSettings } from './config';
 
 /**
- * 視聴URLのQRを作る。
- * 型番0(自動選択)・誤り訂正レベルM。会場では印刷や画面掲示から
- * 読み取られるので、汚れや反射に少し耐えるMを選んでいる
+ * QRを作る。型番0(自動選択)。
+ * 視聴URLは誤り訂正レベルM: 会場では印刷や画面掲示から読み取られるので、汚れや反射に少し耐える。
+ * 配信者URL(Questのカメラでモニタから読む)はL: 模様が粗くなり、離れて読みやすい
  */
-function qrImageTag(text: string, cellSize: number): string {
-  const qr = qrcode(0, 'M');
+function qrImageTag(text: string, cellSize: number, level: 'L' | 'M' = 'M'): string {
+  const qr = qrcode(0, level);
   qr.addData(text);
   qr.make();
   return qr.createImgTag(cellSize, 0);
@@ -42,6 +42,8 @@ export function setupRoomSettings(options: {
   const qrStage = document.getElementById('qr-stage') as HTMLDivElement;
   const qrStageImage = document.getElementById('qr-stage-image') as HTMLDivElement;
   const qrStageUrl = document.getElementById('qr-stage-url') as HTMLDivElement;
+  const qrStageTitle = document.getElementById('qr-stage-title') as HTMLDivElement;
+  const hostQrButton = document.getElementById('s-host-qr') as HTMLButtonElement | null;
   const capacityInput = document.getElementById('s-capacity') as HTMLInputElement;
   const capacityApply = document.getElementById('s-capacity-apply') as HTMLButtonElement;
   const capacityClear = document.getElementById('s-capacity-clear') as HTMLButtonElement;
@@ -51,6 +53,7 @@ export function setupRoomSettings(options: {
   const peerButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-peermode]')];
 
   let current: RoomSettings | null = null;
+  let watchUrlShown: string | null = null;
 
   /**
    * 視聴URLの表示。**視聴トークンは配信トークンと別の導出**なので、
@@ -65,20 +68,49 @@ export function setupRoomSettings(options: {
     watchCopyButton.disabled = !available;
     watchOpenButton.disabled = !available;
     qrBigButton.disabled = !available;
-    // 全画面用は拡大しても粗くならないよう、セルを大きめに描いておく
     qrEl.innerHTML = available ? qrImageTag(watchUrl, 3) : '';
-    qrStageImage.innerHTML = available ? qrImageTag(watchUrl, 8) : '';
-    qrStageUrl.textContent = available ? watchUrl : '';
+    watchUrlShown = available ? watchUrl : null;
   }
 
-  /** 会場掲示用の全画面表示。読み取られる側なので白背景・余白ありにしている */
-  function setQrStageVisible(visible: boolean): void {
-    qrStage.hidden = !visible;
+  /**
+   * 全画面のQR。読み取られる側なので白背景・余白ありにしている。
+   * secret(配信者URL)は見出しを赤くし、URLの文字はキーを伏せて出す
+   */
+  function openQrStage(image: string, title: string, text: string, secret: boolean): void {
+    qrStageTitle.textContent = title;
+    qrStageImage.innerHTML = image;
+    qrStageUrl.textContent = text;
+    qrStage.classList.toggle('secret', secret);
+    qrStage.hidden = false;
   }
-  qrBigButton.addEventListener('click', () => setQrStageVisible(true));
-  qrStage.addEventListener('click', () => setQrStageVisible(false));
+  function closeQrStage(): void {
+    qrStage.hidden = true;
+    // 配信者URLのQRを画面の裏に残さない
+    qrStageImage.innerHTML = '';
+  }
+  qrBigButton.addEventListener('click', () => {
+    // 全画面用は拡大しても粗くならないよう、セルを大きめに描いておく
+    if (watchUrlShown) openQrStage(qrImageTag(watchUrlShown, 8), '視聴URL', watchUrlShown, false);
+  });
+  /**
+   * 配信者URL(このページ)のQR。Quest からこのページを開くため。
+   * QRはキーを含むので押したときだけ作り、閉じたら消す
+   */
+  hostQrButton?.addEventListener('click', () => {
+    const url = new URL(location.href);
+    url.hash = '';
+    const masked = new URL(url);
+    if (masked.searchParams.has('key')) masked.searchParams.set('key', '••••••');
+    openQrStage(
+      qrImageTag(url.toString(), 10, 'L'),
+      '🔑 配信者URL(Questのカメラで読み取る・配信画面や他人に見せない)',
+      decodeURIComponent(masked.toString()),
+      true,
+    );
+  });
+  qrStage.addEventListener('click', () => closeQrStage());
   window.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') setQrStageVisible(false);
+    if (event.key === 'Escape') closeQrStage();
   });
 
   watchCopyButton.addEventListener('click', () => {
