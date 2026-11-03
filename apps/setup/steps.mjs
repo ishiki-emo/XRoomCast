@@ -164,6 +164,7 @@ function buildUrls(keys) {
     viewer: base,
     watch: `${base}/watch/${keys.secrets.WATCH_KEY}`,
     broadcast: `${base}/broadcast/${keys.secrets.BROADCAST_KEY}`,
+    admin: keys.secrets.ADMIN_KEY ? `${base}/admin/${keys.secrets.ADMIN_KEY}` : null,
   };
 }
 
@@ -218,7 +219,10 @@ async function runSetupJob() {
     BROADCAST_KEY: newSecret(),
     BRIDGE_TOKEN: newSecret(),
     ROOM_SECRET: newSecret(),
+    ADMIN_KEY: newSecret(),
   };
+  // 管理画面より前に作られた控えには管理者キーが無い。ほかのキー(=URL)は変えずに足す
+  if (!secrets.ADMIN_KEY) secrets.ADMIN_KEY = newSecret();
   jobLog(prev ? '前回のキーを再利用します(URLは変わりません)' : '新しいキーを発行しました');
 
   // 2. wrangler.jsonc の生成(テンプレートから)

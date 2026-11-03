@@ -73,7 +73,10 @@ async function loadState() {
     $('existing').hidden = false;
     $('existing-urls').innerHTML = `
       <div class="url-row"><span>視聴URL</span><code>${s.existing.urls.watch}</code></div>
-      <div class="url-row"><span>配信者URL</span><code>${s.existing.urls.broadcast}</code></div>`;
+      <div class="url-row"><span>配信者URL</span><code>${s.existing.urls.broadcast}</code></div>` +
+      (s.existing.urls.admin
+        ? `<div class="url-row"><span>管理画面URL</span><code>${s.existing.urls.admin}</code></div>`
+        : '');
   }
   if (s.existing.foreign) $('foreign').hidden = false;
 
@@ -198,6 +201,7 @@ async function pollJob() {
     $('step-done').hidden = false;
     $('url-watch').textContent = j.result.watch;
     $('url-broadcast').textContent = j.result.broadcast;
+    $('url-admin').textContent = j.result.admin ?? '';
     $('step-done').scrollIntoView({ behavior: 'smooth' });
   } else if (j.status === 'error') {
     clearInterval(jobTimer);

@@ -12,6 +12,7 @@
  *            WATCH_KEY または HMAC(ROOM_SECRET, "watch:<ルーム>")を要求する
  * - ブリッジ: BRIDGE_TOKEN(配信者キーでも代替できる)
  * - VRM配信 : VRM_TOKEN
+ * - 運営者 : ADMIN_KEY(管理画面 /admin/<キー>。配信者キーとは別。未設定なら管理画面は使えない)
  *
  * クライアント側の対になる差し替え点は src/auth.ts の `createAuth()`。
  */
@@ -37,6 +38,11 @@ export interface AuthEnv {
    * 既定(未設定)はルーム名を知っていれば誰でも視聴できる匿名視聴
    */
   REQUIRE_VIEWER_TOKEN?: string;
+  /**
+   * 運営者の管理画面(/admin/<キー>)の照合キー。配信者キーとは別に持つので、
+   * 配信者URLを渡しても管理画面(コメント機能の許可・全ルームのファイル削除)には入れない
+   */
+  ADMIN_KEY?: string;
 }
 
 /**
@@ -45,8 +51,9 @@ export interface AuthEnv {
  * - broadcaster: 配信の操作(トラック公開、アバターの切り替え・アップロード、公開範囲)
  * - publisher  : パブリッシャーのセッション登録(ブリッジまたは配信者)
  * - vrm        : R2のVRM本体の取得
+ * - admin      : 運営者の管理画面(全ルームの一覧・ファイル削除・コメント機能の許可)
  */
-export type AuthScope = 'viewer' | 'broadcaster' | 'publisher' | 'vrm';
+export type AuthScope = 'viewer' | 'broadcaster' | 'publisher' | 'vrm' | 'admin';
 
 export interface AuthResult {
   ok: boolean;
@@ -154,6 +161,12 @@ export async function authorize(
     if (!env.VRM_TOKEN) return DENIED;
     const candidate = readCredential(request, url, ['k']);
     return timingSafeEqual(env.VRM_TOKEN, candidate) ? OK : DENIED;
+  }
+
+  if (scope === 'admin') {
+    // 未設定なら管理画面ごと無効(安全側)。配信者キーでは代替できない
+    if (!env.ADMIN_KEY) return DENIED;
+    return timingSafeEqual(env.ADMIN_KEY, readCredential(request, url, ['key'])) ? OK : DENIED;
   }
 
   if (scope === 'publisher') {

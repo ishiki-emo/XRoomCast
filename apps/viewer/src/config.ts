@@ -54,8 +54,10 @@ export function sameOriginWebSocketUrl(path: string, loc: Location = location): 
 export interface RoomSettings {
   /** public: 誰でも視聴できる / invite: 視聴トークンが要る */
   access: 'public' | 'invite';
-  /** 匿名コメントの可否 */
+  /** 匿名コメントの可否(運営者の許可と配信者の選択の両方が要る) */
   chat: boolean;
+  /** 運営者が管理画面でコメント機能を許可しているか。旧サーバーでは無い */
+  commentsAllowed?: boolean;
   /** 同時接続の上限(null で無制限) */
   capacity: number | null;
   /** 緊急停止。新規の視聴を断り、視聴中の画面にも停止中を出す */

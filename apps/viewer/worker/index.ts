@@ -23,6 +23,7 @@ import {
   type AuthEnv,
   type AuthScope,
 } from './auth';
+import { ROOM_INDEX_PREFIX, commentsAllowed, handleAdminApi } from './admin';
 
 interface Env extends AuthEnv {
   ASSETS: Fetcher;
@@ -829,6 +830,8 @@ const CHAT_HISTORY_KEY = 'chat-history';
  * 電気通信事業法まわりの配慮で既定をオフにしたので、選んだ事実だけを別に持つ
  */
 const CHAT_ENABLED_KEY = 'chat-enabled';
+/** 管理画面のルーム一覧(KVの索引)へ載せ済みか */
+const ROOM_INDEXED_KEY = 'room-indexed';
 const CHAT_HISTORY_MAX = 50;
 const CHAT_TEXT_MAX = 200;
 const CHAT_MIN_INTERVAL_MS = 1000;
@@ -888,8 +891,13 @@ const ROOM_NAME_KEY = 'room-name';
 interface RoomSettings {
   /** public: 誰でも視聴できる / invite: 視聴トークンが要る */
   access: 'public' | 'invite';
-  /** 匿名コメントの可否。**既定はオフ**(送るのも見るのも不可)。配信者がオンにしたときだけ使える */
+  /**
+   * 匿名コメントの可否。**既定はオフ**(送るのも見るのも不可)。
+   * 運営者が管理画面でコメント機能を許可していて、かつ配信者がオンにしたときだけ true
+   */
   chat: boolean;
+  /** 運営者がコメント機能を許可しているか(管理画面で決める。配信者は変えられない) */
+  commentsAllowed: boolean;
   /** 同時接続の上限(null で無制限)。URLが出回ったときの課金の歯止め */
   capacity: number | null;
   /**
@@ -916,6 +924,7 @@ function defaultSettings(env: Env): RoomSettings {
     // 従来の環境変数は「設定を持たないルームの既定値」として残す
     access: env.REQUIRE_VIEWER_TOKEN === '1' ? 'invite' : 'public',
     chat: false,
+    commentsAllowed: false,
     capacity: null,
     stopped: false,
     peerMode: DEFAULT_PEER_MODE,
@@ -992,11 +1001,79 @@ export class Presence extends DurableObject<Env> {
     if (roomParam && (await this.ctx.storage.get<string>(ROOM_NAME_KEY)) !== roomParam) {
       await this.ctx.storage.put(ROOM_NAME_KEY, roomParam);
     }
+    // 管理画面のルーム一覧のため、初めて名前を知ったときに一度だけKVへ載せる
+    if (roomParam && !(await this.ctx.storage.get<boolean>(ROOM_INDEXED_KEY))) {
+      await this.env.SFU_STATE.put(`${ROOM_INDEX_PREFIX}${roomParam}`, String(Date.now()));
+      await this.ctx.storage.put(ROOM_INDEXED_KEY, true);
+    }
+
+    // 管理画面(Worker本体が管理者キーを検証したうえで呼ぶ内部API)
+    if (path === '/admin-status') {
+      const sockets = this.ctx.getWebSockets();
+      const broadcasters = sockets.filter((socket) => {
+        const attachment = (socket.deserializeAttachment() ?? {}) as { role?: string };
+        return attachment.role === 'broadcaster';
+      }).length;
+      const now = Date.now();
+      const publishers = ((await this.ctx.storage.get<PublisherEntry[]>(PUBLISHERS_KEY)) ?? [])
+        .filter((p) => now - p.updatedAt <= PUBLISHER_FRESH_MS)
+        .map(({ pid, slot, updatedAt }) => ({ pid, slot, updatedAt }));
+      return Response.json({
+        viewers: sockets.length - broadcasters,
+        consoles: broadcasters,
+        publishers,
+        settings: await this.settings(),
+        avatars: Object.fromEntries(
+          [...(await this.avatarEntries())].map(([slot, record]) => [
+            slot,
+            { key: record.key, name: record.name },
+          ]),
+        ),
+        stage: await this.stage(),
+      });
+    }
+    // 運営者がコメント機能の許可を変えたとき。接続中の全員へ設定を配り直す
+    if (path === '/settings-refresh') {
+      const settings = await this.settings();
+      this.broadcastJson({ type: 'settings', settings });
+      if (settings.chat) {
+        const history = (await this.ctx.storage.get<ChatItem[]>(CHAT_HISTORY_KEY)) ?? [];
+        this.broadcastJson({ type: 'history', items: history });
+      }
+      return new Response(null, { status: 204 });
+    }
+    // 管理画面でファイルを消したとき。それを使っている席のアバターとステージを外す
+    if (path === '/forget-file') {
+      const { key } = (await request.json()) as { key?: string };
+      for (const [slot, record] of await this.avatarEntries()) {
+        if (record.key !== key) continue;
+        await this.ctx.storage.delete(avatarStorageKey(slot));
+        this.broadcastJson({ type: 'avatarCleared', slot });
+      }
+      const stage = await this.stage();
+      if (stage.source === 'model' && stage.key === key) {
+        const record: StageRecord = {
+          source: 'builtin',
+          sky: stage.sky,
+          ground: stage.ground,
+          ts: Date.now(),
+        };
+        await this.ctx.storage.put(STAGE_KEY, record);
+        this.broadcastJson({ type: 'stage', stage: record });
+      }
+      return new Response(null, { status: 204 });
+    }
 
     // ルーム設定(Worker本体が配信者キーを検証したうえで呼ぶ内部API)
     if (path === '/settings') {
       if (request.method === 'POST') {
         const patch = (await request.json()) as Record<string, unknown>;
+        if (patch.chat === true && !(await commentsAllowed(this.env.SFU_STATE))) {
+          return Response.json(
+            { error: 'コメント機能は運営者が許可していません(管理画面で許可が必要です)' },
+            { status: 403 },
+          );
+        }
         const settings = await this.applySettings(patch);
         return Response.json({ settings });
       }
@@ -1028,12 +1105,9 @@ export class Presence extends DurableObject<Env> {
     if (path === '/avatar') {
       if (request.method === 'GET') {
         // 席番号 → 現在のアバター。avatar(単数)は旧クライアント互換(=席0)
-        const entries = await this.ctx.storage.list<AvatarRecord>({ prefix: AVATAR_KEY });
-        const avatars: Record<string, AvatarRecord> = {};
-        for (const [key, record] of entries) {
-          const slot = key === AVATAR_KEY ? 0 : Number(key.slice(AVATAR_KEY.length + 1));
-          if (Number.isFinite(slot)) avatars[String(slot)] = record;
-        }
+        const avatars = Object.fromEntries(
+          [...(await this.avatarEntries())].map(([slot, record]) => [String(slot), record]),
+        );
         return Response.json({ avatar: avatars['0'] ?? null, avatars });
       }
       const { slot = 0, ...record } = (await request.json()) as AvatarRecord & { slot?: number };
@@ -1225,6 +1299,17 @@ export class Presence extends DurableObject<Env> {
   }
 
   /** 現在のステージ。未設定なら組み込みの装飾を出す */
+  /** 席番号 → 現在のアバター */
+  private async avatarEntries(): Promise<Map<number, AvatarRecord>> {
+    const entries = await this.ctx.storage.list<AvatarRecord>({ prefix: AVATAR_KEY });
+    const avatars = new Map<number, AvatarRecord>();
+    for (const [key, record] of entries) {
+      const slot = key === AVATAR_KEY ? 0 : Number(key.slice(AVATAR_KEY.length + 1));
+      if (Number.isFinite(slot)) avatars.set(slot, record);
+    }
+    return avatars;
+  }
+
   private async stage(): Promise<StageRecord> {
     return (
       (await this.ctx.storage.get<StageRecord>(STAGE_KEY)) ?? { source: 'builtin', ts: 0 }
@@ -1441,11 +1526,14 @@ export class Presence extends DurableObject<Env> {
    * (設定を統合する前に作られたルームでも、設定し直さずに済むように)
    */
   private async settings(): Promise<RoomSettings> {
-    const chat = (await this.ctx.storage.get<boolean>(CHAT_ENABLED_KEY)) === true;
+    // コメントは「運営者が許可している」かつ「配信者がオンにした」ときだけ
+    const allowed = await commentsAllowed(this.env.SFU_STATE);
+    const chosen = (await this.ctx.storage.get<boolean>(CHAT_ENABLED_KEY)) === true;
+    const operator = { chat: allowed && chosen, commentsAllowed: allowed };
     const stored = await this.ctx.storage.get<RoomSettings>(SETTINGS_KEY);
-    if (stored) return { ...defaultSettings(this.env), ...stored, chat };
+    if (stored) return { ...defaultSettings(this.env), ...stored, ...operator };
     const legacyPeerMode = await this.ctx.storage.get<PeerMode>(PEER_MODE_KEY);
-    const base = { ...defaultSettings(this.env), chat };
+    const base = { ...defaultSettings(this.env), ...operator };
     return legacyPeerMode ? { ...base, peerMode: legacyPeerMode } : base;
   }
 
@@ -1607,6 +1695,19 @@ export default {
         `${url.origin}/?vrm=${vrmParam}&transport=sfu&watch=1&room=${roomParam}&wt=${watchParam}`,
         302,
       );
+    }
+
+    // 運営者の管理画面。キーの照合は管理APIの側で行う(ページ自体は静的)
+    if (url.pathname.startsWith('/admin/')) {
+      const keyParam = encodeURIComponent(decodeURIComponent(url.pathname.slice('/admin/'.length)));
+      return Response.redirect(`${url.origin}/admin.html?key=${keyParam}`, 302);
+    }
+    if (url.pathname.startsWith('/api/admin/')) {
+      try {
+        return await handleAdminApi(request, env, url);
+      } catch (error) {
+        return json(500, { error: String(error) });
+      }
     }
 
     // 配信者コンソール(音声)の短縮URL

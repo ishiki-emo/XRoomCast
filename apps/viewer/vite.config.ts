@@ -8,7 +8,7 @@ const { version } = JSON.parse(
   readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8'),
 ) as { version: string };
 
-// 視聴ページ(index.html)と配信者コンソール(broadcast.html)のマルチページ構成
+// 視聴ページ(index.html)・配信者コンソール(broadcast.html)・管理画面(admin.html)のマルチページ構成
 export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(version),
@@ -18,6 +18,7 @@ export default defineConfig({
       input: {
         main: fileURLToPath(new URL('index.html', import.meta.url)),
         broadcast: fileURLToPath(new URL('broadcast.html', import.meta.url)),
+        admin: fileURLToPath(new URL('admin.html', import.meta.url)),
       },
     },
   },

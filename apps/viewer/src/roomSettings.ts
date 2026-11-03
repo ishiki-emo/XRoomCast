@@ -48,6 +48,7 @@ export function setupRoomSettings(options: {
   const capacityApply = document.getElementById('s-capacity-apply') as HTMLButtonElement;
   const capacityClear = document.getElementById('s-capacity-clear') as HTMLButtonElement;
   const accessButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-access]')];
+  const chatPolicyNote = document.getElementById('s-chat-policy');
   const chatButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-chat]')];
   const stoppedButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-stopped]')];
   const peerButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-peermode]')];
@@ -151,7 +152,10 @@ export function setupRoomSettings(options: {
     }
     for (const button of chatButtons) {
       button.classList.toggle('on', (button.dataset.chat === 'on') === settings.chat);
+      // 運営者がコメント機能を許可していなければ、オンにはできない(押しても断られる)
+      if (button.dataset.chat === 'on') button.disabled = settings.commentsAllowed === false;
     }
+    if (chatPolicyNote) chatPolicyNote.hidden = settings.commentsAllowed !== false;
     for (const button of peerButtons) {
       button.classList.toggle('on', button.dataset.peermode === settings.peerMode);
     }

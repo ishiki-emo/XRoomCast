@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🛡</text></svg>"
+    />
+    <title>管理画面</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #141414;
+        color: #eee;
+        font-family: system-ui, sans-serif;
+      }
+      #wrap {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 32px 16px;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 0 0 8px;
+      }
+      h2 {
+        font-size: 17px;
+        margin: 28px 0 8px;
+        padding-top: 16px;
+        border-top: 1px solid #333;
+      }
+      .sub,
+      .note {
+        color: #999;
+        font-size: 13px;
+        line-height: 1.8;
+      }
+      .sub {
+        margin: 0 0 16px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 12px;
+        flex-wrap: wrap;
+      }
+      #status {
+        padding: 10px 14px;
+        border-radius: 8px;
+        background: #1e1e1e;
+        border: 1px solid #333;
+        font-size: 14px;
+      }
+      #status.error {
+        border-color: #5f3a3a;
+        color: #ff6b6b;
+      }
+      button {
+        padding: 8px 14px;
+        font-size: 13px;
+        border-radius: 8px;
+        border: 1px solid #444;
+        background: #2b2b2b;
+        color: #eee;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      button.on {
+        background: #3a6f4a;
+        border-color: #5c9c72;
+        color: #d7f5e2;
+      }
+      button.danger {
+        border-color: #5f3a3a;
+        color: #ff9d9d;
+      }
+      /* 許可しているのは注意が要る状態なので、選択中は橙で目立たせる */
+      button.caution.on {
+        background: #6b4a1f;
+        border-color: #a8752f;
+        color: #ffe1b8;
+      }
+      details.note summary {
+        cursor: pointer;
+        color: #8ab;
+      }
+      .policy {
+        font-size: 15px;
+        font-weight: bold;
+      }
+      .policy.off {
+        color: #8fa;
+      }
+      .policy.on {
+        color: #ffb36b;
+      }
+      /* ルーム一覧 */
+      #rooms {
+        display: grid;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .room {
+        border: 1px solid #333;
+        border-radius: 10px;
+        background: #1b1b1b;
+        padding: 12px 14px;
+      }
+      .room.live {
+        border-color: #3a5f3a;
+      }
+      .room-head {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+        flex-wrap: wrap;
+      }
+      .room-name {
+        font-size: 16px;
+        font-weight: bold;
+        overflow-wrap: anywhere;
+      }
+      .badge {
+        font-size: 12px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: #2b2b2b;
+        color: #bbb;
+      }
+      .badge.live {
+        background: #3a1f1f;
+        color: #ff8080;
+      }
+      .badge.chat {
+        background: #3d2f17;
+        color: #ffb36b;
+      }
+      .room-meta {
+        margin-top: 6px;
+        color: #aaa;
+        font-size: 13px;
+        line-height: 1.7;
+        overflow-wrap: anywhere;
+      }
+      .files {
+        list-style: none;
+        margin: 10px 0 0;
+        padding: 0;
+      }
+      .files li {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 10px;
+        border-top: 1px solid #2a2a2a;
+        font-size: 13px;
+      }
+      .files .name {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .files .size {
+        color: #888;
+        font-size: 12px;
+      }
+      .files .used {
+        color: #8fa;
+        font-size: 12px;
+      }
+      .empty {
+        color: #777;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <h1>🛡 管理画面</h1>
+      <p class="sub">運営者用です。すべてのルームの状態と、サービス全体の設定を扱います</p>
+      <div id="status">読み込み中...</div>
+
+      <h2>💬 コメント機能</h2>
+      <div class="policy" id="c-policy">-</div>
+      <div class="row">
+        <button id="c-deny">許可しない(既定)</button>
+        <button id="c-allow" class="caution">許可する</button>
+      </div>
+      <details class="note">
+        <summary>ⓘ この設定について</summary>
+        ・<strong>許可しない間は、どのルームでもコメントを使えません。</strong>配信者コンソールの「受け付ける」も押せません<br />
+        ・視聴者どうしのコメントは、他人の通信を媒介することにあたる場合があります。
+        電気通信事業の届出などの手当てをしていない場合は、許可しないでください<br />
+        ・許可しても、各ルームで配信者が「受け付ける」にしない限りコメントは出ません<br />
+        ・許可しないに戻すと、接続中の視聴者の画面からもコメント欄が消えます
+      </details>
+
+      <h2>📡 ルーム</h2>
+      <div class="row">
+        <button id="r-reload">更新</button>
+        <span class="note" id="r-updated"></span>
+      </div>
+      <div id="rooms"></div>
+      <p class="empty" id="r-empty" hidden>まだルームがありません</p>
+      <details class="note">
+        <summary>ⓘ 一覧に出るルームと、ファイルの削除について</summary>
+        ・視聴者か配信者が一度でも接続したルームと、ファイルがアップロードされたルームが出ます<br />
+        ・「配信中」は、15分以内に配信元(ブリッジ/HMD)が登録されている席があるルームです<br />
+        ・<strong>使用中のファイルを削除すると、その席のアバターは外れ、ステージは組み込みの装飾に戻ります</strong>。
+        削除したファイルは元に戻せません
+      </details>
+
+      <p class="note" id="app-version"></p>
+    </div>
+    <script type="module" src="/src/admin.ts"></script>
+  </body>
+</html>
