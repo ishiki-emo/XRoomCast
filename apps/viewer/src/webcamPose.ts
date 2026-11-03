@@ -89,6 +89,43 @@ export function handAxes(
  * 体が取れないときは MediaPipe の左右ラベルを使う。ラベルは、反転していないカメラ映像で
  * 本人の左右と一致する(tasks-vision 1.1.1 の写真で確認。古い説明にある「鏡像を前提」とは逆)
  */
+export function assignHands(
+  hands: readonly HandReading[],
+  pose: PoseReading | null,
+): Record<'left' | 'right', HandReading | null> {
+  const result: Record<'left' | 'right', HandReading | null> = { left: null, right: null };
+  if (hands.length === 0) return result;
+  if (!pose) {
+    for (const hand of hands) result[sideOfHand(hand, null)] ??= hand;
+    return result;
+  }
+  const wrists = { left: pose.image[POSE.leftWrist], right: pose.image[POSE.rightWrist] };
+  const dist = (hand: HandReading, side: 'left' | 'right') => {
+    const w = wrists[side];
+    const h = hand.image[0]!;
+    return w ? Math.hypot(w.x - h.x, w.y - h.y) : Infinity;
+  };
+  if (hands.length >= 2) {
+    // 2つ見えたら、手首との距離の合計が小さい組み合わせで割り当てる(1つずつ近い方を採ると、
+    // 両手が近いときに同じ側を取り合ったり入れ替わったりする)
+    const [a, b] = hands as [HandReading, HandReading];
+    const straight = dist(a, 'left') + dist(b, 'right');
+    const swapped = dist(a, 'right') + dist(b, 'left');
+    const [left, right] = straight <= swapped ? [a, b] : [b, a];
+    if (dist(left, 'left') < MAX_HAND_WRIST_GAP) result.left = left;
+    if (dist(right, 'right') < MAX_HAND_WRIST_GAP) result.right = right;
+    return result;
+  }
+  const hand = hands[0]!;
+  const side = sideOfHand(hand, pose);
+  // 体の手首から離れすぎた手は、別のもの(顔や背景)を手と見誤った可能性が高い
+  if (dist(hand, side) < MAX_HAND_WRIST_GAP) result[side] = hand;
+  return result;
+}
+
+/** 手の推定の手首と体の推定の手首が、画像の幅・高さに対してこれ以上離れていたら別物とみなす */
+const MAX_HAND_WRIST_GAP = 0.15;
+
 export function sideOfHand(hand: HandReading, pose: PoseReading | null): 'left' | 'right' {
   const wrist = hand.image[0]!;
   if (pose) {
@@ -102,6 +139,21 @@ export function sideOfHand(hand: HandReading, pose: PoseReading | null): 'left' 
 function remap(value: number | undefined, from: number, to: number): number {
   const v = ((value ?? 0) - from) / (to - from);
   return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/**
+ * 左右の目の閉じ具合をそろえる。推定は左右で値がずれやすく(顔の向きや照明、笑ったときの目の細め)、
+ * そのまま使うと意図しないウインクが多くなる。差が小さいうちは両目を同じ値(大きい方)にし、
+ * 片目だけがはっきり閉じているときだけ左右を分ける
+ */
+export function linkEyes(left: number, right: number): [number, number] {
+  const WINK_GAP = 0.55;
+  const gap = Math.abs(left - right);
+  if (gap >= WINK_GAP) return [left, right];
+  // 差が開くにつれて、そろえた値から実際の値へなめらかに戻す
+  const mix = Math.max(0, (gap - WINK_GAP * 0.6) / (WINK_GAP * 0.4));
+  const both = Math.max(left, right);
+  return [both + (left - both) * mix, both + (right - both) * mix];
 }
 
 /** 送る表情の名前(VRMの表情名)。番号はこの並び順で固定する */
@@ -135,9 +187,13 @@ export function expressionsFromBlendshapes(
   const funnel = remap(get('mouthFunnel'), 0.12, 0.5);
   const pucker = remap(get('mouthPucker'), 0.25, 0.75);
   const stretch = remap(avg('mouthStretchLeft', 'mouthStretchRight'), 0.12, 0.5);
+  const [blinkLeft, blinkRight] = linkEyes(
+    remap(get('eyeBlinkLeft'), 0.35, 0.75),
+    remap(get('eyeBlinkRight'), 0.35, 0.75),
+  );
   return {
-    blinkLeft: remap(get('eyeBlinkLeft'), 0.35, 0.75),
-    blinkRight: remap(get('eyeBlinkRight'), 0.35, 0.75),
+    blinkLeft,
+    blinkRight,
     // 口の開きを「あ」に、すぼめ・突き出し・横引きでほかの母音へ振り分ける
     aa: jaw * (1 - Math.max(funnel, pucker) * 0.7),
     ih: stretch * 0.5 * (1 - jaw),

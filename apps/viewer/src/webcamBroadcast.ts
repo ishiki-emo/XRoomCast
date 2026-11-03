@@ -17,7 +17,7 @@ import type {
   Quat,
   Vec3,
 } from '@xroomcast/protocol';
-import type { AuthProvider } from '@xroomcast/sync';
+import type { AuthProvider, SampledFrame } from '@xroomcast/sync';
 import { OneEuroFilter } from './oneEuroFilter';
 import { PosePublisher } from './posePublisher';
 import {
@@ -25,9 +25,9 @@ import {
   POSE,
   expressionsFromBlendshapes,
   fingersFromHand,
+  assignHands,
   handAxes,
   handRotation,
-  sideOfHand,
   toWire,
   type ExpressionName,
 } from './webcamPose';
@@ -48,8 +48,8 @@ const DEFAULT_HEAD_HEIGHT = 1.45;
  * 揺れ取り(One Euro)の設定。[止まっているときのならし(Hz), 速さに応じてならしを弱める度合い]。
  * 位置はメートル、回転はクォータニオンの成分で測る。手は頭より推定の揺れが大きいので強めにならす
  */
-const HEAD_POSITION_FILTER = [1.2, 8] as const;
-const HEAD_ROTATION_FILTER = [1.5, 4] as const;
+const HEAD_POSITION_FILTER = [1.5, 10] as const;
+const HEAD_ROTATION_FILTER = [2, 6] as const;
 const HAND_POSITION_FILTER = [0.8, 6] as const;
 const HAND_ROTATION_FILTER = [1, 3] as const;
 const FINGER_FILTER = [1.5, 2] as const;
@@ -61,7 +61,21 @@ const EXPRESSION_FILTER = [2.5, 4] as const;
  */
 const HAND_DEPTH_SCALE = 0.6;
 /** 見えなくなった手を体側へ下ろしていく割合(1フレームあたり) */
-const HAND_RETURN_RATE = 0.15;
+const HAND_RETURN_RATE = 0.08;
+/**
+ * 手首が「見える」とみなす推定の確からしさ。入りと出で値を変え(ヒステリシス)、
+ * さらに続けて満たしたフレーム数で切り替える。境目で見える・見えないがぱたぱた切り替わると、
+ * そのたびに下ろした位置と行き来して手がワープする
+ */
+const WRIST_SHOW = 0.65;
+const WRIST_HIDE = 0.35;
+const SHOW_AFTER_FRAMES = 3;
+const HIDE_AFTER_FRAMES = 12;
+/** 1フレームでこれ以上(m)動いた手首は推定の飛びとみなして捨てる。続いたら受け入れる */
+const WRIST_JUMP = 0.18;
+const MAX_JUMP_SKIPS = 4;
+/** 頭からこれ以上(m)離れた手首はあり得ないので縮める(腕の長さの目安) */
+const WRIST_REACH = 0.85;
 /** 推定の速さを表示する間隔 */
 const RATE_REPORT_MS = 1000;
 /** 手が見えないときの指(待機モーションと同じ軽い曲げ) */
@@ -75,6 +89,13 @@ interface HandState {
   positionFilter: OneEuroFilter;
   rotationFilter: OneEuroFilter;
   fingerFilter: OneEuroFilter;
+  /** 手首を追えているか(ヒステリシス付き) */
+  tracked: boolean;
+  /** tracked を切り替える条件を続けて満たしたフレーム数 */
+  streak: number;
+  /** 最後に受け入れた手首の位置(飛び値の判定用) */
+  lastWrist: THREE.Vector3 | null;
+  jumpSkips: number;
 }
 
 const filterOf = ([minCutoff, beta]: readonly [number, number]) =>
@@ -253,24 +274,34 @@ export class WebcamBroadcast {
 
     // 手: 位置は体の推定の手首(頭からの相対)、向き・指は手の推定
     const pose = result.pose;
-    const handOf: Record<'left' | 'right', (typeof result.hands)[number] | null> = {
-      left: null,
-      right: null,
-    };
-    for (const hand of result.hands) handOf[sideOfHand(hand, pose)] = hand;
+    const handOf = assignHands(result.hands, pose);
 
     for (const side of ['left', 'right'] as const) {
       const state = this.hands[side];
       const wrist = pose?.world[side === 'left' ? POSE.leftWrist : POSE.rightWrist];
       const leftEar = pose?.world[POSE.leftEar];
       const rightEar = pose?.world[POSE.rightEar];
-      const visible = (wrist?.visibility ?? 0) > 0.5 && leftEar && rightEar;
+      const visibility = leftEar && rightEar ? (wrist?.visibility ?? 0) : 0;
+      updateTracked(state, visibility);
       let curls: FingerCurls = RELAXED_CURLS;
-      if (visible && wrist) {
-        // 耳の中点(=頭の中心)からの位置を、ワイヤの頭の位置に足す。奥行きは縮める
+      if (state.tracked && wrist && leftEar && rightEar && visibility > WRIST_HIDE) {
+        // 耳の中点(=頭の中心)からの位置。奥行きは縮め、腕の長さを超えないようにする
         toWire(leftEar, _a).add(toWire(rightEar, _b)).multiplyScalar(0.5);
         toWire(wrist, _v).sub(_a);
         _v.z *= HAND_DEPTH_SCALE;
+        if (_v.length() > WRIST_REACH) _v.setLength(WRIST_REACH);
+        // 飛び値は捨てて前の位置を使う(続いたら本当に動いたとみなして受け入れる)
+        if (
+          state.lastWrist &&
+          _v.distanceTo(state.lastWrist) > WRIST_JUMP &&
+          state.jumpSkips < MAX_JUMP_SKIPS
+        ) {
+          state.jumpSkips++;
+          _v.copy(state.lastWrist);
+        } else {
+          state.jumpSkips = 0;
+          (state.lastWrist ??= new THREE.Vector3()).copy(_v);
+        }
         _v.add(this.head.position);
 
         const hand = handOf[side];
@@ -289,6 +320,7 @@ export class WebcamBroadcast {
         }
       } else {
         // 見えない手は体側へ下ろしていく(画面外に出した手で固まらないように)
+        state.lastWrist = null;
         const rest = restHand(side, this.head.position.y);
         _v.copy(state.position).lerp(rest.position, HAND_RETURN_RATE);
         _q.copy(state.rotation).slerp(rest.rotation, HAND_RETURN_RATE);
@@ -339,6 +371,32 @@ export class WebcamBroadcast {
     this.publisher.send(packet, now);
   }
 
+  /**
+   * 手元で推定したいまの姿勢。配信者コンソールのプレビューに直接当てる
+   * (届いた姿を待つと、通信と視聴側の再生の遅れで0.2秒以上もたついて見えるため)
+   */
+  localFrame(): SampledFrame | null {
+    if (!this.active || performance.now() - this.lastFaceAt > FACE_LOST_MS) return null;
+    const node = (position: THREE.Vector3, rotation: THREE.Quaternion) => ({
+      position: [position.x, position.y, position.z] as Vec3,
+      rotation: [rotation.x, rotation.y, rotation.z, rotation.w] as Quat,
+    });
+    return {
+      pose: {
+        head: node(this.head.position, this.head.rotation),
+        leftHand: node(this.hands.left.position, this.hands.left.rotation),
+        rightHand: node(this.hands.right.position, this.hands.right.rotation),
+      },
+      fingers: {
+        leftCurls: this.hands.left.curls,
+        rightCurls: this.hands.right.curls,
+        leftSpread: this.hands.left.spread,
+        rightSpread: this.hands.right.spread,
+      },
+      expressions: this.expressions,
+    };
+  }
+
   /** 前回送った値から変わった表情だけ(視聴側は受け取った値を保持する) */
   private changedExpressions(): ExpressionEntry[] {
     const entries: ExpressionEntry[] = [];
@@ -383,7 +441,21 @@ function restHand(side: 'left' | 'right', headY: number): HandState {
     positionFilter: filterOf(HAND_POSITION_FILTER),
     rotationFilter: filterOf(HAND_ROTATION_FILTER),
     fingerFilter: filterOf(FINGER_FILTER),
+    tracked: false,
+    streak: 0,
+    lastWrist: null,
+    jumpSkips: 0,
   };
+}
+
+/** 手首を追えているかを、入りと出で別のしきい値とフレーム数で切り替える */
+function updateTracked(state: HandState, visibility: number): void {
+  const wantsChange = state.tracked ? visibility < WRIST_HIDE : visibility > WRIST_SHOW;
+  state.streak = wantsChange ? state.streak + 1 : 0;
+  if (state.streak >= (state.tracked ? HIDE_AFTER_FRAMES : SHOW_AFTER_FRAMES)) {
+    state.tracked = !state.tracked;
+    state.streak = 0;
+  }
 }
 
 const _values: number[] = [];

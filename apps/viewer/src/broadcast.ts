@@ -509,7 +509,13 @@ if (!key) {
  * Webカメラ配信(VSeeFace・ブリッジ・HMDなし)。HMD配信と同じく、マイクも一緒に始める
  * (配信者が「声が出ていない」ことに気づきにくいため)
  */
-function setupWebcam(webcam: WebcamBroadcast, statusEl: HTMLElement): void {
+function setupWebcam(
+  webcam: WebcamBroadcast,
+  statusEl: HTMLElement,
+  preview: PreviewHandle,
+): void {
+  // 配信中はプレビューに手元の動きを直接映す(届いた姿は通信の遅れでもたついて見える)
+  preview.setLocalPose(() => webcam.localFrame());
   const button = document.getElementById('p-webcam') as HTMLButtonElement;
   const recalibrate = document.getElementById('p-webcam-recal') as HTMLButtonElement;
   const video = document.getElementById('p-webcam-video') as HTMLVideoElement;
@@ -606,7 +612,7 @@ function setupPreview(): void {
   arButton.addEventListener('click', () => enter('ar', arButton));
   vrButton.addEventListener('click', () => enter('vr', vrButton));
 
-  setupWebcam(webcamBroadcast, previewStatus);
+  setupWebcam(webcamBroadcast, previewStatus, preview);
 
   // 空間パネルからのマイク操作を画面側と同期させる
   preview.onMicToggle = () => {

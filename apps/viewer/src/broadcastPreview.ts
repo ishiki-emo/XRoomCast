@@ -12,7 +12,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { decodePacket } from '@xroomcast/protocol';
 import { Avatar } from '@xroomcast/viewer-core';
-import type { AuthProvider } from '@xroomcast/sync';
+import type { AuthProvider, SampledFrame } from '@xroomcast/sync';
 import type { HmdBroadcast } from './hmdBroadcast';
 import { IdleMotion, blendPose } from '@xroomcast/viewer-core';
 import { PeerPresence, type PeerState } from '@xroomcast/viewer-core';
@@ -45,6 +45,11 @@ export interface PreviewHandle {
   onWristChange: ((axis: 'x' | 'y' | 'z', delta: number) => void) | null;
   setWristLabel(text: string): void;
   setMicLabel(on: boolean): void;
+  /**
+   * 手元の姿勢を直接映す(Webカメラ配信中)。null で、視聴者に届いた姿を映す元の動きに戻る。
+   * 届いた姿は通信と再生の遅れで0.2秒以上遅れるので、自分の動きの確認にはもたついて見える
+   */
+  setLocalPose(source: (() => SampledFrame | null) | null): void;
   /** 鏡の口を動かすマイク音声。マイクの取得・解放に合わせて渡す(nullで口を閉じる) */
   setMicTrack(track: MediaStreamTrack | null): void;
 }
@@ -115,6 +120,7 @@ export function setupBroadcastPreview(options: {
   let currentUrl: string | null = null;
   let liveBlend = 0;
   let lastPacketAt = 0;
+  let localPose: (() => SampledFrame | null) | null = null;
   const micLipSync = new MicLipSync();
   /** リップシンクが口を駆動中か(マイクが止まった瞬間に口を閉じるために持つ) */
   let lipSyncActive = false;
@@ -201,6 +207,7 @@ export function setupBroadcastPreview(options: {
     setWristLabel: (text) => panel.setSectionTitle(1, text),
     setMicLabel: (on) => panel.setActive(on ? 'mic-on' : 'mic-off'),
     setMicTrack: (track) => micLipSync.setTrack(track),
+    setLocalPose: (source) => (localPose = source),
   };
 
   const panel = new SpatialPanel({
@@ -357,8 +364,10 @@ export function setupBroadcastPreview(options: {
     }
 
     if (avatar) {
-      const liveFrame = player.sample(now);
-      const live = Boolean(liveFrame.pose) && now - lastPacketAt < IDLE_AFTER_MS;
+      const localFrame = localPose?.() ?? null;
+      const liveFrame = localFrame ?? player.sample(now);
+      const live =
+        Boolean(liveFrame.pose) && (localFrame !== null || now - lastPacketAt < IDLE_AFTER_MS);
       const step = delta * (1000 / IDLE_BLEND_MS);
       liveBlend = THREE.MathUtils.clamp(liveBlend + (live ? step : -step), 0, 1);
 
