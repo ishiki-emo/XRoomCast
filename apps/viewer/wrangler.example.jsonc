@@ -33,6 +33,9 @@
     // 視聴にもトークンを要求する場合は "1" にする。
     // 未設定なら、ルーム名を知っている人は誰でも視聴できる(匿名視聴)
     // "REQUIRE_VIEWER_TOKEN": "1"
+    // 管理画面を Cloudflare Access のログインで守る場合(SETUP.md 3-1b)。secret で入れてもよい
+    // "ACCESS_TEAM_DOMAIN": "https://<チーム名>.cloudflareaccess.com",
+    // "ACCESS_AUD": "<AccessアプリケーションのAUDタグ>"
   },
   "durable_objects": {
     "bindings": [

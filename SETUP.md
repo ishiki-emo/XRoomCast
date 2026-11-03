@@ -188,7 +188,7 @@ npx wrangler secret put WATCH_KEY                # 視聴URLの鍵
 npx wrangler secret put BROADCAST_KEY            # 配信者コンソールの鍵
 npx wrangler secret put BRIDGE_TOKEN             # ブリッジ登録用
 npx wrangler secret put ROOM_SECRET              # ルーム別URLを作る場合のみ
-npx wrangler secret put ADMIN_KEY                # 運営者の管理画面の鍵
+npx wrangler secret put ADMIN_KEY                # 運営者の管理画面の予備の鍵(3-1b)
 ```
 
 | シークレット | 役割 | 省略 |
@@ -199,7 +199,8 @@ npx wrangler secret put ADMIN_KEY                # 運営者の管理画面の�
 | `BROADCAST_KEY` | 配信者コンソール・アップロード・HMD配信の認可 | 不可 |
 | `BRIDGE_TOKEN` | ブリッジのパブリッシャー登録 | HMD配信のみなら不要 |
 | `ROOM_SECRET` | ルーム別URLの生成、視聴URLの案内、入室証の署名 | **実質必須**(下記) |
-| `ADMIN_KEY` | 運営者の管理画面(`/admin/<キー>`)。全ルームの一覧・ファイル削除・**コメント機能の許可** | 可(未設定なら管理画面は使えず、コメントも使えない) |
+| `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` | 管理画面を Cloudflare Access のログインで守る(3-1b、推奨) | 可(ADMIN_KEY で代替) |
+| `ADMIN_KEY` | 運営者の管理画面の予備の鍵(`/admin/<キー>`)。全ルームの一覧・ファイル削除・**コメント機能の許可** | 可(Access も無ければ管理画面は使えず、コメントも使えない) |
 
 > ⚠️ **`ROOM_SECRET` は設定してください。**
 > ルームを分けない場合でも、以下がこの鍵を使います。
@@ -269,10 +270,12 @@ https://<デプロイ先のURL>/broadcast/<BROADCAST_KEY>
 ### 3-1b. 管理画面を開く(運営者)
 
 ```
-https://<デプロイ先のURL>/admin/<ADMIN_KEY>
+https://<デプロイ先のURL>/admin
 ```
 
-配信者URLとは別の鍵で、運営者だけが使う。できること:
+運営者だけが使う画面。**Cloudflare Access でログインして入る**のを推奨する(下記)。
+Access を設定していない間は、予備の管理者キーで `/admin/<ADMIN_KEY>` から開ける。
+どちらも配信者URLとは別物で、配信者URLでは入れない。できること:
 
 - **コメント機能の許可**(サービス全体で1つ。**既定は許可しない**)。許可しない間は、
   どのルームでも配信者がコメントをオンにできない。視聴者どうしのコメントは他人の通信の
@@ -280,7 +283,32 @@ https://<デプロイ先のURL>/admin/<ADMIN_KEY>
 - **ルームの一覧**(配信中か、視聴者数、使っているアバター・ステージ、設定)
 - ルームにアップロードされた**VRM・ステージモデルの削除**(使用中なら席から外れる)
 
-開くとアドレスバーからキーを消すので、画面共有で映っても鍵は漏れない。
+**Cloudflare Access でログインする(推奨)**
+
+URLに鍵を載せずに済み、総当たり対策やログイン履歴もCloudflare側が持つ。50人まで無料。
+
+1. Cloudflare ダッシュボード → **Zero Trust** → Access → Applications → **Add an application** → **Self-hosted**
+2. 公開先(Application domain)に、デプロイ先のホスト名で次の2つのパスを登録する
+   - `admin`(管理画面のページ)
+   - `api/admin`(管理画面のAPI)
+3. ポリシーで、入ってよい人を決める(例: Include → Emails → 自分のメールアドレス)。
+   ログイン方法は既定のワンタイムPIN(メールに届くコード)でよい
+4. 作ったアプリケーションの **Overview** にある **Application Audience (AUD) Tag** を控える。
+   チームのドメイン(`https://<チーム名>.cloudflareaccess.com`)は Settings → Custom Pages などで確認できる
+5. `apps/viewer` で Worker に登録する
+   ```sh
+   npx wrangler secret put ACCESS_TEAM_DOMAIN   # https://<チーム名>.cloudflareaccess.com
+   npx wrangler secret put ACCESS_AUD           # 4で控えたAUDタグ
+   ```
+6. `https://<デプロイ先のURL>/admin` を開くとログイン画面が出る。ログインすると管理画面の
+   上部に「<メールアドレス> でログイン中」と出る
+
+Worker は Access が付けるJWTの署名・宛先(AUD)・発行元・期限を検証する(ヘッダがあるだけでは通さない)。
+Access で入れることを確かめたら、予備の管理者キーは `npx wrangler secret delete ADMIN_KEY` で消してよい。
+
+**予備: 管理者キーで開く**
+
+`/admin/<ADMIN_KEY>` から開く。開くとアドレスバーからキーを消すので、画面共有で映っても鍵は漏れない。
 ウィザードで構築した場合、完了画面と `apps/viewer/.setup-keys.json` に管理画面URLが出る
 (ウィザード導入より前に構築した環境は、もう一度ウィザードを実行すると鍵が足される。ほかのURLは変わらない)
 

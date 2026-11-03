@@ -86,8 +86,13 @@ function isRoomFileKey(key: string): boolean {
 }
 
 export async function handleAdminApi(request: Request, env: AdminEnv, url: URL): Promise<Response> {
-  if (!(await authorize(env, request, url, { scope: 'admin', room: '' })).ok) {
-    return json(403, { error: 'forbidden(管理者キーが必要です)' });
+  const auth = await authorize(env, request, url, { scope: 'admin', room: '' });
+  if (!auth.ok) {
+    return json(403, { error: 'forbidden(Cloudflare Access のログインか管理者キーが必要です)' });
+  }
+  // Accessのログインは Cookie でも通るので、よそのサイトから送らせる書き込み(CSRF)を断る
+  if (request.method !== 'GET' && request.headers.get('Origin') !== url.origin) {
+    return json(403, { error: 'forbidden(別のサイトからの操作です)' });
   }
 
   // 全体の状態とルーム一覧
@@ -105,7 +110,12 @@ export async function handleAdminApi(request: Request, env: AdminEnv, url: URL):
         }
       }),
     );
-    return json(200, { commentsAllowed: await commentsAllowed(env.SFU_STATE), rooms: statuses });
+    return json(200, {
+      commentsAllowed: await commentsAllowed(env.SFU_STATE),
+      // Accessでログインしていればそのメールアドレス(管理者キーで入ったときは無い)
+      operator: auth.userId ?? null,
+      rooms: statuses,
+    });
   }
 
   // コメント機能の許可。接続中の視聴者へもすぐ反映する(禁止したら表示中のコメントも消える)

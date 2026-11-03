@@ -12,13 +12,16 @@
  *            WATCH_KEY または HMAC(ROOM_SECRET, "watch:<ルーム>")を要求する
  * - ブリッジ: BRIDGE_TOKEN(配信者キーでも代替できる)
  * - VRM配信 : VRM_TOKEN
- * - 運営者 : ADMIN_KEY(管理画面 /admin/<キー>。配信者キーとは別。未設定なら管理画面は使えない)
+ * - 運営者 : Cloudflare Access のログイン(ACCESS_TEAM_DOMAIN + ACCESS_AUD。推奨)または
+ *            ADMIN_KEY(管理画面 /admin/<キー>)。配信者キーでは代替できない。どちらも未設定なら管理画面は使えない
  *
  * クライアント側の対になる差し替え点は src/auth.ts の `createAuth()`。
  */
 
+import { verifyAccess, type AccessEnv } from './access';
+
 /** 認可に関わる環境変数だけを切り出したもの(index.ts の Env はこれを継承する) */
-export interface AuthEnv {
+export interface AuthEnv extends AccessEnv {
   /** R2のVRM配信の照合トークン */
   VRM_TOKEN?: string;
   /** ブリッジのパブリッシャー登録用 */
@@ -40,7 +43,8 @@ export interface AuthEnv {
   REQUIRE_VIEWER_TOKEN?: string;
   /**
    * 運営者の管理画面(/admin/<キー>)の照合キー。配信者キーとは別に持つので、
-   * 配信者URLを渡しても管理画面(コメント機能の許可・全ルームのファイル削除)には入れない
+   * 配信者URLを渡しても管理画面(コメント機能の許可・全ルームのファイル削除)には入れない。
+   * Cloudflare Access を設定したら、URLに鍵を載せないため消してよい(予備の入り口)
    */
   ADMIN_KEY?: string;
 }
@@ -164,7 +168,10 @@ export async function authorize(
   }
 
   if (scope === 'admin') {
-    // 未設定なら管理画面ごと無効(安全側)。配信者キーでは代替できない
+    // Cloudflare Access のログインを優先する。利用者IDはログインしたメールアドレス
+    const email = await verifyAccess(env, request);
+    if (email !== null) return { ok: true, userId: email || undefined };
+    // 予備の入り口。未設定なら使えない(安全側)。配信者キーでは代替できない
     if (!env.ADMIN_KEY) return DENIED;
     return timingSafeEqual(env.ADMIN_KEY, readCredential(request, url, ['key'])) ? OK : DENIED;
   }

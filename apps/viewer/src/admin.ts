@@ -1,11 +1,13 @@
 /**
- * 運営者の管理画面(/admin/<管理者キー> → admin.html?key=)。
+ * 運営者の管理画面(/admin)。
  *
  * - コメント機能の許可(サービス全体)。既定は許可しない
  * - ルームの一覧(配信中か・視聴者数・設定・使っているアバターとステージ)
  * - ルームにアップロードされたVRM・ステージモデルの削除
  *
- * 管理者キーは配信者キーとは別物(Worker の ADMIN_KEY)。APIは /api/admin/*
+ * 入り方は2つ。**Cloudflare Access で /admin と /api/admin を保護してログインする**(推奨。
+ * URLに鍵が載らない)か、予備の管理者キーで /admin/<キー> から開く(Worker の ADMIN_KEY)。
+ * どちらも配信者キーとは別物。APIは /api/admin/*
  */
 import type { RoomSettings, StageState } from './config';
 
@@ -69,7 +71,8 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
     ...init,
     headers: {
-      Authorization: `Bearer ${key}`,
+      // Accessでログインしていれば、認証はCookieに載って届く(キーは要らない)
+      ...(key ? { Authorization: `Bearer ${key}` } : {}),
       ...(init.body ? { 'Content-Type': 'application/json' } : {}),
     },
   });
@@ -231,14 +234,17 @@ function renderRooms(rooms: RoomStatus[]): void {
 
 async function refresh(): Promise<void> {
   try {
-    const data = await api<{ commentsAllowed: boolean; rooms: RoomStatus[] }>(
-      '/api/admin/overview',
-    );
+    const data = await api<{
+      commentsAllowed: boolean;
+      operator?: string | null;
+      rooms: RoomStatus[];
+    }>('/api/admin/overview');
     renderPolicy(data.commentsAllowed);
     latestRooms = data.rooms;
     renderRooms(latestRooms);
     const live = latestRooms.filter((r) => (r.publishers?.length ?? 0) > 0).length;
-    setStatus(`ルーム ${latestRooms.length} 件(配信中 ${live} 件)`);
+    const who = data.operator ? `${data.operator} でログイン中 / ` : '';
+    setStatus(`${who}ルーム ${latestRooms.length} 件(配信中 ${live} 件)`);
     updatedEl.textContent = `${new Date().toLocaleTimeString()} 時点`;
   } catch (error) {
     setStatus(String(error instanceof Error ? error.message : error), true);
@@ -273,13 +279,9 @@ allowButton.addEventListener('click', () => void setPolicy(true));
 denyButton.addEventListener('click', () => void setPolicy(false));
 reloadButton.addEventListener('click', () => void refresh());
 
-if (!key) {
-  setStatus('URLに管理者キーがありません(/admin/<キー> から開いてください)', true);
-  allowButton.disabled = denyButton.disabled = reloadButton.disabled = true;
-} else {
-  void refresh();
-  window.setInterval(() => {
-    // ファイル一覧を見ている最中に並びが変わらないよう、開いていないときだけ自動更新する
-    if (openFiles.size === 0 && document.visibilityState === 'visible') void refresh();
-  }, REFRESH_MS);
-}
+// キーが無くても試す(Accessでログインしていれば通る)。断られたら理由がそのまま出る
+void refresh();
+window.setInterval(() => {
+  // ファイル一覧を見ている最中に並びが変わらないよう、開いていないときだけ自動更新する
+  if (openFiles.size === 0 && document.visibilityState === 'visible') void refresh();
+}, REFRESH_MS);
