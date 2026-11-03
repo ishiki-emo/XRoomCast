@@ -497,14 +497,20 @@ function setupWristTuner(preview?: PreviewHandle): void {
     angles[axis] = ((angles[axis] + delta + 540) % 360) - 180;
     apply();
   };
-  if (preview) preview.onWristChange = step;
+  const reset = (): void => {
+    Object.assign(angles, DEFAULT_WRIST_OFFSET);
+    apply();
+  };
+  if (preview) {
+    preview.onWristChange = step;
+    preview.onWristReset = reset;
+  }
 
   for (const button of row.querySelectorAll<HTMLButtonElement>('[data-wrist]')) {
     button.addEventListener('click', () => {
       const action = button.dataset.wrist ?? '';
       if (action === 'reset') {
-        Object.assign(angles, DEFAULT_WRIST_OFFSET);
-        apply();
+        reset();
       } else {
         step(action[0] as 'x' | 'y' | 'z', action.endsWith('+') ? STEP : -STEP);
       }

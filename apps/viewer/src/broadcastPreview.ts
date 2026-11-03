@@ -18,7 +18,7 @@ import { IdleMotion, blendPose } from '@xroomcast/viewer-core';
 import { PeerPresence, type PeerState } from '@xroomcast/viewer-core';
 import { PoseStreamPlayer } from '@xroomcast/sync';
 import { SfuTransport } from '@xroomcast/sync';
-import { SpatialPanel } from './spatialUI';
+import { SpatialPanel, type PanelSection } from './spatialUI';
 import { XrPanelController } from './xrPanelController';
 import { MicLipSync } from './micLipSync';
 
@@ -48,6 +48,8 @@ export interface PreviewHandle {
   /** パネルの配信の開始/停止の表示を、実際の状態に合わせる */
   setBroadcastLabel(on: boolean): void;
   onWristChange: ((axis: 'x' | 'y' | 'z', delta: number) => void) | null;
+  /** 手首の向きを既定に戻す(HMD内パネルから) */
+  onWristReset: (() => void) | null;
   setWristLabel(text: string): void;
   setMicLabel(on: boolean): void;
   /**
@@ -241,15 +243,15 @@ export function setupBroadcastPreview(options: {
     onBroadcastStop: null,
     setBroadcastLabel: (on) => panel.setActive(on ? 'broadcast-on' : 'broadcast-off'),
     onWristChange: null,
-    setWristLabel: (text) => panel.setSectionTitle(1, text),
+    onWristReset: null,
+    // 見出しは欄を番号ではなく中身で探して書き換える(欄を足すと番号がずれ、別の欄の見出しを上書きしていた)
+    setWristLabel: (text) => panel.setSectionTitle(wristSection, text),
     setMicLabel: (on) => panel.setActive(on ? 'mic-on' : 'mic-off'),
     setMicTrack: (track) => micLipSync.setTrack(track),
     setLocalPose: (source) => (localPose = source),
   };
 
-  const panel = new SpatialPanel({
-    title: '配信',
-    sections: [
+  const panelSections: PanelSection[] = [
       {
         title: 'アバター',
         options: [{ label: '位置を合わせ直す', value: 'recalibrate', action: true }],
@@ -278,15 +280,27 @@ export function setupBroadcastPreview(options: {
         },
       },
       {
+        // 軸ごとに −/＋ を別のボタンにする(1つのボタンで一周させると、戻すのに何回も押す必要があった)
         title: '手首',
+        columns: 2,
         options: [
-          { label: 'X −15 / ＋15', value: 'wrist-x', action: true },
-          { label: 'Y −15 / ＋15', value: 'wrist-y', action: true },
-          { label: 'Z −15 / ＋15', value: 'wrist-z', action: true },
+          { label: 'X −15°', value: 'wrist-x-', action: true },
+          { label: 'X ＋15°', value: 'wrist-x+', action: true },
+          { label: 'Y −15°', value: 'wrist-y-', action: true },
+          { label: 'Y ＋15°', value: 'wrist-y+', action: true },
+          { label: 'Z −15°', value: 'wrist-z-', action: true },
+          { label: 'Z ＋15°', value: 'wrist-z+', action: true },
+          { label: '既定に戻す', value: 'wrist-reset', action: true },
         ],
         initial: '',
-        // 同じボタンで送り、一周したら戻る(空間では細かいボタンを増やしにくい)
-        onSelect: (value) => handle.onWristChange?.(value.slice(-1) as 'x' | 'y' | 'z', 15),
+        onSelect: (value) => {
+          if (value === 'wrist-reset') {
+            handle.onWristReset?.();
+            return;
+          }
+          const axis = value.charAt(6) as 'x' | 'y' | 'z';
+          handle.onWristChange?.(axis, value.endsWith('+') ? 15 : -15);
+        },
       },
       {
         // 「手で切替」はジェスチャーに割り当てた表情、ほかは選んだ表情に固定(ジェスチャーより優先)
@@ -331,8 +345,9 @@ export function setupBroadcastPreview(options: {
         initial: '',
         onSelect: () => exitHmd(),
       },
-    ],
-  });
+  ];
+  const wristSection = panelSections.findIndex((section) => section.title === '手首');
+  const panel = new SpatialPanel({ title: '配信', sections: panelSections });
   // 鏡は右前方に出すので、パネルは左前方の手が届く距離へ(向きはshow()が合わせる)
   panel.arPlacement = { position: new THREE.Vector3(0.45, 1.15, 0.7), yaw: 0 };
   const panelController = new XrPanelController(renderer, scene, [panel]);
