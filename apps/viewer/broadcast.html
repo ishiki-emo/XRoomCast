@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎙</text></svg>" />
-    <title>配信者コンソール</title>
+    <title>配信者コンソール | XRoomCast</title>
     <!-- 丸ゴシックの文字(読めなければ端末の丸ゴシック・ゴシックで表示する) -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -90,6 +90,24 @@
         max-width: 560px;
         margin: 0 auto;
         padding: 28px 16px 40px;
+      }
+      /* サービス名のロゴ。見出しの上に小さく、グラデーションの丸い札で出す */
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0 0 10px;
+        padding: 4px 14px 4px 10px;
+        border-radius: 999px;
+        background: var(--gradient);
+        color: #fff;
+        font-size: 14px;
+        font-weight: 800;
+        letter-spacing: 0.06em;
+        box-shadow: 0 4px 12px rgba(180, 140, 255, 0.3);
+      }
+      .brand-mark {
+        font-size: 12px;
       }
       h1 {
         font-size: 26px;
@@ -651,6 +669,7 @@
   </head>
   <body>
     <div id="wrap">
+      <div class="brand"><span class="brand-mark">✦</span>XRoomCast</div>
       <h1>🎙 <span class="title">配信者コンソール</span></h1>
       <p class="sub" id="b-room">このページを開いている間だけ、マイク音声が視聴ページへ配信されます</p>
       <div id="layout">
