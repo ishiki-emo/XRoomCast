@@ -6,7 +6,8 @@
  * 設定項目が増えたため複数セクションを1枚にまとめられる構造にしている
  * (パネルを何枚も浮かべると視界が埋まるため)。
  * さらに増えたときは、セクションをタブに分けて1タブずつ見せられる(tabs)。
- * パネルの大きさは開いているタブの中身に合わせる
+ * パネルの大きさはいちばん中身の多いタブに合わせて、どのタブでも変えない(タブを替えるたびに大きさが
+ * 変わると、ボタンの位置が動いて戸惑うため)
  */
 import * as THREE from 'three';
 
@@ -165,9 +166,9 @@ export class SpatialPanel implements ArPanel {
     this.redraw();
   }
 
-  /** いま見えている中身の高さ(キャンバスのpx) */
+  /** いま見えている中身の高さ(キャンバスのpx)。タブによらず同じ大きさにする */
   private get visibleHeight(): number {
-    return this.tabHeights[this.currentTab] ?? this.canvasHeight;
+    return this.canvasHeight;
   }
 
   /** パネルの高さ(m)。手に載せるときの置き場所の計算に使う */
@@ -175,10 +176,7 @@ export class SpatialPanel implements ArPanel {
     return (this.panelWidth * this.visibleHeight) / CANVAS_W;
   }
 
-  /**
-   * 開いているタブの高さにパネルを縮める。キャンバスの上から見えている高さぶんだけを貼り、
-   * 板もその高さにする(タブごとに中身の量が違うので、空いた下側を出さない)
-   */
+  /** 見えている高さに板を合わせ、置き場所の基準(中央か下辺)を決める */
   private layoutTab(): void {
     const ratio = this.visibleHeight / this.canvasHeight;
     this.texture.repeat.set(1, ratio);

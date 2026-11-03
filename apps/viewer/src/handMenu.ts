@@ -5,7 +5,7 @@
  * - 素手: 手のひらを顔に向けると、その手の上に開く。手のひらを返すと閉じる
  * - 選ぶのは反対の手のビーム(メニューを持っている手のビームは使わない。XrPanelController の exclude)
  *
- * パネルは手の上に、顔の方を向けて置く(手首をひねっても読みやすいように、向きは手ではなく頭に合わせる)
+ * パネルは手先寄りに、手と一緒に回るように置く(手首をひねるとパネルも傾く。VRChat と同じ)
  */
 import * as THREE from 'three';
 import type { SpatialPanel } from './spatialUI';
@@ -20,8 +20,19 @@ const PALM_CLOSE = 0.45;
 /** 手のひらの向きが続いたら開く・閉じるまでの時間(ms)。手を振ったときに一瞬開くのを防ぐ */
 const PALM_OPEN_MS = 250;
 const PALM_CLOSE_MS = 400;
-/** 手からパネルの下辺までの高さ(m) */
-const LIFT = 0.06;
+/**
+ * コントローラで持つときの、グリップ(握った手の中心)から見たパネルの下辺の位置(m)。
+ * グリップの -Z が手先(コントローラの先)、+Y が手の甲の上側。手先へ出して、少し上に浮かせる
+ */
+const GRIP_OFFSET = new THREE.Vector3(0, 0.03, -0.08);
+/**
+ * コントローラで持つときのパネルの傾き。グリップの向きのままだと、パネルの表(+Z)が水平に手前を向くが、
+ * 目は手より上にあるので、上へ30°起こして見上げる向きにする
+ */
+const GRIP_TILT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 6);
+/** 素手で持つときの、手のひらの中心から指先の方向・手のひらの前への出し方(m) */
+const PALM_FORWARD = 0.09;
+const PALM_OUT = 0.03;
 /** 手の揺れを少しだけならす割合(1フレームあたり。1で手にぴったり) */
 const FOLLOW = 0.6;
 
@@ -30,9 +41,10 @@ const _hand = new THREE.Vector3();
 const _a = new THREE.Vector3();
 const _b = new THREE.Vector3();
 const _palm = new THREE.Vector3();
+const _side = new THREE.Vector3();
 const _matrix = new THREE.Matrix4();
 const _quat = new THREE.Quaternion();
-const UP = new THREE.Vector3(0, 1, 0);
+const _target = new THREE.Quaternion();
 
 export class HandMenu {
   /** メニューを持っている手(閉じているときは null) */
@@ -70,6 +82,7 @@ export class HandMenu {
     _head.set(p.x, p.y, p.z);
     const now = performance.now();
     let anchor: THREE.Vector3 | null = null;
+    // anchor が決まったら、パネルの向きは _target に入れる
 
     for (const source of session.inputSources) {
       const side = source.handedness;
@@ -103,8 +116,16 @@ export class HandMenu {
           } else {
             this.palmAwaySince = null;
           }
-          // 手のひらの少し手前、上側に出す
-          anchor = _hand.copy(palm.center).addScaledVector(palm.normal, 0.04);
+          // 手のひらの前、指先寄りに出す。パネルの上は指先の方向、表は手のひらの向き
+          // (手のひらと一緒に回るので、手首をひねるとパネルも傾く)
+          anchor = _hand
+            .copy(palm.center)
+            .addScaledVector(palm.fingers, PALM_FORWARD)
+            .addScaledVector(palm.normal, PALM_OUT);
+          _side.crossVectors(palm.fingers, palm.normal).normalize();
+          _b.crossVectors(palm.normal, _side);
+          _matrix.makeBasis(_side, _b, palm.normal);
+          _target.setFromRotationMatrix(_matrix);
         }
         continue;
       }
@@ -124,8 +145,12 @@ export class HandMenu {
       if (this.holder === side && source.gripSpace) {
         const pose = frame.getPose(source.gripSpace, refSpace);
         if (pose) {
-          const g = pose.transform.position;
-          anchor = _hand.set(g.x, g.y, g.z);
+          // グリップと一緒に回す(手首をひねるとパネルも傾く)
+          const g = pose.transform.orientation;
+          _target.set(g.x, g.y, g.z, g.w);
+          const t = pose.transform.position;
+          anchor = _hand.copy(GRIP_OFFSET).applyQuaternion(_target).add(_b.set(t.x, t.y, t.z));
+          _target.multiply(GRIP_TILT);
         }
       }
     }
@@ -137,28 +162,30 @@ export class HandMenu {
       this.placed = false;
       return;
     }
-    anchor.y += LIFT;
     const object = this.panel.object;
-    if (this.placed) object.position.lerp(anchor, FOLLOW);
-    else object.position.copy(anchor);
-    // 顔の方へ向ける(パネルの表は +Z)。上下の傾きも付けて、見下ろしたときに正対する
-    _matrix.lookAt(_head, object.position, UP);
-    _quat.setFromRotationMatrix(_matrix);
+    if (this.placed) {
+      object.position.lerp(anchor, FOLLOW);
+      _quat.copy(object.quaternion).slerp(_target, FOLLOW);
+    } else {
+      object.position.copy(anchor);
+      _quat.copy(_target);
+    }
     this.panel.show(object.position, _quat);
     this.placed = true;
   }
 }
 
 /**
- * 手のひらの中心と、手のひらが向いている方向。
- * 手首から人差し指・小指の付け根への向きの外積で求める(右手は index × pinky が手のひら側。左手は逆)
+ * 手のひらの中心と、手のひらが向いている方向、指先の方向。
+ * 手のひらの向きは、手首から人差し指・小指の付け根への向きの外積で求める(右手は index × pinky が手のひら側。左手は逆)。
+ * 指先の方向は手首から中指の付け根へ
  */
 function readPalm(
   frame: XRFrame,
   hand: XRHand,
   side: Side,
   refSpace: XRReferenceSpace,
-): { center: THREE.Vector3; normal: THREE.Vector3 } | null {
+): { center: THREE.Vector3; normal: THREE.Vector3; fingers: THREE.Vector3 } | null {
   const wristSpace = hand.get('wrist');
   const indexSpace = hand.get('index-finger-metacarpal');
   const pinkySpace = hand.get('pinky-finger-metacarpal');
@@ -180,5 +207,6 @@ function readPalm(
   return {
     center: new THREE.Vector3((w.x + m.x) / 2, (w.y + m.y) / 2, (w.z + m.z) / 2),
     normal: _palm.clone(),
+    fingers: new THREE.Vector3(m.x - w.x, m.y - w.y, m.z - w.z).normalize(),
   };
 }
