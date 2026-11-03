@@ -23,7 +23,8 @@ import {
   type AuthEnv,
   type AuthScope,
 } from './auth';
-import { ROOM_INDEX_PREFIX, commentsAllowed, handleAdminApi } from './admin';
+import { commentsAllowed, handleAdminApi } from './admin';
+import { DEFAULT_ROOM, ROOM_PATTERN, isOpen, readRoom } from './rooms';
 
 interface Env extends AuthEnv {
   ASSETS: Fetcher;
@@ -42,12 +43,7 @@ const DATA_CHANNEL_NAME = 'pose';
 const PUBLISHER_FRESH_MS = 15 * 60 * 1000;
 
 // Workerのモジュールexportはハンドラ/Durable Objectクラスのみ許されるため定数はexportしない
-const DEFAULT_ROOM = 'main';
-/**
- * ルーム名はDurable Objectの名前・KVキーの一部になるため文字種を制限する。
- * ビューア側(src/config.ts)にも同じ規則がある
- */
-const ROOM_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+// (既定ルーム名とルーム名の規則は、管理画面のAPIと共有するため rooms.ts に置いている)
 
 function normalizeRoom(value: string | null | undefined): string {
   const room = (value ?? '').trim();
@@ -113,7 +109,42 @@ function vrmUrlFor(key: string, token: string): string {
 }
 
 /** 短縮URLの解決に渡すルーム名の規則(auth.tsは文字種を知らない) */
-const SHORT_LINK_OPTIONS = { defaultRoom: DEFAULT_ROOM, normalizeRoom };
+/** ルームのURLの世代(台帳)。開設していないルームは0(どのみち入口で断る) */
+async function roomGeneration(env: Env, room: string): Promise<number> {
+  return (await readRoom(env.SFU_STATE, room, DEFAULT_ROOM))?.gen ?? 0;
+}
+
+function shortLinkOptions(env: Env) {
+  return {
+    defaultRoom: DEFAULT_ROOM,
+    normalizeRoom,
+    generationOf: (room: string) => roomGeneration(env, room),
+  };
+}
+
+/** ルームを指定して使うAPI。開設していない・閉鎖したルームはここで断る */
+function isRoomScopedApi(pathname: string): boolean {
+  return (
+    pathname === '/api/presence' ||
+    pathname === '/api/room-settings' ||
+    pathname === '/api/peer-mode' ||
+    pathname === '/api/avatar' ||
+    pathname === '/api/stage' ||
+    pathname.startsWith('/api/sfu/') ||
+    pathname.startsWith('/api/vrm/') ||
+    pathname.startsWith('/api/stage/')
+  );
+}
+
+const ROOM_NOT_OPEN = 'このルームは開設されていません(閉鎖されたか、まだ開設されていません)';
+
+/** 閉鎖・未開設のルームの短縮URLを開いたとき */
+function roomClosedPage(): Response {
+  return new Response(
+    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>XRoomCast</title><body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#141414;color:#eee;font-family:system-ui,sans-serif"><p>${ROOM_NOT_OPEN}</p></body>`,
+    { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } },
+  );
+}
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -247,7 +278,8 @@ async function allows(
   scope: AuthScope,
   room: string,
 ): Promise<boolean> {
-  return (await authorize(env, request, url, { scope, room })).ok;
+  const generation = await roomGeneration(env, room);
+  return (await authorize(env, request, url, { scope, room, generation })).ok;
 }
 
 /**
@@ -261,6 +293,7 @@ async function authorizeViewer(env: Env, request: Request, url: URL, room: strin
     scope: 'viewer',
     room,
     requireViewerToken: guard.access === undefined ? undefined : guard.access === 'invite',
+    generation: await roomGeneration(env, room),
   });
 }
 
@@ -830,8 +863,6 @@ const CHAT_HISTORY_KEY = 'chat-history';
  * 電気通信事業法まわりの配慮で既定をオフにしたので、選んだ事実だけを別に持つ
  */
 const CHAT_ENABLED_KEY = 'chat-enabled';
-/** 管理画面のルーム一覧(KVの索引)へ載せ済みか */
-const ROOM_INDEXED_KEY = 'room-indexed';
 const CHAT_HISTORY_MAX = 50;
 const CHAT_TEXT_MAX = 200;
 const CHAT_MIN_INTERVAL_MS = 1000;
@@ -1001,10 +1032,23 @@ export class Presence extends DurableObject<Env> {
     if (roomParam && (await this.ctx.storage.get<string>(ROOM_NAME_KEY)) !== roomParam) {
       await this.ctx.storage.put(ROOM_NAME_KEY, roomParam);
     }
-    // 管理画面のルーム一覧のため、初めて名前を知ったときに一度だけKVへ載せる
-    if (roomParam && !(await this.ctx.storage.get<boolean>(ROOM_INDEXED_KEY))) {
-      await this.env.SFU_STATE.put(`${ROOM_INDEX_PREFIX}${roomParam}`, String(Date.now()));
-      await this.ctx.storage.put(ROOM_INDEXED_KEY, true);
+    // 運営者がルームを閉鎖したとき。新しく来る人は入口(台帳)で断られるので、
+    // ここでは接続中の人を止める。視聴側は緊急停止と同じく自分から購読をやめる
+    if (path === '/close') {
+      await this.applySettings({ stopped: true });
+      for (const socket of this.ctx.getWebSockets()) {
+        try {
+          socket.close(4003, 'room closed');
+        } catch {
+          // 既に閉じている
+        }
+      }
+      return new Response(null, { status: 204 });
+    }
+    // 再開設。閉鎖のときに立てた停止を戻す
+    if (path === '/reopen') {
+      await this.applySettings({ stopped: false });
+      return new Response(null, { status: 204 });
     }
 
     // 管理画面(Worker本体が管理者キーを検証したうえで呼ぶ内部API)
@@ -1612,6 +1656,14 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
+    // 開設していない・閉鎖したルームは、どの経路でも使わせない(台帳は運営者が管理画面で持つ)
+    if (isRoomScopedApi(url.pathname) && request.method !== 'OPTIONS') {
+      const room = normalizeRoom(url.searchParams.get('room'));
+      if (!isOpen(await readRoom(env.SFU_STATE, room, DEFAULT_ROOM))) {
+        return json(403, { error: ROOM_NOT_OPEN, roomClosed: true });
+      }
+    }
+
     // 同接カウント+コメント(WebSocket)。ルームごとのDurable Objectへ委譲する。
     // 既定ルームは 'main' なので、ルーム導入前のインスタンス(履歴含む)を引き継ぐ
     if (url.pathname === '/api/presence') {
@@ -1656,7 +1708,7 @@ export default {
       const data = (await result.json()) as Record<string, unknown>;
       // 案内用の視聴URL。視聴トークンは配信トークンと別導出なので、
       // 配信者が自分で計算することはできずサーバーが渡す
-      const watchPath = await watchPathFor(env, room, DEFAULT_ROOM);
+      const watchPath = await watchPathFor(env, room, DEFAULT_ROOM, await roomGeneration(env, room));
       return json(result.status, {
         ...data,
         watchUrl: watchPath ? `${url.origin}${watchPath}` : null,
@@ -1683,8 +1735,17 @@ export default {
     // 開くだけで、VRMトークン入りの視聴パラメータ付きURLへリダイレクトする
     // (秘密はすべてWorker側に置く)
     if (url.pathname.startsWith('/watch/')) {
-      const resolved = await resolveShortLink(env, 'watch', url.pathname, '/watch/', SHORT_LINK_OPTIONS);
+      const resolved = await resolveShortLink(
+        env,
+        'watch',
+        url.pathname,
+        '/watch/',
+        shortLinkOptions(env),
+      );
       if (!resolved) return new Response('not found', { status: 404 });
+      if (!isOpen(await readRoom(env.SFU_STATE, resolved.room, DEFAULT_ROOM))) {
+        return roomClosedPage();
+      }
       const vrmKey = env.DEFAULT_VRM_KEY ?? 'avatar.vrm';
       const vrmParam = encodeURIComponent(`/vrm/${vrmKey}?k=${env.VRM_TOKEN ?? ''}`);
       const roomParam = encodeURIComponent(resolved.room);
@@ -1717,9 +1778,12 @@ export default {
         'broadcast',
         url.pathname,
         '/broadcast/',
-        SHORT_LINK_OPTIONS,
+        shortLinkOptions(env),
       );
       if (!resolved) return new Response('not found', { status: 404 });
+      if (!isOpen(await readRoom(env.SFU_STATE, resolved.room, DEFAULT_ROOM))) {
+        return roomClosedPage();
+      }
       const keyParam = encodeURIComponent(resolved.key);
       const roomParam = encodeURIComponent(resolved.room);
       return Response.redirect(

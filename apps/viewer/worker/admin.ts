@@ -4,14 +4,24 @@
  * - コメント機能の許可(サービス全体で1つ)。**既定は許可しない。**
  *   電気通信事業の届出をしていない運営者が、配信者のうっかりでコメント(=他人の通信の媒介)を
  *   始めてしまわないよう、許可していない間は配信者コンソールからオンにできない
+ * - ルームの開設・閉鎖と、視聴URL・配信者URLの発行(rooms.ts の台帳)
  * - ルームの一覧(配信者・視聴者の数、設定、使っているアバター・ステージ)
  * - ルームにアップロードされたVRM・ステージモデルの一覧と削除
  *
- * ルームの一覧はサーバーが持っていないため、次の3つを合わせて作る:
- * Presence DO が初めて名前を知ったときに書く `room:<ルーム>`(KV)、
- * 配信者の登録の写し `publisher:<ルーム>`(KV)、R2 の `rooms/<ルーム>/` 接頭辞
+ * 一覧には台帳 `room:<ルーム>`(KV)に加えて、配信者の登録の写し `publisher:<ルーム>`(KV)と
+ * R2 の `rooms/<ルーム>/` 接頭辞にあるルームも出す(台帳を入れる前から使われていて、
+ * まだ開設の記録が無いルームを見落とさないため)
  */
-import { authorize, type AuthEnv } from './auth';
+import { authorize, broadcastPathFor, watchPathFor, type AuthEnv } from './auth';
+import {
+  DEFAULT_ROOM,
+  ROOM_INDEX_PREFIX,
+  ROOM_PATTERN,
+  closeRoom,
+  isOpen,
+  openRoom,
+  readRoom,
+} from './rooms';
 
 export interface AdminEnv extends AuthEnv {
   VRM_BUCKET: R2Bucket;
@@ -21,8 +31,6 @@ export interface AdminEnv extends AuthEnv {
 
 /** コメント機能を許可しているか(KV)。'1' のときだけ許可 */
 const COMMENTS_POLICY_KEY = 'admin:comments-allowed';
-/** ルームの索引(KV)。値は最初に見えた時刻 */
-export const ROOM_INDEX_PREFIX = 'room:';
 const PUBLISHER_PREFIX = 'publisher:';
 const ROOM_FILES_PREFIX = 'rooms/';
 
@@ -73,7 +81,7 @@ async function knownRooms(env: AdminEnv): Promise<string[]> {
     listKvNames(env.SFU_STATE, PUBLISHER_PREFIX),
     listFileRooms(env.VRM_BUCKET),
   ]);
-  return [...new Set([...indexed, ...publishing, ...withFiles])].sort();
+  return [...new Set([DEFAULT_ROOM, ...indexed, ...publishing, ...withFiles])].sort();
 }
 
 /** ルームファイルのキーとして正しいか(rooms/<ルーム>/... 以外は消させない) */
@@ -108,7 +116,8 @@ export async function handleAdminApi(request: Request, env: AdminEnv, url: URL):
           const res = await presence(env, room).fetch(
             `https://presence.internal/admin-status?room=${encodeURIComponent(room)}`,
           );
-          return { room, ...((await res.json()) as Record<string, unknown>) };
+          const record = await readRoom(env.SFU_STATE, room, DEFAULT_ROOM, { fresh: true });
+          return { room, record, ...((await res.json()) as Record<string, unknown>) };
         } catch (error) {
           return { room, error: String(error) };
         }
@@ -118,6 +127,8 @@ export async function handleAdminApi(request: Request, env: AdminEnv, url: URL):
       commentsAllowed: await commentsAllowed(env.SFU_STATE),
       // Accessでログインしていればそのメールアドレス(管理者キーで入ったときは無い)
       operator: auth.userId ?? null,
+      // ROOM_SECRET が無いと、ルームごとの視聴URL・配信者URLを発行できない
+      canIssueLinks: Boolean(env.ROOM_SECRET),
       rooms: statuses,
     });
   }
@@ -139,6 +150,57 @@ export async function handleAdminApi(request: Request, env: AdminEnv, url: URL):
       ),
     );
     return json(200, { commentsAllowed: body.allowed });
+  }
+
+  // ルームの開設。閉鎖していたルームはURLの世代を上げて作り直す
+  if (request.method === 'POST' && url.pathname === '/api/admin/rooms/open') {
+    const body = (await request.json()) as { room?: unknown };
+    const room = typeof body.room === 'string' ? body.room.trim() : '';
+    if (!ROOM_PATTERN.test(room)) {
+      return json(400, { error: 'ルーム名は英数字・-・_ の64文字以内にしてください' });
+    }
+    const { record, reopened } = await openRoom(env.SFU_STATE, room, DEFAULT_ROOM);
+    if (reopened) {
+      await presence(env, room).fetch(
+        `https://presence.internal/reopen?room=${encodeURIComponent(room)}`,
+        { method: 'POST' },
+      );
+    }
+    return json(200, { room, record, reopened });
+  }
+
+  // ルームの閉鎖。台帳を閉じて新しく来る人を断り、接続中の人はDOが止める
+  if (request.method === 'POST' && url.pathname === '/api/admin/rooms/close') {
+    const body = (await request.json()) as { room?: unknown };
+    const room = typeof body.room === 'string' ? body.room : '';
+    if (!ROOM_PATTERN.test(room)) return json(400, { error: 'room が不正です' });
+    const record = await closeRoom(env.SFU_STATE, room, DEFAULT_ROOM);
+    if (!record) return json(404, { error: 'このルームは開設されていません' });
+    await presence(env, room).fetch(
+      `https://presence.internal/close?room=${encodeURIComponent(room)}`,
+      { method: 'POST' },
+    );
+    return json(200, { room, record });
+  }
+
+  // 開設中のルームの視聴URLと配信者URL(今の世代で計算する)
+  if (request.method === 'GET' && url.pathname === '/api/admin/rooms/links') {
+    const room = url.searchParams.get('room') ?? '';
+    if (!ROOM_PATTERN.test(room)) return json(400, { error: 'room が不正です' });
+    const record = await readRoom(env.SFU_STATE, room, DEFAULT_ROOM, { fresh: true });
+    if (!isOpen(record)) return json(409, { error: 'このルームは開設されていません' });
+    const [watch, broadcast] = await Promise.all([
+      watchPathFor(env, room, DEFAULT_ROOM, record.gen),
+      broadcastPathFor(env, room, record.gen),
+    ]);
+    if (!watch || !broadcast) {
+      return json(503, { error: 'ROOM_SECRET が未設定のため、ルームのURLを発行できません' });
+    }
+    return json(200, {
+      room,
+      watch: `${url.origin}${watch}`,
+      broadcast: `${url.origin}${broadcast}`,
+    });
   }
 
   // ルームのファイル(VRM・ステージ)

@@ -182,6 +182,88 @@
         color: #777;
         font-size: 13px;
       }
+      button.primary {
+        background: #2d4a2d;
+      }
+      input[type='text'],
+      .link input {
+        flex: 1 1 18em;
+        min-width: 0;
+        padding: 8px 10px;
+        font-size: 13px;
+        border-radius: 8px;
+        border: 1px solid #444;
+        background: #1e1e1e;
+        color: #eee;
+      }
+      .badge.open {
+        background: #1f3a26;
+        color: #8fa;
+      }
+      /* ルームの視聴URL・配信者URL */
+      .links {
+        margin-top: 10px;
+        display: grid;
+        gap: 12px;
+      }
+      .link-label {
+        font-size: 13px;
+        color: #bbb;
+      }
+      .link-label.secret {
+        color: #ff9d9d;
+        font-weight: bold;
+      }
+      .qr img {
+        display: block;
+        margin-top: 8px;
+        background: #fff;
+        padding: 6px;
+        border-radius: 6px;
+      }
+      /* 全画面のQR(会場掲示・Questのカメラで読む) */
+      #qr-stage[hidden] {
+        display: none !important;
+      }
+      #qr-stage {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        background: #fff;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        cursor: zoom-out;
+      }
+      #qr-stage .qr img {
+        width: min(80vw, 66vh);
+        height: min(80vw, 66vh);
+        padding: 0;
+        image-rendering: pixelated; /* 拡大してもエッジをぼかさない */
+      }
+      #qr-stage .title {
+        color: #111;
+        font-size: clamp(16px, 2.4vw, 28px);
+        font-weight: bold;
+        text-align: center;
+        padding: 0 16px;
+      }
+      #qr-stage.secret .title {
+        color: #b00020;
+      }
+      #qr-stage .url {
+        color: #111;
+        font-size: clamp(14px, 2.2vw, 22px);
+        word-break: break-all;
+        text-align: center;
+        padding: 0 16px;
+      }
+      #qr-stage .close {
+        color: #666;
+        font-size: 13px;
+      }
     </style>
   </head>
   <body>
@@ -207,20 +289,35 @@
 
       <h2>📡 ルーム</h2>
       <div class="row">
+        <input id="r-new" type="text" maxlength="64" placeholder="新しいルーム名(英数字・-・_)" />
+        <button id="r-open" class="primary">ルームを開設</button>
+      </div>
+      <div class="row">
         <button id="r-reload">更新</button>
         <span class="note" id="r-updated"></span>
       </div>
       <div id="rooms"></div>
       <p class="empty" id="r-empty" hidden>まだルームがありません</p>
       <details class="note">
-        <summary>ⓘ 一覧に出るルームと、ファイルの削除について</summary>
-        ・視聴者か配信者が一度でも接続したルームと、ファイルがアップロードされたルームが出ます<br />
+        <summary>ⓘ 開設・閉鎖と、一覧に出るルームについて</summary>
+        ・<strong>開設したルームだけが使えます。</strong>開設していない・閉鎖したルームは、配信も視聴もアップロードもできません<br />
+        ・開設すると、視聴URL(視聴者に配る)と配信者URL(配信者だけに渡す鍵)が出ます。どちらもQRで読み取れます<br />
+        ・<strong>閉鎖すると接続中の人も切断されます。</strong>ファイルは残ります。もう一度開設すると、URLは新しくなります(閉鎖前に配ったURLは使えません)<br />
+        ・閉鎖が新しく来た人に効くまで、最大30秒ほどかかることがあります<br />
+        ・一覧には、開設したルームのほか、ファイルや配信の記録があるルームも出ます(「未開設」と表示されます)<br />
         ・「配信中」は、15分以内に配信元(ブリッジ/HMD)が登録されている席があるルームです<br />
         ・<strong>使用中のファイルを削除すると、その席のアバターは外れ、ステージは組み込みの装飾に戻ります</strong>。
         削除したファイルは元に戻せません
       </details>
 
       <p class="note" id="app-version"></p>
+    </div>
+    <!-- 全画面のQR。白背景で、会場の掲示やQuestのカメラから読み取りやすくする -->
+    <div id="qr-stage" hidden>
+      <div class="title" id="qr-stage-title"></div>
+      <div id="qr-stage-image"></div>
+      <div class="url" id="qr-stage-url"></div>
+      <div class="close">画面のどこかをクリック / Esc で閉じます</div>
     </div>
     <script type="module" src="/src/admin.ts"></script>
   </body>

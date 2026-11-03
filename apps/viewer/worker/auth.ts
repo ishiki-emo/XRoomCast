@@ -33,7 +33,8 @@ export interface AuthEnv extends AccessEnv {
   /**
    * ルームごとの視聴/配信トークンを導出するマスターシークレット。
    * これを設定すると /watch/<ルーム>/<トークン> 形式で無制限にルームを作れる
-   * (ルーム一覧をサーバーに持たずに済む)。scripts/roomLink.mjs でURLを生成する
+   * (トークンの計算にルーム一覧は要らない)。ルームを使えるのは管理画面で開設したものだけで、
+   * URLも管理画面に出る(scripts/roomLink.mjs は世代0のURLを計算する)
    */
   ROOM_SECRET?: string;
   /**
@@ -86,9 +87,16 @@ function base64url(bytes: Uint8Array): string {
 
 /**
  * ルームトークンの導出: HMAC-SHA256(ROOM_SECRET, "<用途>:<ルーム>")。
- * ルーム一覧をサーバーに保存せずに、ルームごとに異なる鍵を配れる
+ * ルーム一覧をサーバーに保存せずに、ルームごとに異なる鍵を配れる。
+ * 閉鎖したルームを再開設すると世代(generation)が上がり、"<用途>:<ルーム>#<世代>" から導出する
+ * (閉鎖前のURLを無効にするため)。世代0は従来どおりなので既存のURLは変わらない
  */
-async function roomToken(secret: string, scope: 'watch' | 'broadcast', room: string): Promise<string> {
+async function roomToken(
+  secret: string,
+  scope: 'watch' | 'broadcast',
+  room: string,
+  generation = 0,
+): Promise<string> {
   const key = await crypto.subtle.importKey(
     'raw',
     textEncoder.encode(secret),
@@ -96,7 +104,8 @@ async function roomToken(secret: string, scope: 'watch' | 'broadcast', room: str
     false,
     ['sign'],
   );
-  const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(`${scope}:${room}`));
+  const message = generation > 0 ? `${scope}:${room}#${generation}` : `${scope}:${room}`;
+  const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(message));
   return base64url(new Uint8Array(signature)).slice(0, TOKEN_LENGTH);
 }
 
@@ -113,9 +122,10 @@ async function matchesRoomToken(
   scope: 'watch' | 'broadcast',
   room: string,
   candidate: string,
+  generation = 0,
 ): Promise<boolean> {
   if (!env.ROOM_SECRET || !candidate) return false;
-  return timingSafeEqual(await roomToken(env.ROOM_SECRET, scope, room), candidate);
+  return timingSafeEqual(await roomToken(env.ROOM_SECRET, scope, room, generation), candidate);
 }
 
 /**
@@ -134,11 +144,17 @@ function readCredential(request: Request, url: URL, queryNames: string[]): strin
   return '';
 }
 
-async function isBroadcaster(env: AuthEnv, request: Request, url: URL, room: string): Promise<boolean> {
+async function isBroadcaster(
+  env: AuthEnv,
+  request: Request,
+  url: URL,
+  room: string,
+  generation = 0,
+): Promise<boolean> {
   const candidate = readCredential(request, url, ['key']);
   if (!candidate) return false;
   if (env.BROADCAST_KEY && timingSafeEqual(env.BROADCAST_KEY, candidate)) return true;
-  return matchesRoomToken(env, 'broadcast', room, candidate);
+  return matchesRoomToken(env, 'broadcast', room, candidate, generation);
 }
 
 /**
@@ -158,9 +174,12 @@ export async function authorize(
      * (設定を持たない従来のルームはこちらに落ちる)
      */
     requireViewerToken?: boolean;
+    /** ルームのURLの世代(台帳から呼び出し側が解決して渡す。省略時は0) */
+    generation?: number;
   },
 ): Promise<AuthResult> {
   const { scope, room } = ctx;
+  const generation = ctx.generation ?? 0;
 
   if (scope === 'vrm') {
     // トークン未設定時は配信自体を無効にする(安全側)
@@ -184,22 +203,22 @@ export async function authorize(
   if (scope === 'publisher') {
     const header = request.headers.get('Authorization') ?? '';
     if (env.BRIDGE_TOKEN && header === `Bearer ${env.BRIDGE_TOKEN}`) return OK;
-    return (await isBroadcaster(env, request, url, room)) ? OK : DENIED;
+    return (await isBroadcaster(env, request, url, room, generation)) ? OK : DENIED;
   }
 
   if (scope === 'broadcaster') {
-    return (await isBroadcaster(env, request, url, room)) ? OK : DENIED;
+    return (await isBroadcaster(env, request, url, room, generation)) ? OK : DENIED;
   }
 
   // scope === 'viewer'
   const requireToken = ctx.requireViewerToken ?? env.REQUIRE_VIEWER_TOKEN === '1';
   if (!requireToken) return OK; // 匿名視聴
   // 配信者は当然視聴もできる(配信者コンソールのプレビューがこの経路を通る)
-  if (await isBroadcaster(env, request, url, room)) return OK;
+  if (await isBroadcaster(env, request, url, room, generation)) return OK;
   const candidate = readCredential(request, url, ['wt']);
   if (!candidate) return DENIED;
   if (env.WATCH_KEY && timingSafeEqual(env.WATCH_KEY, candidate)) return OK;
-  return (await matchesRoomToken(env, 'watch', room, candidate)) ? OK : DENIED;
+  return (await matchesRoomToken(env, 'watch', room, candidate, generation)) ? OK : DENIED;
 }
 
 /**
@@ -215,7 +234,11 @@ export async function authorize(
  */
 const ADMISSION_TTL_MS = 12 * 60 * 60 * 1000;
 
-async function admissionSignature(secret: string, room: string, expiresAt: number): Promise<string> {
+async function admissionSignature(
+  secret: string,
+  room: string,
+  expiresAt: number,
+): Promise<string> {
   const key = await crypto.subtle.importKey(
     'raw',
     textEncoder.encode(secret),
@@ -232,7 +255,11 @@ async function admissionSignature(secret: string, room: string, expiresAt: numbe
 }
 
 /** 入室を許した時点で発行する。ROOM_SECRETが無ければ発行しない(従来どおり) */
-export async function issueAdmission(env: AuthEnv, room: string, now = Date.now()): Promise<string | null> {
+export async function issueAdmission(
+  env: AuthEnv,
+  room: string,
+  now = Date.now(),
+): Promise<string | null> {
   if (!env.ROOM_SECRET) return null;
   const expiresAt = now + ADMISSION_TTL_MS;
   return `${expiresAt}.${await admissionSignature(env.ROOM_SECRET, room, expiresAt)}`;
@@ -261,9 +288,10 @@ export function watchPathFor(
   env: AuthEnv,
   room: string,
   defaultRoom: string,
+  generation = 0,
 ): Promise<string | null> {
   if (env.ROOM_SECRET) {
-    return roomToken(env.ROOM_SECRET, 'watch', room).then(
+    return roomToken(env.ROOM_SECRET, 'watch', room, generation).then(
       (token) => `/watch/${encodeURIComponent(room)}/${encodeURIComponent(token)}`,
     );
   }
@@ -272,6 +300,20 @@ export function watchPathFor(
     return Promise.resolve(`/watch/${encodeURIComponent(env.WATCH_KEY)}`);
   }
   return Promise.resolve(null);
+}
+
+/**
+ * そのルームの配信者URL(パス部分)。管理画面でルームを開設した運営者へ案内するために使う。
+ * ROOM_SECRET が無ければ作れない(既定ルームは BROADCAST_KEY の旧形式で開ける)
+ */
+export async function broadcastPathFor(
+  env: AuthEnv,
+  room: string,
+  generation = 0,
+): Promise<string | null> {
+  if (!env.ROOM_SECRET) return null;
+  const token = await roomToken(env.ROOM_SECRET, 'broadcast', room, generation);
+  return `/broadcast/${encodeURIComponent(room)}/${encodeURIComponent(token)}`;
 }
 
 /**
@@ -285,7 +327,12 @@ export async function resolveShortLink(
   scope: 'watch' | 'broadcast',
   pathname: string,
   prefix: string,
-  options: { defaultRoom: string; normalizeRoom: (value: string) => string },
+  options: {
+    defaultRoom: string;
+    normalizeRoom: (value: string) => string;
+    /** ルームのURLの世代(台帳)。省略時は0 */
+    generationOf?: (room: string) => Promise<number>;
+  },
 ): Promise<{ room: string; key: string } | null> {
   let segments: string[];
   try {
@@ -301,7 +348,10 @@ export async function resolveShortLink(
     const token = segments[1] ?? '';
     // 正規化で名前が変わるルーム(=文字種違反)はトークンが一致しても拒否する
     if (!token || options.normalizeRoom(room) !== room) return null;
-    return (await matchesRoomToken(env, scope, room, token)) ? { room, key: token } : null;
+    const generation = (await options.generationOf?.(room)) ?? 0;
+    return (await matchesRoomToken(env, scope, room, token, generation))
+      ? { room, key: token }
+      : null;
   }
 
   if (segments.length === 1) {
