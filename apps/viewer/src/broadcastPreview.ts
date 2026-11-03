@@ -42,6 +42,11 @@ export interface PreviewHandle {
   setMirrorVisible(on: boolean): void;
   /** 空間パネルからも操作できるよう、外側のUIと状態を合わせるためのフック */
   onMicToggle: (() => void) | null;
+  /** HMD内のパネルで「配信を開始/停止」を押したとき(VRに入るのと配信は別にしてある) */
+  onBroadcastStart: (() => void) | null;
+  onBroadcastStop: (() => void) | null;
+  /** パネルの配信の開始/停止の表示を、実際の状態に合わせる */
+  setBroadcastLabel(on: boolean): void;
   onWristChange: ((axis: 'x' | 'y' | 'z', delta: number) => void) | null;
   setWristLabel(text: string): void;
   setMicLabel(on: boolean): void;
@@ -209,6 +214,9 @@ export function setupBroadcastPreview(options: {
     hmdSupported,
     setMirrorVisible,
     onMicToggle: null,
+    onBroadcastStart: null,
+    onBroadcastStop: null,
+    setBroadcastLabel: (on) => panel.setActive(on ? 'broadcast-on' : 'broadcast-off'),
     onWristChange: null,
     setWristLabel: (text) => panel.setSectionTitle(1, text),
     setMicLabel: (on) => panel.setActive(on ? 'mic-on' : 'mic-off'),
@@ -273,8 +281,20 @@ export function setupBroadcastPreview(options: {
         onSelect: () => handle.onMicToggle?.(),
       },
       {
+        // VRに入るのと配信は別。入ったあと、ここで始める(入った瞬間から映らないように)
         title: '配信',
-        options: [{ label: '終了する', value: 'exit', action: true }],
+        columns: 2,
+        options: [
+          { label: '配信を開始', value: 'broadcast-on' },
+          { label: '配信を停止', value: 'broadcast-off' },
+        ],
+        initial: 'broadcast-off',
+        onSelect: (value) =>
+          value === 'broadcast-on' ? handle.onBroadcastStart?.() : handle.onBroadcastStop?.(),
+      },
+      {
+        title: 'VR',
+        options: [{ label: 'VRを終了する', value: 'exit', action: true }],
         initial: '',
         onSelect: () => exitHmd(),
       },
@@ -306,21 +326,11 @@ export function setupBroadcastPreview(options: {
     // VRのセッションの要求より前に接続を始める版は、実機でトラッキングが始まらなくなったので戻した
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(session);
-    broadcast.connect().then(
-      () => logStartup('配信開始'),
-      (error: unknown) => {
-        setStatus(`HMD配信の接続に失敗しました(VRは続けられます): ${String(error)}`);
-      },
-    );
-    // パネルを指していないときのトリガーは位置合わせに使う
-    session.addEventListener('select', (event) => {
-      if (panelController.pointing) return;
-      // 素手のピンチは身振りの途中でも起きるため、合わせ直しには使わない
-      // (素手のときはパネルの「位置を合わせ直す」を使う)
-      if (event.inputSource.hand) return;
-      broadcast.recalibrate();
-      setStatus('位置を合わせ直しています...');
-    });
+    turnArmed = true;
+    panel.setActive('broadcast-off');
+    setStatus('VRに入りました。操作パネルの「配信を開始」で配信が始まります');
+    // トリガーでの位置合わせはやめた(パネルを押すつもりで合わせ直してしまい、混乱するため)。
+    // 合わせ直しはパネルの「位置を合わせ直す」で行う
     session.addEventListener('end', () => {
       xrSession = null;
       broadcast.close();
@@ -347,6 +357,53 @@ export function setupBroadcastPreview(options: {
     if (step === 'VRのセッション開始') startupSteps.length = 0;
     startupSteps.push(`${step} ${seconds}秒`);
     setStatus(`HMD配信: ${startupSteps.join(' → ')}`);
+  }
+
+  /**
+   * 右スティックで旋回する(左右に倒すたびに SNAP_TURN ずつ。なめらかに回すより酔いにくい)。
+   * 立っている場所を中心に、基準の空間(reference space)を回す。HMD配信は、その空間での姿勢を
+   * 開始時の向きからの差分で送るので、回った分だけアバターもその向きを向く
+   */
+  const SNAP_TURN = Math.PI / 6;
+  /** 倒したと判定する量と、戻したと判定する量(倒しっぱなしで回り続けないように) */
+  const TURN_PUSH = 0.7;
+  const TURN_RELEASE = 0.3;
+  let turnArmed = true;
+  const _turnQuat = new THREE.Quaternion();
+  function handleSnapTurn(frame: XRFrame): void {
+    const session = xrSession;
+    const space = renderer.xr.getReferenceSpace();
+    if (!session || !space) return;
+    let x = 0;
+    for (const source of session.inputSources) {
+      if (source.handedness !== 'right' || !source.gamepad) continue;
+      const axes = source.gamepad.axes;
+      // xr-standard: 2,3 がスティック(0,1 はタッチパッド)。スティックしか無い端末は 0,1
+      x = axes.length >= 4 ? (axes[2] ?? 0) : (axes[0] ?? 0);
+    }
+    if (!turnArmed) {
+      if (Math.abs(x) < TURN_RELEASE) turnArmed = true;
+      return;
+    }
+    if (Math.abs(x) < TURN_PUSH) return;
+    const viewer = frame.getViewerPose(space);
+    if (!viewer) return;
+    turnArmed = false;
+    // 頭の真下を中心に回す: その点へ移る → 回す → 戻る。右へ倒すと右を向く
+    const p = viewer.transform.position;
+    _turnQuat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.sign(x) * SNAP_TURN);
+    const turned = space
+      .getOffsetReferenceSpace(new XRRigidTransform({ x: p.x, y: 0, z: p.z }))
+      .getOffsetReferenceSpace(
+        new XRRigidTransform(undefined, {
+          x: _turnQuat.x,
+          y: _turnQuat.y,
+          z: _turnQuat.z,
+          w: _turnQuat.w,
+        }),
+      )
+      .getOffsetReferenceSpace(new XRRigidTransform({ x: -p.x, y: 0, z: -p.z }));
+    renderer.xr.setReferenceSpace(turned);
   }
 
   function exitHmd(): void {
@@ -418,6 +475,7 @@ export function setupBroadcastPreview(options: {
       logStartup('最初の絵');
     }
     if (frame && xrSession) {
+      handleSnapTurn(frame);
       const refSpace = renderer.xr.getReferenceSpace();
       if (refSpace) {
         if (!broadcast.calibrated) {

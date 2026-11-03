@@ -429,6 +429,13 @@ export class HmdBroadcast {
     this.publisher.send(packet, now);
   }
 
+  /** 配信だけ止める(VRはそのまま。立ち位置の基準も残す) */
+  disconnect(): void {
+    this.connecting = null;
+    this.publisher.close();
+    this.onStatus?.('配信を停止しました(VRはそのままです)');
+  }
+
   close(): void {
     this.connecting = null;
     this.publisher.close();

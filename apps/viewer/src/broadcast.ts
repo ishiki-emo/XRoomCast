@@ -540,6 +540,16 @@ if (!key) {
   setupPreview();
 }
 
+/** マイクの使用の許可だけ取る(マイクはすぐ閉じる)。断られても、配信はマイクなしで続けられる */
+async function requestMicPermission(): Promise<void> {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach((track) => track.stop());
+  } catch {
+    // 断られたら、配信の開始時にマイクを始められないだけ
+  }
+}
+
 /** マイクの使用が許可済みか(確かめられないブラウザでは false = 先に許可を取る) */
 async function micPermissionGranted(): Promise<boolean> {
   try {
@@ -838,29 +848,29 @@ function setupPreview(): void {
     (document.getElementById('p-gesture-settings') as HTMLElement).hidden = !ar && !vr;
   });
 
+  /** マイクを始める(配信の開始と一緒に。音声とポーズは別経路) */
+  const startMic = () =>
+    setMicLive(true)
+      .catch(() => {
+        previewStatus.textContent = 'マイクを開始できませんでした(そのまま配信します)';
+      })
+      .then(() => preview.setMicLabel(live));
+
+  /**
+   * VRに入る。配信はVRに入ってから、HMD内のパネルの「配信を開始」で始める
+   * (VRに入る準備と配信の接続を同時に走らせると、実機でトラッキングが始まらなくなったため、分けてある)
+   */
   const enter = (mode: XrMode, button: HTMLButtonElement): void => {
     button.disabled = true;
-    // HMDに入ると画面のボタンを押せなくなるので、マイクもここで入れる(音声とポーズは別経路)。
-    // マイクの許可が済んでいれば、VRに入ってからマイクを始める(マイクの接続を待たずにVRへ入れる)。
-    // 許可がまだなら、許可の確認がVRの裏に隠れないよう、先にマイクを始めてから入る。
-    // VRのセッションの要求と同時にマイクを始める版は、実機でトラッキングが始まらなくなったので避ける
-    const startMic = () =>
-      setMicLive(true)
-        .catch(() => {
-          previewStatus.textContent = 'マイクを開始できませんでした(そのまま配信します)';
-        })
-        .then(() => preview.setMicLabel(live));
     void micPermissionGranted()
       .then(async (granted) => {
-        if (!granted) await startMic();
+        // 配信を始めるのはVRの中(パネル)なので、マイクの許可の確認だけ先に済ませておく
+        // (VRに入ってからだと、許可の確認がVRの裏に隠れて押せない)
+        if (!granted) await requestMicPermission();
         await preview.enterHmd(mode);
-        if (granted) await startMic();
-        // ポーズ配信の登録で席が決まってから、マイクの「自動」を自分の席へ合わせ直す
-        await hmdBroadcast.connecting;
-        await realignMicSeat();
       })
       .catch((error: unknown) => {
-        previewStatus.textContent = `HMD配信を開始できませんでした: ${String(error)}`;
+        previewStatus.textContent = `VRに入れませんでした: ${String(error)}`;
       })
       .finally(() => {
         button.disabled = false;
@@ -870,6 +880,23 @@ function setupPreview(): void {
   vrButton.addEventListener('click', () => enter('vr', vrButton));
 
   setupWebcam(webcamBroadcast, previewStatus, preview);
+
+  // 配信の開始・停止(HMD内のパネルから)。ポーズとマイクを一緒に始め、一緒に止める
+  preview.onBroadcastStart = () => {
+    void hmdBroadcast
+      .connect()
+      .then(() => startMic())
+      // ポーズ配信の登録で席が決まってから、マイクの「自動」を自分の席へ合わせ直す
+      .then(() => realignMicSeat())
+      .catch((error: unknown) => {
+        previewStatus.textContent = `配信を開始できませんでした: ${String(error)}`;
+        preview.setBroadcastLabel(false);
+      });
+  };
+  preview.onBroadcastStop = () => {
+    hmdBroadcast.disconnect();
+    void setMicLive(false).finally(() => preview.setMicLabel(live));
+  };
 
   // 空間パネルからのマイク操作を画面側と同期させる
   preview.onMicToggle = () => {

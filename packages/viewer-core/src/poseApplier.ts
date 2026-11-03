@@ -23,6 +23,12 @@ const FINGER_SEGMENTS = ['Proximal', 'Intermediate', 'Distal'] as const;
 const CURL_MAX = [1.2, 1.4, 1.0] as const;
 const THUMB_CURL_MAX = [0.4, 0.6, 0.6] as const;
 /**
+ * 親指を曲げたときに、ほかの指の側へ寄せる角度(rad、付け根の関節)。
+ * 手のひら側へ曲げるだけだと、グーやピースで親指が前へ突き出て「開いた」ように見える。
+ * 実際の親指も、曲げると人差し指・中指の方へ寄っていく
+ */
+const THUMB_ADDUCT_MAX = 0.7;
+/**
  * スプレッド(指の開き)。0.5が自然位置で、1で開き切る・0で閉じ切る。
  * 開く側は人差し指と小指の間が最大約46°(パーで指の間に隙間ができ、ピースがV字に見える)。
  * 閉じる側を同じだけ動かすと指どうしが重なるので、小さくしてある。
@@ -333,6 +339,13 @@ export class PoseApplier {
           if (isThumb) {
             // 親指は前(+Z)向きなのでX軸回りで手のひら側へ曲げる
             joint.quaternion.setFromAxisAngle(X_AXIS, maxAngles[j]! * curl);
+            // 付け根では、曲げるほど指の側(左手は+X、右手は-X)へ寄せる。
+            // Y軸回りの正の回転は +Z(親指)を +X へ回すので、左手は正・右手は負
+            if (j === 0) {
+              const adductSign = side === 'left' ? 1 : -1;
+              _spreadQuat.setFromAxisAngle(Y_AXIS, adductSign * THUMB_ADDUCT_MAX * curl);
+              joint.quaternion.premultiply(_spreadQuat);
+            }
           } else {
             joint.quaternion.setFromAxisAngle(Z_AXIS, curlSign * maxAngles[j]! * curl);
             // スプレッド: 付け根関節のY軸回りで扇状に開く(0.5が自然位置)
