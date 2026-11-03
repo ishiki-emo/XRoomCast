@@ -23,10 +23,16 @@ export class OneEuroFilter {
    * @param derivativeCutoff 速さそのもののならし具合(Hz)
    */
   constructor(
-    private readonly minCutoff: number,
-    private readonly beta: number,
+    private minCutoff: number,
+    private beta: number,
     private readonly derivativeCutoff = 1,
   ) {}
+
+  /** ならし具合を変える(滑らかさの設定を動かしたとき)。値は保ったまま次から効く */
+  setParams(minCutoff: number, beta: number): void {
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+  }
 
   /** 新しい値を入れて、ならした値を返す(out に書く)。time は秒 */
   filter(input: readonly number[], time: number, out: number[]): number[] {

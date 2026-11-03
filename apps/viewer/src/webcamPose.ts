@@ -172,25 +172,74 @@ export const EXPRESSION_NAMES = [
 export type ExpressionName = (typeof EXPRESSION_NAMES)[number];
 
 /**
+ * 引き直しの下限・上限。普通の顔を登録していない人向け(誰にでも同じ値)と、
+ * 普通の顔を引いたあとの値向け(人ごとの残りの値が消えているので、下限を下げられる)
+ */
+const THRESHOLDS = {
+  raw: {
+    smile: [0.35, 0.85],
+    jaw: [0.06, 0.55],
+    funnel: [0.12, 0.5],
+    pucker: [0.25, 0.75],
+    stretch: [0.12, 0.5],
+    blink: [0.35, 0.75],
+    brow: [0.45, 0.9],
+    wide: [0.2, 0.6],
+  },
+  calibrated: {
+    smile: [0.15, 0.7],
+    jaw: [0.04, 0.5],
+    funnel: [0.08, 0.45],
+    pucker: [0.12, 0.6],
+    stretch: [0.08, 0.45],
+    blink: [0.15, 0.65],
+    brow: [0.25, 0.8],
+    wide: [0.1, 0.5],
+  },
+} as const satisfies Record<string, Record<string, readonly [number, number]>>;
+
+/**
  * ブレンドシェイプ(ARKit系の52種)から、VRMの表情へ。
  * 目を開けていても値が少し残る・口を少し開けただけで反応しすぎる、を避けるため
  * 下限と上限で引き直す。笑顔・驚きは誤反応すると目立つので弱めにしてある。
  * 口は、マイクを入れていれば視聴側のリップシンク(音声解析)が上書きする
+ *
+ * @param calibrated 値が普通の顔を引いたもの(relativeToNeutral)か
+ * @param emotions 笑顔・驚きを自動で出すか。表情の型を登録した人は、型の判定に任せるので出さない
  */
 export function expressionsFromBlendshapes(
-  shapes: ReadonlyMap<string, number>,
+  shapes: Readonly<Record<string, number>>,
+  options: { calibrated: boolean; emotions: boolean } = { calibrated: false, emotions: true },
 ): Record<ExpressionName, number> {
-  const get = (name: string) => shapes.get(name) ?? 0;
+  const range = options.calibrated ? THRESHOLDS.calibrated : THRESHOLDS.raw;
+  const get = (name: string) => shapes[name] ?? 0;
   const avg = (a: string, b: string) => (get(a) + get(b)) / 2;
-  const smile = remap(avg('mouthSmileLeft', 'mouthSmileRight'), 0.35, 0.85);
-  const jaw = remap(get('jawOpen'), 0.06, 0.55);
-  const funnel = remap(get('mouthFunnel'), 0.12, 0.5);
-  const pucker = remap(get('mouthPucker'), 0.25, 0.75);
-  const stretch = remap(avg('mouthStretchLeft', 'mouthStretchRight'), 0.12, 0.5);
-  const [blinkLeft, blinkRight] = linkEyes(
-    remap(get('eyeBlinkLeft'), 0.35, 0.75),
-    remap(get('eyeBlinkRight'), 0.35, 0.75),
+  const smile = remap(avg('mouthSmileLeft', 'mouthSmileRight'), range.smile[0], range.smile[1]);
+  const jaw = remap(get('jawOpen'), range.jaw[0], range.jaw[1]);
+  const funnel = remap(get('mouthFunnel'), range.funnel[0], range.funnel[1]);
+  const pucker = remap(get('mouthPucker'), range.pucker[0], range.pucker[1]);
+  const stretch = remap(
+    avg('mouthStretchLeft', 'mouthStretchRight'),
+    range.stretch[0],
+    range.stretch[1],
   );
+  const [blinkLeft, blinkRight] = linkEyes(
+    remap(get('eyeBlinkLeft'), range.blink[0], range.blink[1]),
+    remap(get('eyeBlinkRight'), range.blink[0], range.blink[1]),
+  );
+  if (!options.emotions) {
+    return {
+      blinkLeft,
+      blinkRight,
+      aa: jaw * (1 - Math.max(funnel, pucker) * 0.7),
+      ih: stretch * 0.5 * (1 - jaw),
+      ou: pucker,
+      ee: stretch * (1 - pucker),
+      oh: funnel * jaw,
+      happy: 0,
+      surprised: 0,
+    };
+  }
   return {
     blinkLeft,
     blinkRight,
@@ -202,8 +251,8 @@ export function expressionsFromBlendshapes(
     oh: funnel * jaw,
     happy: smile * 0.7,
     surprised:
-      remap(get('browInnerUp'), 0.45, 0.9) *
-      remap(avg('eyeWideLeft', 'eyeWideRight'), 0.2, 0.6) *
+      remap(get('browInnerUp'), range.brow[0], range.brow[1]) *
+      remap(avg('eyeWideLeft', 'eyeWideRight'), range.wide[0], range.wide[1]) *
       0.6,
   };
 }

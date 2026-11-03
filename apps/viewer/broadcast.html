@@ -169,6 +169,53 @@
       #p-webcam-video[hidden] {
         display: none;
       }
+      .webcam-settings {
+        margin-top: 10px;
+        padding: 8px 12px;
+        border: 1px solid #333;
+        border-radius: 8px;
+        background: #1a1a1a;
+      }
+      .webcam-settings[hidden] {
+        display: none;
+      }
+      .webcam-settings > summary {
+        cursor: pointer;
+        font-size: 13px;
+        color: #ccc;
+      }
+      .templates {
+        list-style: none;
+        margin: 8px 0 0;
+        padding: 0;
+      }
+      .templates li {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 6px 0;
+        border-top: 1px solid #2a2a2a;
+        font-size: 13px;
+      }
+      .templates .name {
+        flex: 0 0 auto;
+        min-width: 9em;
+      }
+      /* いまの顔がその登録にどれだけ近いか */
+      .templates .meter {
+        flex: 1 1 auto;
+        height: 8px;
+        border-radius: 4px;
+        background: #2b2b2b;
+        overflow: hidden;
+      }
+      .templates .meter span {
+        display: block;
+        height: 100%;
+        width: 0;
+        background: #6fbf8a;
+        transition: width 0.12s linear;
+      }
       #p-status {
         margin-top: 8px;
         color: #aaa;
@@ -388,13 +435,52 @@
             <button id="p-webcam-recal" class="small" hidden>正面を取り直す</button>
           </div>
           <video id="p-webcam-video" hidden></video>
+          <details id="p-webcam-settings" class="webcam-settings" hidden>
+            <summary>⚙ Webカメラの設定(滑らかさ・手・表情の登録)</summary>
+            <div class="row">
+              <span class="ar-label">滑らかさ</span>
+              <span class="ar-label">反応が速い</span>
+              <input type="range" id="w-smooth" min="0" max="1" step="0.05" />
+              <span class="ar-label">滑らか</span>
+            </div>
+            <div class="row">
+              <label class="ar-label"><input type="checkbox" id="w-hands" /> 手も動かす(実験的。カメラ1台では暴れやすいので、既定はオフ)</label>
+            </div>
+            <h3>表情の登録</h3>
+            <div class="row">
+              <button id="w-neutral" class="small">普通の顔を登録(3秒)</button>
+              <span class="ar-label" id="w-neutral-state"></span>
+              <button id="w-neutral-clear" class="small" hidden>消す</button>
+            </div>
+            <div class="row">
+              <span class="ar-label">この顔 →</span>
+              <select id="w-target"></select>
+              <button id="w-add" class="small primary">この顔を登録(3秒)</button>
+            </div>
+            <ul id="w-templates" class="templates"></ul>
+            <p class="warn" id="w-message"></p>
+            <div class="row">
+              <button id="w-export" class="small">書き出し</button>
+              <button id="w-import" class="small">読み込み</button>
+              <input type="file" id="w-import-file" accept=".json,application/json" hidden />
+            </div>
+            <details class="note">
+              <summary>ⓘ 表情の登録について</summary>
+              ・<strong>登録した顔はこのブラウザにだけ保存します。</strong>サーバーには送りません。別のPCで使うときは「書き出し」したファイルを「読み込み」してください<br />
+              ・まず<strong>「普通の顔」</strong>を登録してください。無表情で正面を向いて3秒です。人ごとの癖を差し引くので、まばたきや口の誤反応(意図しないウインクなど)が減ります<br />
+              ・次に、割り当てたい表情を選んで、その顔を3秒してください(例: 思いきり笑う → happy)。同じ表情に何個でも登録できます<br />
+              ・一覧の棒は、いまの顔がその登録にどれだけ近いかです。ほかの表情で棒が伸びるときは、登録し直すか、違いがはっきり出る顔で登録してください<br />
+              ・表情を1つでも登録すると、自動の笑顔・驚きは使わず、登録した表情だけを出します<br />
+              ・口とまばたきは登録しなくても動きます(マイクがあれば、口は声に合わせて動きます)
+            </details>
+          </details>
           <details class="note">
             <summary>ⓘ Webカメラ配信について(VSeeFaceもHMDも不要)</summary>
-            ・このページだけで配信できます。顔の向き・表情(まばたき・口・笑顔)・上半身と手の動きを、カメラの映像から推定して送ります<br />
+            ・このページだけで配信できます。顔の向きと表情(まばたき・口・笑顔など)を、カメラの映像から推定して送ります<br />
             ・<strong>映像はどこにも送りません。</strong>推定はこのPCのブラウザの中だけで行います(初回は推定のモデルを数十MBダウンロードします)<br />
             ・<strong>マイクも自動で開始します。</strong>声を出すと、視聴者側では声に合わせて口が動きます<br />
             ・開始したときの顔の向きが正面になります。ずれたら「正面を取り直す」を押してください<br />
-            ・カメラから少し離れて、胸から上と両手が映るようにすると手も動きます。手が映っていないときは下ろした姿勢になります<br />
+            ・手は既定では動かしません(下ろした姿勢)。「⚙ Webカメラの設定」の「手も動かす」をオンにして、胸から上と両手が映るようにすると手も動きます<br />
             ・顔が映らないと送信を止めます(視聴者側では待機モーションに戻ります)<br />
             ・<strong>ブリッジやHMD配信とは同時に使わないでください</strong>(同じ配信者名で、後から始めた方が優先されます)<br />
             ・GPUの無いPCでは重くなることがあります

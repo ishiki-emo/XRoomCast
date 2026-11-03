@@ -64,8 +64,11 @@ export function setupBroadcastPreview(options: {
   auth: AuthProvider;
   /** HMD配信。XRセッション中に頭・手の姿勢を送る */
   broadcast: HmdBroadcast;
-  /** アバターを読み込んだとき(頭の高さ)。Webカメラ配信の頭の位置の基準に使う */
-  onAvatarHeight?: (height: number) => void;
+  /**
+   * アバターを読み込んだとき。頭の高さはWebカメラ配信の頭の位置の基準に、
+   * 表情の名前はWebカメラ配信の表情の割り当て先の一覧に使う
+   */
+  onAvatarLoaded?: (info: { height: number; expressions: string[] }) => void;
 }): PreviewHandle {
   const { canvas, statusEl, room, auth, broadcast } = options;
 
@@ -159,7 +162,10 @@ export function setupBroadcastPreview(options: {
       if (previous) requestAnimationFrame(() => previous.dispose());
       // HMD配信の身長補正に使う(配信者の目の高さとの比を取る)
       broadcast.setAvatarHeight(next.restPose.height);
-      options.onAvatarHeight?.(next.restPose.height);
+      options.onAvatarLoaded?.({
+        height: next.restPose.height,
+        expressions: next.vrm.expressionManager?.expressions.map((e) => e.expressionName) ?? [],
+      });
       setStatus('プレビュー中');
     } catch (error) {
       setStatus(`プレビューの読み込みに失敗: ${String(error)}`);

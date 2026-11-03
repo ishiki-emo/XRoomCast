@@ -14,7 +14,7 @@ import { setupRoomSettings } from './roomSettings';
 import { setupStageConsole } from './stageConsole';
 import { withRoom } from '@xroomcast/sync';
 import { DEFAULT_WRIST_OFFSET, HmdBroadcast, setWristOffset } from './hmdBroadcast';
-import { WebcamBroadcast } from './webcamBroadcast';
+import { RECORD_SECONDS, WebcamBroadcast } from './webcamBroadcast';
 import type { PeerState } from '@xroomcast/viewer-core';
 
 const CF_STUN_URL = 'stun:stun.cloudflare.com:3478';
@@ -506,14 +506,180 @@ if (!key) {
 }
 
 /**
+ * Webカメラ配信の個人設定(このブラウザにだけ保存)。滑らかさ・手の推定のオン/オフ・
+ * 普通の顔の登録・表情の型の登録(この顔 → VRMのこの表情)・書き出しと読み込み
+ */
+function setupWebcamSettings(webcam: WebcamBroadcast): { setExpressions(names: string[]): void } {
+  const panel = document.getElementById('p-webcam-settings') as HTMLElement;
+  const smooth = document.getElementById('w-smooth') as HTMLInputElement;
+  const hands = document.getElementById('w-hands') as HTMLInputElement;
+  const neutralButton = document.getElementById('w-neutral') as HTMLButtonElement;
+  const neutralState = document.getElementById('w-neutral-state') as HTMLElement;
+  const neutralClear = document.getElementById('w-neutral-clear') as HTMLButtonElement;
+  const target = document.getElementById('w-target') as HTMLSelectElement;
+  const addButton = document.getElementById('w-add') as HTMLButtonElement;
+  const list = document.getElementById('w-templates') as HTMLUListElement;
+  const message = document.getElementById('w-message') as HTMLElement;
+  const exportButton = document.getElementById('w-export') as HTMLButtonElement;
+  const importButton = document.getElementById('w-import') as HTMLButtonElement;
+  const importFile = document.getElementById('w-import-file') as HTMLInputElement;
+
+  /** 型の割り当て先にしない表情(口・まばたき・視線は推定や他の仕組みで動かすため) */
+  const RESERVED = new Set([
+    'aa',
+    'ih',
+    'ou',
+    'ee',
+    'oh',
+    'blink',
+    'blinkLeft',
+    'blinkRight',
+    'lookUp',
+    'lookDown',
+    'lookLeft',
+    'lookRight',
+    'neutral',
+  ]);
+  const PRESETS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
+  const LABELS: Record<string, string> = {
+    happy: 'happy(喜)',
+    angry: 'angry(怒)',
+    sad: 'sad(哀)',
+    relaxed: 'relaxed(楽)',
+    surprised: 'surprised(驚)',
+  };
+  const label = (name: string) => LABELS[name] ?? name;
+
+  const setExpressions = (names: string[]): void => {
+    const usable = names.filter((name) => !RESERVED.has(name));
+    const options = usable.length > 0 ? usable : PRESETS;
+    const previous = target.value;
+    target.replaceChildren(
+      ...options.map((name) => new Option(label(name), name, false, name === previous)),
+    );
+  };
+  setExpressions(PRESETS);
+
+  const meters: HTMLElement[] = [];
+  const renderTemplates = (): void => {
+    const settings = webcam.currentSettings;
+    meters.length = 0;
+    list.replaceChildren(
+      ...settings.templates.map((template, i) => {
+        const li = document.createElement('li');
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = `${i + 1}. → ${label(template.target)}`;
+        const meter = document.createElement('span');
+        meter.className = 'meter';
+        const bar = document.createElement('span');
+        meter.append(bar);
+        meters.push(bar);
+        const remove = document.createElement('button');
+        remove.className = 'small';
+        remove.textContent = '削除';
+        remove.addEventListener('click', () => {
+          webcam.removeTemplate(i);
+          render();
+        });
+        li.append(name, meter, remove);
+        return li;
+      }),
+    );
+  };
+
+  const render = (): void => {
+    const settings = webcam.currentSettings;
+    smooth.value = String(settings.smoothing);
+    hands.checked = settings.hands;
+    neutralState.textContent = settings.neutral ? '登録済み' : '未登録';
+    neutralClear.hidden = !settings.neutral;
+    const canRecord = webcam.active && !webcam.isRecording;
+    neutralButton.disabled = !canRecord;
+    addButton.disabled = !canRecord;
+    renderTemplates();
+  };
+  panel.addEventListener('webcam-state', render);
+
+  // 型ごとの出かたを、登録した一覧に棒で出す(どの顔がどの型に効いているかを確かめられる)
+  window.setInterval(() => {
+    if (panel.hidden || !webcam.active) return;
+    webcam.liveTemplateWeights.forEach((weight, i) => {
+      const bar = meters[i];
+      if (bar) bar.style.width = `${Math.round(weight * 100)}%`;
+    });
+  }, 150);
+
+  smooth.addEventListener('input', () => webcam.setSmoothing(Number(smooth.value)));
+  hands.addEventListener('change', () => webcam.setHands(hands.checked));
+
+  /** 数秒の顔を撮る。撮っている間はボタンに残り秒数を出す */
+  const record = (button: HTMLButtonElement, targetName: string | null, done: string): void => {
+    const original = button.textContent;
+    const started = performance.now();
+    const timer = window.setInterval(() => {
+      const left = Math.max(0, RECORD_SECONDS - (performance.now() - started) / 1000);
+      button.textContent = `その顔のまま… ${left.toFixed(1)}秒`;
+    }, 100);
+    message.textContent = '';
+    neutralButton.disabled = addButton.disabled = true;
+    webcam
+      .record(targetName)
+      .then(() => (message.textContent = done))
+      .catch((error: unknown) => {
+        message.textContent = String(error instanceof Error ? error.message : error);
+      })
+      .finally(() => {
+        window.clearInterval(timer);
+        button.textContent = original;
+        render();
+      });
+  };
+  neutralButton.addEventListener('click', () =>
+    record(neutralButton, null, '普通の顔を登録しました。まばたきや口の誤反応が減ります'),
+  );
+  neutralClear.addEventListener('click', () => {
+    webcam.clearNeutral();
+    render();
+  });
+  addButton.addEventListener('click', () =>
+    record(addButton, target.value, `「${label(target.value)}」の顔を登録しました`),
+  );
+
+  exportButton.addEventListener('click', () => {
+    const blob = new Blob([webcam.exportSettings()], { type: 'application/json' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'xroomcast-webcam-settings.json';
+    link.click();
+    URL.revokeObjectURL(link.href);
+  });
+  importButton.addEventListener('click', () => importFile.click());
+  importFile.addEventListener('change', () => {
+    const file = importFile.files?.[0];
+    importFile.value = '';
+    if (!file) return;
+    void file
+      .text()
+      .then((text) => {
+        webcam.importSettings(text);
+        message.textContent = '設定を読み込みました';
+      })
+      .catch(
+        () => (message.textContent = '読み込めませんでした(書き出したファイルを選んでください)'),
+      )
+      .finally(render);
+  });
+
+  render();
+  return { setExpressions };
+}
+
+/**
  * Webカメラ配信(VSeeFace・ブリッジ・HMDなし)。HMD配信と同じく、マイクも一緒に始める
  * (配信者が「声が出ていない」ことに気づきにくいため)
  */
-function setupWebcam(
-  webcam: WebcamBroadcast,
-  statusEl: HTMLElement,
-  preview: PreviewHandle,
-): void {
+function setupWebcam(webcam: WebcamBroadcast, statusEl: HTMLElement, preview: PreviewHandle): void {
   // 配信中はプレビューに手元の動きを直接映す(届いた姿は通信の遅れでもたついて見える)
   preview.setLocalPose(() => webcam.localFrame());
   const button = document.getElementById('p-webcam') as HTMLButtonElement;
@@ -522,7 +688,10 @@ function setupWebcam(
   // カメラを使えない環境(httpや古いブラウザ)では出さない
   if (!navigator.mediaDevices?.getUserMedia) return;
   button.hidden = false;
+  const settingsPanel = document.getElementById('p-webcam-settings') as HTMLElement;
+  settingsPanel.hidden = false;
   const render = (): void => {
+    settingsPanel.dispatchEvent(new Event('webcam-state'));
     button.textContent = webcam.active ? '⏹ Webカメラ配信を止める' : '📷 Webカメラで配信';
     button.classList.toggle('danger', webcam.active);
     recalibrate.hidden = !webcam.active;
@@ -565,6 +734,7 @@ function setupPreview(): void {
   hmdBroadcast.onStatus = (text) => (previewStatus.textContent = text);
   const webcamBroadcast = new WebcamBroadcast(config.room, auth, currentPid);
   webcamBroadcast.onStatus = (text) => (previewStatus.textContent = text);
+  const webcamSettings = setupWebcamSettings(webcamBroadcast);
 
   const preview = setupBroadcastPreview({
     canvas: document.getElementById('p-canvas') as HTMLCanvasElement,
@@ -572,7 +742,10 @@ function setupPreview(): void {
     room: config.room,
     auth,
     broadcast: hmdBroadcast,
-    onAvatarHeight: (height) => webcamBroadcast.setAvatarHeight(height),
+    onAvatarLoaded: ({ height, expressions }) => {
+      webcamBroadcast.setAvatarHeight(height);
+      webcamSettings.setExpressions(expressions);
+    },
   });
   onMicTrack = (track) => preview.setMicTrack(track);
   const liveTrack = stream?.getAudioTracks()[0];

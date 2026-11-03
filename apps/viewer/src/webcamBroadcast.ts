@@ -6,20 +6,26 @@
  * 手の推定の向き・指、表情はブレンドシェイプから作る(webcamPose.ts)。
  * 体のセクションは送らない(視聴者側が頭から腰を推定する)。
  *
+ * 個人設定(webcamCalibration.ts。このブラウザにだけ保存)で、
+ * 普通の顔の基準・表情の型(この顔 → VRMのこの表情)・滑らかさ・手の推定のオン/オフを変えられる。
+ *
  * カメラの映像は推定に使うだけで、どこにも送らない。
  */
 import * as THREE from 'three';
-import type {
-  DictionaryEntry,
-  ExpressionEntry,
-  FingerCurls,
-  Packet,
-  Quat,
-  Vec3,
-} from '@xroomcast/protocol';
+import type { ExpressionEntry, FingerCurls, Packet, Quat, Vec3 } from '@xroomcast/protocol';
 import type { AuthProvider, SampledFrame } from '@xroomcast/sync';
 import { OneEuroFilter } from './oneEuroFilter';
 import { PosePublisher } from './posePublisher';
+import {
+  ShapeRecorder,
+  loadSettings,
+  parseSettings,
+  relativeToNeutral,
+  saveSettings,
+  templateWeight,
+  type Shape,
+  type WebcamSettings,
+} from './webcamCalibration';
 import {
   EXPRESSION_NAMES,
   POSE,
@@ -29,7 +35,6 @@ import {
   handAxes,
   handRotation,
   toWire,
-  type ExpressionName,
 } from './webcamPose';
 import type { TrackingResult, WebcamTracker } from './webcamTracking';
 
@@ -76,6 +81,15 @@ const WRIST_JUMP = 0.18;
 const MAX_JUMP_SKIPS = 4;
 /** 頭からこれ以上(m)離れた手首はあり得ないので縮める(腕の長さの目安) */
 const WRIST_REACH = 0.85;
+/**
+ * 滑らかさの設定(0..1)を揺れ取りの強さへ。0.5 で上の既定値、0 で約2.8倍速く(反応重視)、
+ * 1 で約0.35倍(滑らか)
+ */
+function smoothingScale(smoothing: number): number {
+  return 2 ** ((0.5 - smoothing) * 3);
+}
+/** 表情の型を登録するときに顔を撮る長さ */
+export const RECORD_SECONDS = 3;
 /** 推定の速さを表示する間隔 */
 const RATE_REPORT_MS = 1000;
 /** 手が見えないときの指(待機モーションと同じ軽い曲げ) */
@@ -150,6 +164,13 @@ export class WebcamBroadcast {
   private readonly headPositionFilter = filterOf(HEAD_POSITION_FILTER);
   private readonly headRotationFilter = filterOf(HEAD_ROTATION_FILTER);
   private readonly expressionFilter = filterOf(EXPRESSION_FILTER);
+  private settings: WebcamSettings = loadSettings();
+  /** 表情の型(普通の顔を引いた値)。設定が変わったら作り直す */
+  private templates: { target: string; shape: Shape }[] = [];
+  /** 型ごとの、いまの出かた(0..1)。登録画面に出す */
+  private readonly templateWeights: number[] = [];
+  /** 登録中(数秒の顔を平均している最中) */
+  private recording: { recorder: ShapeRecorder; until: number; done: () => void } | null = null;
   /** 推定の回数(速さの表示用) */
   private detections = 0;
   private lastRateAt = 0;
@@ -157,12 +178,135 @@ export class WebcamBroadcast {
     left: restHand('left', DEFAULT_HEAD_HEIGHT),
     right: restHand('right', DEFAULT_HEAD_HEIGHT),
   };
-  private readonly expressions = new Map<ExpressionName, number>();
-  private readonly sentExpressions = new Map<ExpressionName, number>();
+  /**
+   * 送る表情の名前。番号はこの並び順。型の割り当て先(モデル独自の表情など)はここへ足していき、
+   * セッション中は減らさない(消した型の表情も0を送り続けて、視聴側で出たままにしない)
+   */
+  private readonly expressionNames: string[] = [...EXPRESSION_NAMES];
+  private readonly expressions = new Map<string, number>();
+  private readonly sentExpressions = new Map<string, number>();
   private lastKeyframeAt = -Infinity;
 
   constructor(room: string, auth: AuthProvider, pid: () => string) {
     this.publisher = new PosePublisher(room, auth, pid, (text) => this.onStatus?.(text));
+    this.applySettings();
+  }
+
+  // ---- 個人設定 ----
+
+  /** いまの設定(書き換えないこと) */
+  get currentSettings(): Readonly<WebcamSettings> {
+    return this.settings;
+  }
+
+  /** 型ごとの、いまの出かた(登録の並び順。0..1) */
+  get liveTemplateWeights(): readonly number[] {
+    return this.templateWeights;
+  }
+
+  get isRecording(): boolean {
+    return this.recording !== null;
+  }
+
+  setSmoothing(value: number): void {
+    this.updateSettings({ ...this.settings, smoothing: Math.min(1, Math.max(0, value)) });
+  }
+
+  setHands(enabled: boolean): void {
+    this.updateSettings({ ...this.settings, hands: enabled });
+  }
+
+  removeTemplate(index: number): void {
+    this.updateSettings({
+      ...this.settings,
+      templates: this.settings.templates.filter((_, i) => i !== index),
+    });
+  }
+
+  clearNeutral(): void {
+    this.updateSettings({ ...this.settings, neutral: null });
+  }
+
+  /** 書き出し(JSON)。別のPCで読み込める */
+  exportSettings(): string {
+    return JSON.stringify(this.settings, null, 2);
+  }
+
+  /** 読み込み。壊れた値は無視し、読めたものだけ使う */
+  importSettings(json: string): void {
+    this.updateSettings(parseSettings(JSON.parse(json)));
+  }
+
+  /**
+   * 顔を数秒撮って登録する。target が null なら普通の顔(基準)、文字列ならその表情の型。
+   * 撮っている間に顔が見えなかったフレームは数えない
+   */
+  record(target: string | null): Promise<void> {
+    if (!this.active) return Promise.reject(new Error('Webカメラ配信を始めてから登録してください'));
+    if (this.recording) return Promise.reject(new Error('登録中です'));
+    return new Promise<void>((resolve, reject) => {
+      const recorder = new ShapeRecorder();
+      this.recording = {
+        recorder,
+        until: performance.now() + RECORD_SECONDS * 1000,
+        done: () => {
+          this.recording = null;
+          if (recorder.samples < 10) {
+            reject(
+              new Error(
+                '顔がうまく映っていませんでした。カメラに顔を映して、もう一度試してください',
+              ),
+            );
+            return;
+          }
+          const shape = recorder.result();
+          this.updateSettings(
+            target === null
+              ? { ...this.settings, neutral: shape }
+              : { ...this.settings, templates: [...this.settings.templates, { target, shape }] },
+          );
+          resolve();
+        },
+      };
+    });
+  }
+
+  private updateSettings(next: WebcamSettings): void {
+    this.settings = next;
+    saveSettings(next);
+    this.applySettings();
+  }
+
+  /** 設定を推定・揺れ取り・送る表情の名前へ反映する */
+  private applySettings(): void {
+    const neutral = this.settings.neutral;
+    this.templates = this.settings.templates.map(({ target, shape }) => ({
+      target,
+      shape: relativeToNeutral(new Map(Object.entries(shape)), neutral),
+    }));
+    this.templateWeights.length = this.templates.length;
+    this.templateWeights.fill(0);
+    let added = false;
+    for (const { target } of this.templates) {
+      if (!this.expressionNames.includes(target) && this.expressionNames.length < 255) {
+        this.expressionNames.push(target);
+        added = true;
+      }
+    }
+    // 名前が増えたら、すぐに辞書を送り直す(視聴側が新しい表情を知らないままにならないように)
+    if (added) this.lastKeyframeAt = -Infinity;
+
+    const scale = smoothingScale(this.settings.smoothing);
+    const set = (filter: OneEuroFilter, [minCutoff, beta]: readonly [number, number]) =>
+      filter.setParams(minCutoff * scale, beta * scale);
+    set(this.headPositionFilter, HEAD_POSITION_FILTER);
+    set(this.headRotationFilter, HEAD_ROTATION_FILTER);
+    set(this.expressionFilter, EXPRESSION_FILTER);
+    for (const hand of Object.values(this.hands)) {
+      set(hand.positionFilter, HAND_POSITION_FILTER);
+      set(hand.rotationFilter, HAND_ROTATION_FILTER);
+      set(hand.fingerFilter, FINGER_FILTER);
+    }
   }
 
   get active(): boolean {
@@ -217,7 +361,7 @@ export class WebcamBroadcast {
     this.lastVideoTime = video.currentTime;
 
     const now = performance.now();
-    const result = this.tracker.detect(video, now);
+    const result = this.tracker.detect(video, now, this.settings.hands);
     this.update(result, now);
     this.reportRate(now, result.face !== null);
     if (now - this.lastSentAt >= SEND_INTERVAL_MS) {
@@ -261,19 +405,14 @@ export class WebcamBroadcast {
       _v.y += this.headHeight;
       filterVector(this.headPositionFilter, _v, time, this.head.position);
 
-      const next = expressionsFromBlendshapes(face.blendshapes);
-      const filtered = this.expressionFilter.filter(
-        EXPRESSION_NAMES.map((name) => next[name]),
-        time,
-        _values,
-      );
-      EXPRESSION_NAMES.forEach((name, i) => {
-        this.expressions.set(name, Math.min(1, Math.max(0, filtered[i]!)));
-      });
+      this.updateExpressions(face.blendshapes, time);
+      if (this.recording) this.recording.recorder.add(face.blendshapes);
     }
+    if (this.recording && now >= this.recording.until) this.recording.done();
 
-    // 手: 位置は体の推定の手首(頭からの相対)、向き・指は手の推定
-    const pose = result.pose;
+    // 手: 位置は体の推定の手首(頭からの相対)、向き・指は手の推定。
+    // 手を動かさない設定なら、体側に下ろしたまま(推定もしていない)
+    const pose = this.settings.hands ? result.pose : null;
     const handOf = assignHands(result.hands, pose);
 
     for (const side of ['left', 'right'] as const) {
@@ -283,6 +422,7 @@ export class WebcamBroadcast {
       const rightEar = pose?.world[POSE.rightEar];
       const visibility = leftEar && rightEar ? (wrist?.visibility ?? 0) : 0;
       updateTracked(state, visibility);
+      if (!this.settings.hands) state.tracked = false;
       let curls: FingerCurls = RELAXED_CURLS;
       if (state.tracked && wrist && leftEar && rightEar && visibility > WRIST_HIDE) {
         // 耳の中点(=頭の中心)からの位置。奥行きは縮め、腕の長さを超えないようにする
@@ -334,6 +474,32 @@ export class WebcamBroadcast {
     }
   }
 
+  /**
+   * 表情。ブレンドシェイプ(普通の顔を引いたもの)から、まばたき・口・(型が無ければ)笑顔と驚きを作り、
+   * 登録した型の出かたを重ねる。同じ表情に複数の型を割り当てたら、出ている方を採る
+   */
+  private updateExpressions(blendshapes: ReadonlyMap<string, number>, time: number): void {
+    const relative = relativeToNeutral(blendshapes, this.settings.neutral);
+    const base = expressionsFromBlendshapes(relative, {
+      calibrated: this.settings.neutral !== null,
+      emotions: this.templates.length === 0,
+    });
+    const values = new Map<string, number>(Object.entries(base));
+    this.templates.forEach(({ target, shape }, i) => {
+      const weight = templateWeight(relative, shape);
+      this.templateWeights[i] = weight;
+      values.set(target, Math.max(values.get(target) ?? 0, weight));
+    });
+    const filtered = this.expressionFilter.filter(
+      this.expressionNames.map((name) => values.get(name) ?? 0),
+      time,
+      _values,
+    );
+    this.expressionNames.forEach((name, i) => {
+      this.expressions.set(name, Math.min(1, Math.max(0, filtered[i]!)));
+    });
+  }
+
   private send(now: number): void {
     if (!this.publisher.active) return;
     // 顔を見失ったら送るのをやめる(最後の姿勢で固まって見えるより、待機モーションに戻す)
@@ -362,7 +528,7 @@ export class WebcamBroadcast {
       const keyframe = now - this.lastKeyframeAt >= KEYFRAME_MS;
       if (keyframe) {
         this.lastKeyframeAt = now;
-        packet.dictionary = DICTIONARY;
+        packet.dictionary = this.expressionNames.map((name, id) => ({ id, name }));
         this.sentExpressions.clear();
       }
       const changed = this.changedExpressions();
@@ -400,7 +566,7 @@ export class WebcamBroadcast {
   /** 前回送った値から変わった表情だけ(視聴側は受け取った値を保持する) */
   private changedExpressions(): ExpressionEntry[] {
     const entries: ExpressionEntry[] = [];
-    EXPRESSION_NAMES.forEach((name, id) => {
+    this.expressionNames.forEach((name, id) => {
       const value = this.expressions.get(name) ?? 0;
       const sent = this.sentExpressions.get(name);
       if (sent !== undefined && Math.abs(sent - value) < 1 / 255) return;
@@ -424,11 +590,10 @@ export class WebcamBroadcast {
     this.video = null;
     this.rest = null;
     this.lastVideoTime = -1;
+    this.recording?.done();
     this.onStatus?.('Webカメラ配信を停止しました');
   }
 }
-
-const DICTIONARY: DictionaryEntry[] = EXPRESSION_NAMES.map((name, id) => ({ id, name }));
 
 /** 腕を体側に下ろした手(HMD配信の手が取れないときと同じ位置・向き) */
 function restHand(side: 'left' | 'right', headY: number): HandState {

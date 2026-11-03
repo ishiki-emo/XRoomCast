@@ -13,6 +13,7 @@ import {
   FaceLandmarker,
   HandLandmarker,
   PoseLandmarker,
+  type FaceLandmarkerResult,
   type Landmark,
   type NormalizedLandmark,
 } from '@mediapipe/tasks-vision';
@@ -53,6 +54,22 @@ export interface TrackingResult {
   face: FaceReading | null;
   pose: PoseReading | null;
   hands: HandReading[];
+}
+
+function readFace(result: FaceLandmarkerResult): FaceReading | null {
+  const matrix = result.facialTransformationMatrixes[0];
+  if (!matrix) return null;
+  // 列優先の4x4(位置はセンチメートル)
+  _matrix.fromArray(matrix.data);
+  const rotation = new THREE.Quaternion();
+  const position = new THREE.Vector3();
+  _matrix.decompose(position, rotation, _scale);
+  position.multiplyScalar(0.01);
+  const blendshapes = new Map<string, number>();
+  for (const category of result.faceBlendshapes[0]?.categories ?? []) {
+    blendshapes.set(category.categoryName, category.score);
+  }
+  return { rotation, position, blendshapes };
 }
 
 const _matrix = new THREE.Matrix4();
@@ -98,28 +115,17 @@ export class WebcamTracker {
     }
   }
 
-  /** 1フレーム推定する。timestamp はフレームごとに増える値(ms) */
-  detect(video: HTMLVideoElement, timestamp: number): TrackingResult {
+  /**
+   * 1フレーム推定する。timestamp はフレームごとに増える値(ms)。
+   * body が false なら体と手の推定を省く(手を動かさない設定のときに軽くする)
+   */
+  detect(video: HTMLVideoElement, timestamp: number, body = true): TrackingResult {
     const faceResult = this.face.detectForVideo(video, timestamp);
+    if (!body) return { face: readFace(faceResult), pose: null, hands: [] };
     const poseResult = this.pose.detectForVideo(video, timestamp);
     const handResult = this.hand.detectForVideo(video, timestamp);
 
-    let face: FaceReading | null = null;
-    const matrix = faceResult.facialTransformationMatrixes[0];
-    if (matrix) {
-      // 列優先の4x4(位置はセンチメートル)
-      _matrix.fromArray(matrix.data);
-      const rotation = new THREE.Quaternion();
-      const position = new THREE.Vector3();
-      _matrix.decompose(position, rotation, _scale);
-      position.multiplyScalar(0.01);
-      const blendshapes = new Map<string, number>();
-      for (const category of faceResult.faceBlendshapes[0]?.categories ?? []) {
-        blendshapes.set(category.categoryName, category.score);
-      }
-      face = { rotation, position, blendshapes };
-    }
-
+    const face = readFace(faceResult);
     const poseWorld = poseResult.worldLandmarks[0];
     const poseImage = poseResult.landmarks[0];
     const pose = poseWorld && poseImage ? { world: poseWorld, image: poseImage } : null;
