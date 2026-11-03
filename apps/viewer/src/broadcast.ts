@@ -168,6 +168,8 @@ let sessionId: string | null = null;
 /** 送信中のトラックを差し替えるための送信者。セッションを作り直さないために保つ */
 let sender: RTCRtpSender | null = null;
 let heartbeatTimer: number | null = null;
+/** マイクの取得・解放の通知(プレビューの鏡の口を動かす)。setupPreview が入れる */
+let onMicTrack: ((track: MediaStreamTrack | null) => void) | null = null;
 
 async function acquireMic(): Promise<MediaStreamTrack> {
   stream = await navigator.mediaDevices.getUserMedia({
@@ -175,6 +177,7 @@ async function acquireMic(): Promise<MediaStreamTrack> {
   });
   const track = stream.getAudioTracks()[0];
   if (!track) throw new Error('マイクが見つかりません');
+  onMicTrack?.(track);
   return track;
 }
 
@@ -182,6 +185,7 @@ async function acquireMic(): Promise<MediaStreamTrack> {
 function releaseMic(): void {
   stream?.getTracks().forEach((t) => t.stop());
   stream = null;
+  onMicTrack?.(null);
 }
 
 function startHeartbeat(): void {
@@ -486,6 +490,9 @@ function setupPreview(): void {
     auth,
     broadcast: hmdBroadcast,
   });
+  onMicTrack = (track) => preview.setMicTrack(track);
+  const liveTrack = stream?.getAudioTracks()[0];
+  if (liveTrack) preview.setMicTrack(liveTrack);
 
   // HMD配信(対応端末でのみボタンを出す)。パススルーと没入VRを選べる
   const arButton = document.getElementById('p-hmd-ar') as HTMLButtonElement;

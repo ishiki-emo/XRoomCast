@@ -20,6 +20,7 @@ import { PoseStreamPlayer } from '@xroomcast/sync';
 import { SfuTransport } from '@xroomcast/sync';
 import { SpatialPanel } from './spatialUI';
 import { XrPanelController } from './xrPanelController';
+import { MicLipSync } from './micLipSync';
 
 const IDLE_AFTER_MS = 5000;
 const IDLE_BLEND_MS = 700;
@@ -44,6 +45,8 @@ export interface PreviewHandle {
   onWristChange: ((axis: 'x' | 'y' | 'z', delta: number) => void) | null;
   setWristLabel(text: string): void;
   setMicLabel(on: boolean): void;
+  /** 鏡の口を動かすマイク音声。マイクの取得・解放に合わせて渡す(nullで口を閉じる) */
+  setMicTrack(track: MediaStreamTrack | null): void;
 }
 
 export type XrMode = 'ar' | 'vr';
@@ -110,6 +113,9 @@ export function setupBroadcastPreview(options: {
   let currentUrl: string | null = null;
   let liveBlend = 0;
   let lastPacketAt = 0;
+  const micLipSync = new MicLipSync();
+  /** リップシンクが口を駆動中か(マイクが止まった瞬間に口を閉じるために持つ) */
+  let lipSyncActive = false;
 
   const player = new PoseStreamPlayer();
   const transport = new SfuTransport(location.origin, room, auth);
@@ -191,6 +197,7 @@ export function setupBroadcastPreview(options: {
     onWristChange: null,
     setWristLabel: (text) => panel.setSectionTitle(1, text),
     setMicLabel: (on) => panel.setActive(on ? 'mic-on' : 'mic-off'),
+    setMicTrack: (track) => micLipSync.setTrack(track),
   };
 
   const panel = new SpatialPanel({
@@ -357,6 +364,17 @@ export function setupBroadcastPreview(options: {
       } else {
         const idleFrame = idleMotion.sample(now, avatar.restPose);
         avatar.applyPose(liveBlend > 0 ? blendPose(idleFrame, liveFrame, liveBlend) : idleFrame);
+      }
+      // 自分のマイクの音で口を動かす。視聴側(AvatarUnit)と同じく、音がある間は
+      // 口(母音)をリップシンクが所有して毎フレーム直接セットする
+      const expressions = avatar.vrm.expressionManager;
+      const lipSync = micLipSync.sample(delta);
+      if (expressions && lipSync) {
+        lipSyncActive = true;
+        for (const [name, value] of Object.entries(lipSync)) expressions.setValue(name, value);
+      } else if (expressions && lipSyncActive) {
+        lipSyncActive = false;
+        for (const name of ['aa', 'ih', 'ou', 'ee', 'oh']) expressions.setValue(name, 0);
       }
       avatar.update(delta);
     }
