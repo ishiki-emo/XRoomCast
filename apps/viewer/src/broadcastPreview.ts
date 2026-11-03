@@ -564,28 +564,58 @@ export function setupBroadcastPreview(options: {
   let turnArmed = true;
   const _turnQuat = new THREE.Quaternion();
   /**
-   * 左スティックの押し込みでマイクのミュートと復帰を切り替える(メニューを開かずに)。
-   * 切り替わったら左のコントローラを振動させて知らせる(オン: 1回、オフ: 2回)。
-   * 左スティックは何にも使っていないので、旋回(右スティック)やジェスチャーとぶつからない
+   * 左のコントローラのボタン(メニューを開かずに使う):
+   * - X: マイクのミュートと復帰。切り替わったら震えて知らせる(オン: 1回、オフ: 2回)
+   * - スティックの押し込み: 押している間、手を上下に動かして目線の高さを合わせる(前後左右の動きは無視)。
+   *   手を下げると目線が上がり、上げると下がる(床をつかんで動かす感覚)。手の動きと同じ量だけ動くので、
+   *   ミリ単位で合わせられる。1cm 動くごとに軽く震える
    */
-  const MIC_BUTTON = 3;
+  const MIC_BUTTON = 4;
+  const HEIGHT_GRAB_BUTTON = 3;
   let micButtonDown = false;
   /** 切り替えの途中(マイクの開始には少しかかる)は、押しても受け付けない */
   let micToggling = false;
-  function handleMicButton(): void {
+  /** 目線の高さを合わせている間の、押し込んだときの手の高さと目線の高さ */
+  let heightGrab: { handY: number; shift: number; lastCm: number } | null = null;
+  function handleLeftButtons(frame: XRFrame, refSpace: XRReferenceSpace): void {
     const session = xrSession;
     if (!session) return;
+    let grabbing = false;
     for (const source of session.inputSources) {
       if (source.handedness !== 'left' || source.hand || !source.gamepad) continue;
-      const pressed = source.gamepad.buttons[MIC_BUTTON]?.pressed ?? false;
+      const buttons = source.gamepad.buttons;
+      const pressed = buttons[MIC_BUTTON]?.pressed ?? false;
       if (pressed && !micButtonDown && !micToggling && handle.onMicToggle) {
         micToggling = true;
         handle.onMicToggle();
       }
       micButtonDown = pressed;
+
+      if (!(buttons[HEIGHT_GRAB_BUTTON]?.pressed ?? false) || !source.gripSpace) continue;
+      const pose = frame.getPose(source.gripSpace, refSpace);
+      if (!pose) continue;
+      grabbing = true;
+      const handY = pose.transform.position.y;
+      if (!heightGrab) {
+        heightGrab = { handY, shift: broadcast.bodySettings.heightShift, lastCm: 0 };
+        pulseLeft(0.3, 30);
+        continue;
+      }
+      // 手を下げた分だけ目線を上げる。1mm より細かい揺れでは設定を書き換えない(保存と見出しの描き直しが毎フレーム走るため)
+      const shift = Math.round((heightGrab.shift + (heightGrab.handY - handY)) * 1000) / 1000;
+      const body = broadcast.bodySettings;
+      if (Math.abs(shift - body.heightShift) >= 0.001) {
+        broadcast.setBodySettings({ ...body, heightShift: shift });
+        const cm = Math.trunc((broadcast.bodySettings.heightShift - heightGrab.shift) * 100);
+        if (cm !== heightGrab.lastCm) {
+          heightGrab.lastCm = cm;
+          pulseLeft(0.15, 15);
+        }
+      }
     }
+    if (!grabbing) heightGrab = null;
   }
-  function pulseMic(on: boolean): void {
+  function pulseLeft(value: number, duration: number): void {
     const session = xrSession;
     if (!session) return;
     for (const source of session.inputSources) {
@@ -593,10 +623,12 @@ export function setupBroadcastPreview(options: {
       const actuator = source.gamepad?.hapticActuators?.[0] as
         | { pulse?: (value: number, duration: number) => Promise<boolean> }
         | undefined;
-      if (!actuator?.pulse) continue;
-      void actuator.pulse(0.6, 80);
-      if (!on) window.setTimeout(() => void actuator.pulse?.(0.6, 80), 180);
+      void actuator?.pulse?.(value, duration);
     }
+  }
+  function pulseMic(on: boolean): void {
+    pulseLeft(0.6, 80);
+    if (!on) window.setTimeout(() => pulseLeft(0.6, 80), 180);
   }
 
   function handleSnapTurn(frame: XRFrame): void {
@@ -794,8 +826,8 @@ export function setupBroadcastPreview(options: {
     }
     if (frame && xrSession) {
       handleSnapTurn(frame);
-      handleMicButton();
       const refSpace = renderer.xr.getReferenceSpace();
+      if (refSpace) handleLeftButtons(frame, refSpace);
       if (refSpace) {
         if (!broadcast.calibrated) {
           const viewer = frame.getViewerPose(refSpace);
