@@ -249,7 +249,9 @@ export function setupBroadcastPreview(options: {
     if (xrSession) return;
     const session = await navigator.xr!.requestSession(
       mode === 'ar' ? 'immersive-ar' : 'immersive-vr',
-      { optionalFeatures: ['local-floor'] },
+      // hand-tracking は要求しないと素手の関節が取れない(コントローラだけになる)。
+      // body-tracking は Quest の実験機能で、開始時に許可を求められる
+      { optionalFeatures: ['local-floor', 'hand-tracking', 'body-tracking'] },
     );
     xrSession = session;
     // パススルーでは背景を消して現実を見せる。VRは暗い背景とグリッドを残す
@@ -260,8 +262,11 @@ export function setupBroadcastPreview(options: {
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(session);
     // パネルを指していないときのトリガーは位置合わせに使う
-    session.addEventListener('select', () => {
+    session.addEventListener('select', (event) => {
       if (panelController.pointing) return;
+      // 素手のピンチは身振りの途中でも起きるため、合わせ直しには使わない
+      // (素手のときはパネルの「位置を合わせ直す」を使う)
+      if (event.inputSource.hand) return;
       broadcast.recalibrate();
       setStatus('位置を合わせ直しています...');
     });

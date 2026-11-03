@@ -153,6 +153,8 @@ export function blendPose(from: SampledFrame, to: SampledFrame, t: number): Samp
     // 表情・手指は切り替え先を優先する(急変しても目立ちにくい)
     expressions: to.expressions ?? from.expressions,
     fingers: to.fingers ?? from.fingers,
+    // 体は補間せず途中で切り替える(待機側には体が無く、腰の推定方式ごと変わるため)
+    body: ratio < 0.5 ? from.body : to.body,
     pose: {
       head: node(from.pose.head, to.pose.head),
       leftHand: node(from.pose.leftHand, to.pose.leftHand),
