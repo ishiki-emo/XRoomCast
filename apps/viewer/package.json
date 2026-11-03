@@ -12,6 +12,7 @@
     "deploy": "npm run build && tsc --noEmit -p worker && node scripts/stripVrmFromDist.mjs && wrangler deploy"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "1.1.1",
     "@pixiv/three-vrm": "^3.4.0",
     "@types/qrcode-generator": "^0.0.16",
     "@xroomcast/fixtures": "*",
