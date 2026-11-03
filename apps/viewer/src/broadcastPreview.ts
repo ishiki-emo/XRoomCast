@@ -10,6 +10,8 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { Reflector } from 'three/addons/objects/Reflector.js';
+import { VRMFirstPerson } from '@pixiv/three-vrm';
 import { decodePacket } from '@xroomcast/protocol';
 import { Avatar } from '@xroomcast/viewer-core';
 import type { AuthProvider, SampledFrame } from '@xroomcast/sync';
@@ -264,16 +266,26 @@ export function setupBroadcastPreview(options: {
       {
         // 自分に入る: VRChat のように、アバターを自分の体に重ねる(下を向くと自分の体が見える)。
         // 鏡で見る: 右前方に立つアバターで、視聴者から見た自分を確かめる
+        // 自分＋鏡: 自分に入ったまま、右前方の姿見に自分の姿が映る(VRChat の鏡と同じ)。
+        // アバターを前に: 右前方にアバターを立たせて、視聴者から見た自分を確かめる
         title: '視点',
-        columns: 3,
+        columns: 2,
         options: [
           { label: '自分に入る', value: 'view-first' },
-          { label: '鏡で見る', value: 'view-mirror' },
+          { label: '自分＋鏡', value: 'view-first-mirror' },
+          { label: 'アバターを前に', value: 'view-front' },
           { label: '隠す', value: 'view-hidden' },
         ],
         initial: 'view-first',
         onSelect: (value) => {
-          viewMode = value === 'view-first' ? 'first' : value === 'view-mirror' ? 'mirror' : 'hidden';
+          viewMode =
+            value === 'view-first'
+              ? 'first'
+              : value === 'view-first-mirror'
+                ? 'first-mirror'
+                : value === 'view-front'
+                  ? 'front'
+                  : 'hidden';
           setMirrorVisible(viewMode !== 'hidden');
           applyViewLayers();
           updateXrLayout();
@@ -391,6 +403,7 @@ export function setupBroadcastPreview(options: {
       setAvatarScale(1);
       avatarRoot.visible = true;
       applyViewLayers();
+      showMirror(false);
       setStatus('HMD配信を終了しました');
     });
   }
@@ -472,8 +485,38 @@ export function setupBroadcastPreview(options: {
    * (視聴者と重なるとハイタッチの邪魔になる)
    */
   const _mirrorOffset = new THREE.Vector3();
+  const _mirrorTarget = new THREE.Vector3();
   /** VRでの自分のアバターの見せ方(パネルの「視点」) */
-  let viewMode: 'first' | 'mirror' | 'hidden' = 'first';
+  let viewMode: 'first' | 'first-mirror' | 'front' | 'hidden' = 'first';
+  const isInside = (): boolean => viewMode === 'first' || viewMode === 'first-mirror';
+
+  /**
+   * 姿見(自分＋鏡)。three.js の Reflector で、鏡に映した視点からシーンを描く。VRでは目ごとに描き直すので
+   * 重くなる。そのため選んでいるときだけシーンに置く。鏡には「他人から見た」層(頭のある体)を映すので、
+   * 自分の視界に髪がかからないまま、鏡の中には顔まで映る
+   */
+  const MIRROR_WIDTH = 1.0;
+  const MIRROR_HEIGHT = 1.7;
+  let mirror: Reflector | null = null;
+  function showMirror(on: boolean): void {
+    if (!on) {
+      if (mirror) scene.remove(mirror);
+      return;
+    }
+    if (!mirror) {
+      mirror = new Reflector(new THREE.PlaneGeometry(MIRROR_WIDTH, MIRROR_HEIGHT), {
+        textureWidth: 1024,
+        textureHeight: Math.round((1024 * MIRROR_HEIGHT) / MIRROR_WIDTH),
+        color: 0xc8c8c8,
+      });
+    }
+    mirror.camera.layers.set(0);
+    mirror.camera.layers.enable(
+      avatar?.vrm.firstPerson?.thirdPersonOnlyLayer ??
+        VRMFirstPerson.DEFAULT_THIRDPERSON_ONLY_LAYER,
+    );
+    scene.add(mirror);
+  }
 
   function setAvatarScale(scale: number): void {
     if (avatarRoot.scale.x === scale) return;
@@ -489,7 +532,7 @@ export function setupBroadcastPreview(options: {
   function applyViewLayers(): void {
     const firstPerson = avatar?.vrm.firstPerson;
     if (!firstPerson) return;
-    const inside = xrSession !== null && viewMode === 'first';
+    const inside = xrSession !== null && isInside();
     camera.layers.set(0);
     camera.layers.enable(
       inside ? firstPerson.firstPersonOnlyLayer : firstPerson.thirdPersonOnlyLayer,
@@ -497,9 +540,19 @@ export function setupBroadcastPreview(options: {
   }
 
   function updateXrLayout(): void {
-    if (!xrSession || !broadcast.getWireToXr(peerRoot)) return;
+    if (!xrSession || !broadcast.getWireToXr(peerRoot)) {
+      showMirror(false);
+      return;
+    }
     peerRoot.updateMatrixWorld();
-    if (viewMode === 'first') {
+    showMirror(viewMode === 'first-mirror');
+    if (mirror && viewMode === 'first-mirror') {
+      // 右前方の床に立てた姿見。ワイヤ座標は「正面=+Z、右=-X」。下端が床から少し浮く高さにし、配信者の方へ向ける
+      mirror.position.copy(peerRoot.localToWorld(_mirrorOffset.set(-0.8, MIRROR_HEIGHT / 2 + 0.05, 1.3)));
+      _mirrorTarget.copy(peerRoot.position).setY(mirror.position.y);
+      mirror.lookAt(_mirrorTarget);
+    }
+    if (isInside()) {
       // 自分に入る: ワイヤ座標をそのまま現実へ戻す配置にして、身長の比で大きさを戻す。
       // ワイヤの長さは「現実の長さ × 身長の比」なので、配置を 1/比 にすると、アバターの目が自分の目、
       // 手がコントローラの位置に重なる
