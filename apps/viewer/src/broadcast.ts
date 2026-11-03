@@ -841,8 +841,9 @@ function setupPreview(): void {
   const enter = (mode: XrMode, button: HTMLButtonElement): void => {
     button.disabled = true;
     // HMDに入ると画面のボタンを押せなくなるので、マイクもここで入れる(音声とポーズは別経路)。
-    // マイクの許可が済んでいれば、マイクの開始(音声の接続)はVRに入るのと並行して進める。
-    // 許可がまだなら、許可の確認がVRの裏に隠れないよう、先にマイクを始めてから入る
+    // マイクの許可が済んでいれば、VRに入ってからマイクを始める(マイクの接続を待たずにVRへ入れる)。
+    // 許可がまだなら、許可の確認がVRの裏に隠れないよう、先にマイクを始めてから入る。
+    // VRのセッションの要求と同時にマイクを始める版は、実機でトラッキングが始まらなくなったので避ける
     const startMic = () =>
       setMicLive(true)
         .catch(() => {
@@ -851,9 +852,9 @@ function setupPreview(): void {
         .then(() => preview.setMicLabel(live));
     void micPermissionGranted()
       .then(async (granted) => {
-        const mic = granted ? startMic() : await startMic();
+        if (!granted) await startMic();
         await preview.enterHmd(mode);
-        await mic;
+        if (granted) await startMic();
         // ポーズ配信の登録で席が決まってから、マイクの「自動」を自分の席へ合わせ直す
         await hmdBroadcast.connecting;
         await realignMicSeat();

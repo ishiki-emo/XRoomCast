@@ -286,28 +286,14 @@ export function setupBroadcastPreview(options: {
 
   async function enterHmd(mode: XrMode): Promise<void> {
     if (xrSession) return;
-    // SFUへの接続(数秒〜十数秒)は、VRに入る準備と並行して始める。VRのセッションがいらないため
     startedAt = performance.now();
     firstXrFrameAt = null;
-    const connected = broadcast.connect().then(
-      () => logStartup('配信開始'),
-      (error: unknown) => {
-        setStatus(`HMD配信の接続に失敗しました(VRは続けられます): ${String(error)}`);
-      },
+    const session = await navigator.xr!.requestSession(
+      mode === 'ar' ? 'immersive-ar' : 'immersive-vr',
+      // hand-tracking は要求しないと素手の関節が取れない(コントローラだけになる)。
+      // body-tracking は Quest の実験機能で、開始時に許可を求められる
+      { optionalFeatures: ['local-floor', 'hand-tracking', 'body-tracking'] },
     );
-    let session: XRSession;
-    try {
-      session = await navigator.xr!.requestSession(
-        mode === 'ar' ? 'immersive-ar' : 'immersive-vr',
-        // hand-tracking は要求しないと素手の関節が取れない(コントローラだけになる)。
-        // body-tracking は Quest の実験機能で、開始時に許可を求められる
-        { optionalFeatures: ['local-floor', 'hand-tracking', 'body-tracking'] },
-      );
-    } catch (error) {
-      // VRに入れなかったら、先に始めた接続も閉じる(席だけ取ったままにしない)
-      void connected.then(() => broadcast.close());
-      throw error;
-    }
     logStartup('VRのセッション開始');
     xrSession = session;
     // パススルーでは背景を消して現実を見せる。VRは暗い背景とグリッドを残す
@@ -316,9 +302,16 @@ export function setupBroadcastPreview(options: {
 
     // 先に描画を始める。SFUへの接続(DataChannel が開くまで数秒〜十数秒かかることがある)を
     // 待ってからだと、その間ヘッドセットへ1枚も絵を送れず、頭もコントローラも止まって見える。
-    // 接続は裏で進め、つながるまでは送らないだけにする(sendFrame は接続前なら何もしない)
+    // 接続は描画を始めてから裏で進め、つながるまでは送らないだけにする(sendFrame は接続前なら何もしない)。
+    // VRのセッションの要求より前に接続を始める版は、実機でトラッキングが始まらなくなったので戻した
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(session);
+    broadcast.connect().then(
+      () => logStartup('配信開始'),
+      (error: unknown) => {
+        setStatus(`HMD配信の接続に失敗しました(VRは続けられます): ${String(error)}`);
+      },
+    );
     // パネルを指していないときのトリガーは位置合わせに使う
     session.addEventListener('select', (event) => {
       if (panelController.pointing) return;

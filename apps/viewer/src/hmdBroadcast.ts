@@ -59,6 +59,8 @@ const CURL_FOLLOW = 0.35;
 const CONTROLLER_GESTURE_FRAMES = 2;
 const HAND_GESTURE_FRAMES = 4;
 const NEUTRAL: GestureReading = { gesture: GESTURE.neutral, weight: 0 };
+/** SFUへの接続を試す回数 */
+const CONNECT_ATTEMPTS = 3;
 /** 手が取れず体側に下ろしているとき(待機モーションと同じ軽い曲げ) */
 const RELAXED_CURLS: FingerCurls = [0.11, 0.16, 0.16, 0.16, 0.18];
 
@@ -210,7 +212,7 @@ export class HmdBroadcast {
 
   /** SFUへパブリッシャーとして接続する */
   async connect(): Promise<void> {
-    this.connecting = this.publisher.connect().then(() => {
+    this.connecting = this.connectWithRetry().then(() => {
       this.expressions.restart();
       this.lastExpressionAt = performance.now();
       this.onStatus?.('HMDから配信中');
@@ -220,6 +222,25 @@ export class HmdBroadcast {
     } catch (error) {
       this.connecting = null;
       throw error;
+    }
+  }
+
+  /**
+   * SFUへの接続を、失敗したら少し待ってやり直す(最大 CONNECT_ATTEMPTS 回)。
+   * DataChannel が開かないまま時間切れになることがあり、1回で諦めると配信が始まらないままになる
+   */
+  private async connectWithRetry(): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.publisher.connect();
+        return;
+      } catch (error) {
+        this.publisher.close();
+        if (attempt >= CONNECT_ATTEMPTS) throw error;
+        console.warn(`[hmd] 接続に失敗しました(${attempt}回目)。やり直します:`, error);
+        this.onStatus?.(`接続をやり直しています(${attempt + 1}/${CONNECT_ATTEMPTS})...`);
+        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+      }
     }
   }
 
