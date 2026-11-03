@@ -19,7 +19,8 @@ const tmpDir = path.join(here, '.tmp');
 
 const WORKER_NAME = 'xroomcast';
 const BUCKET_NAME = 'xroomcast-assets';
-const KV_TITLE = `${WORKER_NAME}-SFU_STATE`;
+// wrangler 4 はバインディング名そのまま(SFU_STATE)で作る。旧版は「Worker名-」を前に付けていた
+const KV_TITLES = ['SFU_STATE', `${WORKER_NAME}-SFU_STATE`];
 
 // ---- セッション状態(メモリ) ----
 export const session = {
@@ -347,7 +348,7 @@ async function findExistingKv() {
   for (let i = out.indexOf('['); i !== -1; i = out.indexOf('[', i + 1)) {
     try {
       const list = JSON.parse(out.slice(i));
-      if (Array.isArray(list)) return list.find((ns) => ns.title === KV_TITLE)?.id ?? null;
+      if (Array.isArray(list)) return list.find((ns) => KV_TITLES.includes(ns.title))?.id ?? null;
     } catch { /* 次の '[' を試す */ }
   }
   return null;
