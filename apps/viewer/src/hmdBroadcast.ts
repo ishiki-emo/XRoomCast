@@ -12,12 +12,10 @@
  * ボディトラッキングが使える端末(Quest)では、腰・胸・足も体セクションで送る
  * (bodyTracking.ts)。視聴者側は頭からの腰の推定をやめ、送られた体をそのまま使う。
  *
- * SFUへの publish 手順はブリッジ(apps/bridge/src/sfu.ts)と同じで、
- * App SecretはWorkerのプロキシ側にあるためブラウザには出てこない。
+ * SFUへの接続と送信は posePublisher.ts(Webカメラ配信と共有)。
  */
 import * as THREE from 'three';
 import {
-  encodePacket,
   type FingerCurls,
   type Packet,
   type PoseNode,
@@ -25,15 +23,11 @@ import {
   type Vec3,
 } from '@xroomcast/protocol';
 import type { AuthProvider } from '@xroomcast/sync';
-import { withRoom } from '@xroomcast/sync';
 import { readBody, type BodyFrame } from './bodyTracking';
 import { HandReader, WRIST_TO_HAND } from './handTracking';
+import { PosePublisher } from './posePublisher';
 
-const CF_STUN_URL = 'stun:stun.cloudflare.com:3478';
-const DATA_CHANNEL_NAME = 'pose';
 const SEND_INTERVAL_MS = 1000 / 30;
-/** パブリッシャー登録のハートビート(Worker側は15分で失効とみなす) */
-const HEARTBEAT_MS = 4 * 60 * 1000;
 /** 指は2パケットに1回(15Hz)。ブリッジと同じ頻度で、視聴者側も保持で滑らかに見える */
 const FINGER_EVERY = 2;
 
@@ -127,13 +121,8 @@ interface Calibration {
 export class HmdBroadcast {
   onStatus: ((text: string, isError?: boolean) => void) | null = null;
 
-  private pc: RTCPeerConnection | null = null;
-  private channel: RTCDataChannel | null = null;
-  private sessionId: string | null = null;
-  private heartbeat: number | null = null;
+  private readonly publisher: PosePublisher;
   private calibration: Calibration | null = null;
-  private sequence = 0;
-  private startedAt = 0;
   private lastSentAt = 0;
   /** 表示中のアバターの頭の高さ(m)。身長補正に使う */
   private avatarHeight: number | null = null;
@@ -150,83 +139,22 @@ export class HmdBroadcast {
   }
 
   constructor(
-    private readonly room: string,
-    private readonly auth: AuthProvider,
+    room: string,
+    auth: AuthProvider,
     /** 配信者名。席(slot)の割り当てとコンソールの自動席解決の鍵になる */
-    private readonly pid: () => string = () => 'hmd',
-  ) {}
+    pid: () => string = () => 'hmd',
+  ) {
+    this.publisher = new PosePublisher(room, auth, pid, (text) => this.onStatus?.(text));
+  }
 
   get active(): boolean {
-    return this.channel?.readyState === 'open';
+    return this.publisher.active;
   }
 
-  private async api(path: string, body: unknown): Promise<Record<string, unknown>> {
-    const res = await fetch(withRoom(path, this.room), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(await this.auth.headers()) },
-      body: JSON.stringify(body),
-    });
-    const data = (await res.json()) as Record<string, unknown>;
-    if (!res.ok) throw new Error(String(data.error ?? `${path} が失敗 (${res.status})`));
-    return data;
-  }
-
-  /** SFUへパブリッシャーとして接続する(ブリッジと同じ手順) */
+  /** SFUへパブリッシャーとして接続する */
   async connect(): Promise<void> {
-    this.onStatus?.('SFUへ接続中...');
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: CF_STUN_URL }],
-      bundlePolicy: 'max-bundle',
-    });
-    this.pc = pc;
-
-    // m=applicationセクションを作るためのダミーチャネル
-    pc.createDataChannel('bootstrap');
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    const session = await this.api('/api/sfu/sessions/new', { sdp: offer.sdp });
-    this.sessionId = String(session.sessionId);
-    await pc.setRemoteDescription({ type: 'answer', sdp: String(session.sdp) });
-
-    const result = await this.api('/api/sfu/datachannels/new', {
-      sessionId: this.sessionId,
-      dataChannels: [{ location: 'local', dataChannelName: DATA_CHANNEL_NAME }],
-    });
-    const channels = result.dataChannels as { id: number }[] | undefined;
-    const channelId = channels?.[0]?.id;
-    if (channelId === undefined) throw new Error('DataChannel IDが取得できませんでした');
-
-    const channel = pc.createDataChannel(DATA_CHANNEL_NAME, {
-      negotiated: true,
-      id: channelId,
-    });
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('DataChannelのopen待ちがタイムアウト')), 15000);
-      channel.onopen = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-      channel.onerror = () => {
-        clearTimeout(timer);
-        reject(new Error('DataChannelの接続に失敗しました'));
-      };
-    });
-    this.channel = channel;
-
-    await this.register();
-    this.heartbeat = window.setInterval(() => void this.register(), HEARTBEAT_MS);
-    this.startedAt = performance.now();
-    this.sequence = 0;
+    await this.publisher.connect();
     this.onStatus?.('HMDから配信中');
-  }
-
-  /** 視聴者が購読できるよう、自分のセッションIDを登録する */
-  private async register(): Promise<void> {
-    if (!this.sessionId) return;
-    // pid はブリッジと席を分ける・再接続で同じ席を保つための固定ID。
-    // コンソールの配信者名と同じ値を使う(自動席解決がそれを前提にする)
-    await this.api('/api/sfu/publisher', { sessionId: this.sessionId, pid: this.pid() });
   }
 
   /**
@@ -362,9 +290,7 @@ export class HmdBroadcast {
       rotation: [0, 0, sign * -0.707, 0.707] as Quat,
     });
 
-    const packet: Packet = {
-      sequence: this.sequence & 0xffff,
-      timestamp: Math.round(now - this.startedAt) >>> 0,
+    const packet: Omit<Packet, 'sequence' | 'timestamp'> = {
       pose: {
         head,
         leftHand: hands.left ?? fallback(1),
@@ -374,7 +300,7 @@ export class HmdBroadcast {
     // 体は補間の要なので毎パケット送る(取れないフレームは送らず、視聴者側は頭からの推定に戻る)
     const body = readBody(frame as BodyFrame, refSpace, (p, out) => this.toWirePosition(p, out));
     if (body) packet.body = body;
-    if (this.sequence % FINGER_EVERY === 0) {
+    if (this.publisher.packetIndex % FINGER_EVERY === 0) {
       packet.fingers = {
         leftCurls: curls.left,
         rightCurls: curls.right,
@@ -382,28 +308,11 @@ export class HmdBroadcast {
         rightSpread: spread.right,
       };
     }
-    this.sequence++;
-    // encodePacketの戻りはUint8Array<ArrayBufferLike>。sendはArrayBufferを要求する
-    const bytes = encodePacket(packet);
-    this.channel!.send(
-      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
-    );
+    this.publisher.send(packet, now);
   }
 
   close(): void {
-    if (this.heartbeat !== null) {
-      window.clearInterval(this.heartbeat);
-      this.heartbeat = null;
-    }
-    // 明示的な退席(席のアバター・音声もサーバー側で片付く)。
-    // 送れなくても15分で自動失効する
-    if (this.sessionId) {
-      void this.api('/api/sfu/publisher', { sessionId: null, pid: this.pid() }).catch(() => {});
-    }
-    this.channel = null;
-    this.pc?.close();
-    this.pc = null;
-    this.sessionId = null;
+    this.publisher.close();
     this.calibration = null;
     this.onStatus?.('HMD配信を停止しました');
   }

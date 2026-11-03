@@ -14,6 +14,7 @@ import { setupRoomSettings } from './roomSettings';
 import { setupStageConsole } from './stageConsole';
 import { withRoom } from '@xroomcast/sync';
 import { DEFAULT_WRIST_OFFSET, HmdBroadcast, setWristOffset } from './hmdBroadcast';
+import { WebcamBroadcast } from './webcamBroadcast';
 import type { PeerState } from '@xroomcast/viewer-core';
 
 const CF_STUN_URL = 'stun:stun.cloudflare.com:3478';
@@ -505,6 +506,50 @@ if (!key) {
 }
 
 /**
+ * Webカメラ配信(VSeeFace・ブリッジ・HMDなし)。HMD配信と同じく、マイクも一緒に始める
+ * (配信者が「声が出ていない」ことに気づきにくいため)
+ */
+function setupWebcam(webcam: WebcamBroadcast, statusEl: HTMLElement): void {
+  const button = document.getElementById('p-webcam') as HTMLButtonElement;
+  const recalibrate = document.getElementById('p-webcam-recal') as HTMLButtonElement;
+  const video = document.getElementById('p-webcam-video') as HTMLVideoElement;
+  // カメラを使えない環境(httpや古いブラウザ)では出さない
+  if (!navigator.mediaDevices?.getUserMedia) return;
+  button.hidden = false;
+  const render = (): void => {
+    button.textContent = webcam.active ? '⏹ Webカメラ配信を止める' : '📷 Webカメラで配信';
+    button.classList.toggle('danger', webcam.active);
+    recalibrate.hidden = !webcam.active;
+    video.hidden = !webcam.active;
+  };
+  button.addEventListener('click', () => {
+    if (webcam.active) {
+      webcam.stop();
+      render();
+      return;
+    }
+    button.disabled = true;
+    setMicLive(true)
+      .catch(() => {
+        statusEl.textContent = 'マイクを開始できませんでした(そのまま配信します)';
+      })
+      .then(() => webcam.start(video))
+      // ポーズ配信の登録で席が決まったので、マイクの「自動」を自分の席へ合わせ直す
+      .then(() => realignMicSeat())
+      .catch((error: unknown) => {
+        webcam.stop();
+        statusEl.textContent = `Webカメラ配信を開始できませんでした: ${String(error)}`;
+      })
+      .finally(() => {
+        button.disabled = false;
+        render();
+      });
+  });
+  recalibrate.addEventListener('click', () => webcam.recalibrate());
+  render();
+}
+
+/**
  * 3Dプレビューと視聴者の気配。
  * 配信者として Presence WebSocket に繋ぐ(キーはWorker側で検証される)
  */
@@ -512,6 +557,8 @@ function setupPreview(): void {
   const previewStatus = document.getElementById('p-status') as HTMLElement;
   const hmdBroadcast = new HmdBroadcast(config.room, auth, currentPid);
   hmdBroadcast.onStatus = (text) => (previewStatus.textContent = text);
+  const webcamBroadcast = new WebcamBroadcast(config.room, auth, currentPid);
+  webcamBroadcast.onStatus = (text) => (previewStatus.textContent = text);
 
   const preview = setupBroadcastPreview({
     canvas: document.getElementById('p-canvas') as HTMLCanvasElement,
@@ -519,6 +566,7 @@ function setupPreview(): void {
     room: config.room,
     auth,
     broadcast: hmdBroadcast,
+    onAvatarHeight: (height) => webcamBroadcast.setAvatarHeight(height),
   });
   onMicTrack = (track) => preview.setMicTrack(track);
   const liveTrack = stream?.getAudioTracks()[0];
@@ -557,6 +605,8 @@ function setupPreview(): void {
   };
   arButton.addEventListener('click', () => enter('ar', arButton));
   vrButton.addEventListener('click', () => enter('vr', vrButton));
+
+  setupWebcam(webcamBroadcast, previewStatus);
 
   // 空間パネルからのマイク操作を画面側と同期させる
   preview.onMicToggle = () => {

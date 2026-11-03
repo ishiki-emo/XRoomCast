@@ -157,6 +157,18 @@
         background: #1b1b22;
         touch-action: none;
       }
+      /* Webカメラの映像(本人の確認用。鏡のように左右反転して見せる) */
+      #p-webcam-video {
+        display: block;
+        width: min(240px, 100%);
+        margin-top: 8px;
+        border-radius: 8px;
+        border: 1px solid #333;
+        transform: scaleX(-1);
+      }
+      #p-webcam-video[hidden] {
+        display: none;
+      }
       #p-status {
         margin-top: 8px;
         color: #aaa;
@@ -371,6 +383,22 @@
             <button id="p-hmd-vr" class="small primary" hidden>🌌 VRで配信</button>
             <button id="p-mirror" class="small on" hidden>🪞 鏡を表示</button>
           </div>
+          <div class="row">
+            <button id="p-webcam" class="small primary" hidden>📷 Webカメラで配信</button>
+            <button id="p-webcam-recal" class="small" hidden>正面を取り直す</button>
+          </div>
+          <video id="p-webcam-video" hidden></video>
+          <details class="note">
+            <summary>ⓘ Webカメラ配信について(VSeeFaceもHMDも不要)</summary>
+            ・このページだけで配信できます。顔の向き・表情(まばたき・口・笑顔)・上半身と手の動きを、カメラの映像から推定して送ります<br />
+            ・<strong>映像はどこにも送りません。</strong>推定はこのPCのブラウザの中だけで行います(初回は推定のモデルを数十MBダウンロードします)<br />
+            ・<strong>マイクも自動で開始します。</strong>声を出すと、視聴者側では声に合わせて口が動きます<br />
+            ・開始したときの顔の向きが正面になります。ずれたら「正面を取り直す」を押してください<br />
+            ・カメラから少し離れて、胸から上と両手が映るようにすると手も動きます。手が映っていないときは下ろした姿勢になります<br />
+            ・顔が映らないと送信を止めます(視聴者側では待機モーションに戻ります)<br />
+            ・<strong>ブリッジやHMD配信とは同時に使わないでください</strong>(同じ配信者名で、後から始めた方が優先されます)<br />
+            ・GPUの無いPCでは重くなることがあります
+          </details>
           <div id="wrist-row" hidden>
             <div class="row">
               <span class="ar-label">手首の向き</span>

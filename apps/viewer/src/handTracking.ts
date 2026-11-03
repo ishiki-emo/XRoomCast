@@ -97,6 +97,27 @@ function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
+/**
+ * 1本の指の曲がり具合(0..1)。関節の位置を付け根から指先の順に渡す。
+ * 骨の向き(隣り合う関節の差)どうしの角度を足す=関節ごとの折れ角の合計。
+ * Webカメラ配信(webcamTracking.ts)も同じ計算を使う
+ */
+export function curlFromPoints(points: readonly THREE.Vector3[], isThumb: boolean): number {
+  for (let j = 0; j < points.length - 1; j++) {
+    _dirs[j]!.subVectors(points[j + 1]!, points[j]!);
+  }
+  let total = 0;
+  for (let j = 0; j < points.length - 2; j++) total += _dirs[j]!.angleTo(_dirs[j + 1]!);
+  const rest = isThumb ? THUMB_REST_CURL_ANGLE : REST_CURL_ANGLE;
+  const full = isThumb ? THUMB_FULL_CURL_ANGLE : FULL_CURL_ANGLE;
+  return clamp01((total - rest) / (full - rest));
+}
+
+/** 人差し指と小指の基節骨の向きから、指の開き具合(0..1) */
+export function spreadFromDirs(indexDir: THREE.Vector3, pinkyDir: THREE.Vector3): number {
+  return clamp01(0.5 + (indexDir.angleTo(pinkyDir) - REST_SPREAD_ANGLE) / SPREAD_RANGE);
+}
+
 /** 左右それぞれの手を読む。前回値を持つのでセッション中は同じインスタンスを使う */
 export class HandReader {
   private readonly previous: Record<'left' | 'right', { curls: FingerCurls; spread: number } | null> =
@@ -123,23 +144,12 @@ export class HandReader {
         const p = pose.transform.position;
         _points[j]!.set(p.x, p.y, p.z);
       }
-      // 骨の向き(隣り合う関節の差)どうしの角度を足す=関節ごとの折れ角の合計
-      for (let j = 0; j < joints.length - 1; j++) {
-        _dirs[j]!.subVectors(_points[j + 1]!, _points[j]!);
-      }
-      let total = 0;
-      for (let j = 0; j < joints.length - 2; j++) total += _dirs[j]!.angleTo(_dirs[j + 1]!);
-
-      const isThumb = f === 0;
-      const rest = isThumb ? THUMB_REST_CURL_ANGLE : REST_CURL_ANGLE;
-      const full = isThumb ? THUMB_FULL_CURL_ANGLE : FULL_CURL_ANGLE;
-      curls[f] = clamp01((total - rest) / (full - rest));
-
+      curls[f] = curlFromPoints(_points.slice(0, joints.length), f === 0);
       // 基節骨(proximal → intermediate)の向きを、開き具合の計算用に取っておく
-      if (f === 1) _indexDir.copy(_dirs[1]!);
-      if (f === 4) _pinkyDir.copy(_dirs[1]!);
+      if (f === 1) _indexDir.subVectors(_points[2]!, _points[1]!);
+      if (f === 4) _pinkyDir.subVectors(_points[2]!, _points[1]!);
     }
-    let spread = clamp01(0.5 + (_indexDir.angleTo(_pinkyDir) - REST_SPREAD_ANGLE) / SPREAD_RANGE);
+    let spread = spreadFromDirs(_indexDir, _pinkyDir);
 
     const prev = this.previous[side];
     if (prev) {
