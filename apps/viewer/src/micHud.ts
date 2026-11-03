@@ -13,8 +13,8 @@ import * as THREE from 'three';
 /** 表示を載せるレイヤー。目のカメラだけで描き、鏡のカメラでは描かない */
 export const HUD_LAYER = 11;
 
-/** 頭から見た置き場所(m)。左下、少し離して視界の端に入る程度 */
-const OFFSET = new THREE.Vector3(-0.13, -0.11, -0.55);
+/** 頭から見た置き場所(m)。左下の、視界の端に入る程度(正面から左へ約17°・下へ約15°) */
+const OFFSET = new THREE.Vector3(-0.17, -0.15, -0.55);
 const WIDTH = 0.1;
 const CANVAS_W = 256;
 const CANVAS_H = 80;
