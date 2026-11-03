@@ -121,15 +121,25 @@ export async function resolveBroadcastUrl(
       url = new URL(location, url);
     } else if (res.status === 404) {
       throw new Error('このURLは使えません(ルームが閉じられて、URLが新しくなったかもしれません)');
-    } else if (res.ok) {
+    } else if (res.status === 403) {
+      // Worker はルームが開いていないとき、閉鎖のお知らせのページを 403 で返す
       throw new Error('ルームが閉じています。運営者にルームを開いてもらってください');
+    } else if (res.ok) {
+      // 飛び先の無いふつうのページ(視聴ページ・管理画面など)
+      throw new Error(
+        '配信者URLではないようです(管理画面の「配信者URLを表示する」を押して出るURLを貼ってください)',
+      );
     } else {
       throw new Error(`URLを確かめられませんでした(HTTP ${res.status})`);
     }
   }
   const key = url.searchParams.get('key') ?? '';
   const room = url.searchParams.get('room') ?? 'main';
-  if (!key) throw new Error('配信者URLではないようです(視聴URLではなく、配信者URLを貼ってください)');
+  if (!key) {
+    throw new Error(
+      '配信者URLではないようです(視聴URLではなく、管理画面の「配信者URLを表示する」を押して出るURLを貼ってください)',
+    );
+  }
   if (!ROOM_PATTERN.test(room)) throw new Error(`ルーム名が正しくありません: ${room}`);
   return { origin: url.origin, room, key };
 }
