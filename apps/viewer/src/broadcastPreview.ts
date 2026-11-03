@@ -292,6 +292,20 @@ export function setupBroadcastPreview(options: {
         },
       },
       {
+        // VRChat の立ちモード・座りモード。切り替えると位置を合わせ直す
+        title: '姿勢',
+        columns: 2,
+        options: [
+          { label: '立って遊ぶ', value: 'play-standing' },
+          { label: '座って遊ぶ', value: 'play-seated' },
+        ],
+        initial: broadcast.playMode === 'seated' ? 'play-seated' : 'play-standing',
+        onSelect: (value) => {
+          broadcast.setPlayMode(value === 'play-seated' ? 'seated' : 'standing');
+          setStatus('位置を合わせ直しています...');
+        },
+      },
+      {
         // 軸ごとに −/＋ を別のボタンにする(1つのボタンで一周させると、戻すのに何回も押す必要があった)
         title: '手首',
         columns: 2,
@@ -402,6 +416,9 @@ export function setupBroadcastPreview(options: {
       avatarRoot.quaternion.identity();
       setAvatarScale(1);
       avatarRoot.visible = true;
+      grid.position.set(0, 0, 0);
+      grid.quaternion.identity();
+      grid.scale.setScalar(1);
       applyViewLayers();
       showMirror(false);
       setStatus('HMD配信を終了しました');
@@ -539,32 +556,42 @@ export function setupBroadcastPreview(options: {
     );
   }
 
+  /**
+   * VRでの配置。アバター・視聴者・鏡・床は、まとめて「ワイヤの世界」として置く:
+   * ワイヤ座標を現実へ戻す変換(足元・向き・座りモードの持ち上げ・1/身長の比)を全部に同じく掛ける。
+   * VRChat と同じく、アバターは本来の大きさのまま、周りの世界ごと自分の身長に合わせて見える
+   * (以前はアバターだけを拡大縮小していたので、鏡や視聴者との大きさの感じが合わなかった)
+   */
   function updateXrLayout(): void {
     if (!xrSession || !broadcast.getWireToXr(peerRoot)) {
       showMirror(false);
       return;
     }
     peerRoot.updateMatrixWorld();
+    const worldScale = peerRoot.scale.x;
+    if (grid.visible) {
+      // 床もワイヤの世界の床(座りモードでは、アバターが立つ床が現実の床より下になる)
+      grid.position.copy(peerRoot.position);
+      grid.quaternion.copy(peerRoot.quaternion);
+      grid.scale.setScalar(worldScale);
+    }
     showMirror(viewMode === 'first-mirror');
     if (mirror && viewMode === 'first-mirror') {
       // 右前方の床に立てた姿見。ワイヤ座標は「正面=+Z、右=-X」。下端が床から少し浮く高さにし、配信者の方へ向ける
       mirror.position.copy(peerRoot.localToWorld(_mirrorOffset.set(-0.8, MIRROR_HEIGHT / 2 + 0.05, 1.3)));
+      mirror.scale.setScalar(worldScale);
       _mirrorTarget.copy(peerRoot.position).setY(mirror.position.y);
       mirror.lookAt(_mirrorTarget);
     }
+    setAvatarScale(worldScale);
     if (isInside()) {
-      // 自分に入る: ワイヤ座標をそのまま現実へ戻す配置にして、身長の比で大きさを戻す。
-      // ワイヤの長さは「現実の長さ × 身長の比」なので、配置を 1/比 にすると、アバターの目が自分の目、
-      // 手がコントローラの位置に重なる
-      broadcast.getWireToXr(avatarRoot);
-      setAvatarScale(1 / broadcast.heightScale);
+      // 自分に入る: ワイヤの世界の原点にそのまま置くと、アバターの目が自分の目、手がコントローラに重なる
+      avatarRoot.position.copy(peerRoot.position);
+      avatarRoot.quaternion.copy(peerRoot.quaternion);
       return;
     }
-    setAvatarScale(1);
-    // ワイヤ座標は「正面=+Z、右=-X」。右前方は (-x, +z) になる
-    _mirrorOffset.set(-1.0, 0, 1.5).applyQuaternion(peerRoot.quaternion);
-    avatarRoot.position.copy(peerRoot.position).add(_mirrorOffset);
-    // 鏡なので配信者の方を向かせる。avatarRootは+Zが正面(視聴ページの設置と同じ)
+    // アバターを前に: ワイヤ座標で右前方 (-x, +z) に立たせ、配信者の方を向かせる(avatarRootは+Zが正面)
+    avatarRoot.position.copy(peerRoot.localToWorld(_mirrorOffset.set(-1.0, 0, 1.5)));
     avatarRoot.quaternion.setFromAxisAngle(
       new THREE.Vector3(0, 1, 0),
       Math.atan2(
@@ -619,8 +646,8 @@ export function setupBroadcastPreview(options: {
           const viewer = frame.getViewerPose(refSpace);
           if (viewer && broadcast.tryCalibrate(viewer)) {
             updateXrLayout();
-            // パネルも配信者の前方へ出し直す
-            panelController.show(peerRoot.position, Math.atan2(
+            // パネルも配信者の前方へ出し直す(現実の床を基準に。座りモードの持ち上げは掛けない)
+            panelController.show(broadcast.floorOrigin ?? peerRoot.position, Math.atan2(
               2 * (peerRoot.quaternion.w * peerRoot.quaternion.y),
               1 - 2 * peerRoot.quaternion.y * peerRoot.quaternion.y,
             ));
@@ -633,6 +660,7 @@ export function setupBroadcastPreview(options: {
       // 画面で見ているときは、視聴者をアバターの周りに置く
       peerRoot.position.copy(avatarRoot.position);
       peerRoot.quaternion.copy(avatarRoot.quaternion);
+      peerRoot.scale.setScalar(1);
     }
 
     if (avatar) {

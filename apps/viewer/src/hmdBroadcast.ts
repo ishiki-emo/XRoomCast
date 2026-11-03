@@ -153,6 +153,31 @@ interface Calibration {
    * 背の高い人はアバターが伸び上がり、低い人はしゃがんだ姿勢になる
    */
   scale: number;
+  /**
+   * 持ち上げる高さ(m、現実の長さ)。座りモードで、座った目の高さをアバターの立った目の高さまで上げる。
+   * 立ちモードでは0
+   */
+  heightOffset: number;
+}
+
+/**
+ * 立って遊ぶか、座って遊ぶか(VRChat の立ちモード・座りモードと同じ考え方)。
+ * - standing: 位置合わせのときの目の高さで身長の比を決める。しゃがみ・前かがみもそのまま映る
+ * - seated: 座っていても、アバターは立った姿勢になる。座った目の高さをアバターの立った目の高さまで
+ *   持ち上げ(頭と手の位置関係はそのまま)、体(腰・足)は送らない(視聴側が立った姿勢として推定する)。
+ *   途中で立ち上がるとアバターは浮く(VRChat と同じ)
+ */
+export type PlayMode = 'standing' | 'seated';
+const PLAY_MODE_KEY = 'xroomcast.hmd.playMode';
+/** アバターが未読み込みのときの、立ったときの目の高さ(m) */
+const DEFAULT_STANDING_EYE = 1.5;
+
+function loadPlayMode(): PlayMode {
+  try {
+    return localStorage.getItem(PLAY_MODE_KEY) === 'seated' ? 'seated' : 'standing';
+  } catch {
+    return 'standing';
+  }
 }
 
 export class HmdBroadcast {
@@ -171,6 +196,22 @@ export class HmdBroadcast {
   private avatarEye = new THREE.Vector3();
   /** 位置合わせ待ちの、頭の高さが落ち着き始めた時刻と高さ */
   private settling: { since: number; y: number } | null = null;
+  private mode: PlayMode = loadPlayMode();
+
+  get playMode(): PlayMode {
+    return this.mode;
+  }
+
+  /** 立ち/座りを切り替える。位置を合わせ直す(座りかたが変わると、目の高さの基準が変わるため) */
+  setPlayMode(mode: PlayMode): void {
+    this.mode = mode;
+    try {
+      localStorage.setItem(PLAY_MODE_KEY, mode);
+    } catch {
+      // 覚えられないだけ
+    }
+    this.recalibrate();
+  }
   private readonly handReader = new HandReader();
   private readonly gestureMixer = new GestureExpressionMixer();
   private readonly expressions = new ExpressionChannel(this.gestureMixer.expressionNames());
@@ -202,11 +243,6 @@ export class HmdBroadcast {
   localFrame(): SampledFrame | null {
     if (!this.latest || performance.now() - this.latestAt > LOCAL_FRAME_FRESH_MS) return null;
     return this.latest;
-  }
-
-  /** 配信者とアバターの身長の比(ワイヤの長さ = 現実の長さ × この値)。一人称でアバターを自分に重ねるのに使う */
-  get heightScale(): number {
-    return this.calibration?.scale ?? 1;
   }
 
   /** ジェスチャーへの表情の割り当て(配信者ページで変える) */
@@ -333,9 +369,15 @@ export class HmdBroadcast {
     const yaw = new THREE.Quaternion().setFromAxisAngle(UP, -yawAngle);
 
     // 目の高さの比でアバターに合わせる(床からの高さがそのまま身長の目安になる)。
-    // アバター側も目の高さ(頭の骨の高さ + 目までのずれ)で比べる
+    // アバター側も目の高さ(頭の骨の高さ + 目までのずれ)で比べる。
+    // 座りモードでは、座った目の高さは身長の目安にならないので比は1のまま、アバターの立った目の高さまで持ち上げる
     const eyeHeight = Math.max(p.y, 0.5);
-    const scale = this.avatarHeight ? (this.avatarHeight + this.avatarEye.y) / eyeHeight : 1;
+    const avatarEye = this.avatarHeight ? this.avatarHeight + this.avatarEye.y : null;
+    const seated = this.mode === 'seated';
+    const scale = !seated && avatarEye ? avatarEye / eyeHeight : 1;
+    const heightOffset = seated
+      ? Math.max(0, (avatarEye ?? DEFAULT_STANDING_EYE) - eyeHeight)
+      : 0;
 
     this.calibration = {
       origin: new THREE.Vector3(p.x, 0, p.z), // 高さはlocal-floorの床(0)を使う
@@ -343,10 +385,13 @@ export class HmdBroadcast {
       yawAngle,
       headRest: new THREE.Quaternion().copy(yaw).multiply(_q),
       scale,
+      heightOffset,
     };
-    const note = this.avatarHeight
-      ? `身長を${(scale * 100).toFixed(0)}%に合わせました`
-      : '身長の補正なし';
+    const note = seated
+      ? `座りモード: 目の高さを${Math.round(heightOffset * 100)}cm持ち上げています`
+      : this.avatarHeight
+        ? `身長を${(scale * 100).toFixed(0)}%に合わせました`
+        : '身長の補正なし';
     this.onStatus?.(`位置を合わせました(今の向きが正面 / ${note})`);
   }
 
@@ -361,16 +406,24 @@ export class HmdBroadcast {
    */
   getWireToXr(target: THREE.Object3D): boolean {
     if (!this.calibration) return false;
+    // ワイヤ = (現実 + 持ち上げ - 足元) を回して × 比。その逆: 足元から持ち上げぶん下げ、向きを戻し、1/比
     target.position.copy(this.calibration.origin);
+    target.position.y -= this.calibration.heightOffset;
     target.quaternion.setFromAxisAngle(UP, this.calibration.yawAngle);
+    target.scale.setScalar(1 / this.calibration.scale);
     return true;
+  }
+
+  /** 位置合わせのときの足元(現実の床)。操作パネルを置く基準 */
+  get floorOrigin(): THREE.Vector3 | null {
+    return this.calibration?.origin ?? null;
   }
 
   /** XR空間の位置をワイヤ座標(足元が原点・正面+Z・身長補正済み)へ */
   private toWirePosition(p: DOMPointReadOnly, out: THREE.Vector3): THREE.Vector3 {
     const calibration = this.calibration!;
     return out
-      .set(p.x, p.y, p.z)
+      .set(p.x, p.y + calibration.heightOffset, p.z)
       .sub(calibration.origin)
       .applyQuaternion(calibration.yaw)
       .multiplyScalar(calibration.scale);
@@ -498,7 +551,11 @@ export class HmdBroadcast {
       leftSpread: spread.left,
       rightSpread: spread.right,
     };
-    const body = readBody(frame as BodyFrame, refSpace, (p, out) => this.toWirePosition(p, out));
+    // 座りモードでは体を送らない(座った腰・足を送ると、立たせたいアバターが座ってしまう)
+    const body =
+      this.mode === 'seated'
+        ? null
+        : readBody(frame as BodyFrame, refSpace, (p, out) => this.toWirePosition(p, out));
     this.latest = {
       pose,
       fingers,
