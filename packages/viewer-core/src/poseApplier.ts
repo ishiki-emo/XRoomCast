@@ -25,6 +25,11 @@ const THUMB_CURL_MAX = [0.4, 0.6, 0.6] as const;
 /** スプレッド(指の開き)の最大角と指ごとの係数(人差し指→小指) */
 const SPREAD_MAX = 0.25;
 const SPREAD_FACTORS = [1, 0.35, -0.35, -1] as const;
+/**
+ * 手首のひねりのうち前腕に分け持たせる割合。手首だけでひねると手首のメッシュが細く絞られるため
+ * (実際の前腕も肘から手首にかけてひねりを分け持つ)。twoBoneIK.ts の twistShare
+ */
+const FOREARM_TWIST_SHARE = 0.5;
 
 const _headWorld = new THREE.Vector3();
 const _headTarget = new THREE.Vector3();
@@ -191,7 +196,7 @@ export class PoseApplier {
         .applyQuaternion(_frameQuat)
         .multiplyScalar(scale);
       _pole.add(_poleOffset);
-      solveTwoBoneIK(chain, _handTarget, _handQuat, _pole);
+      solveTwoBoneIK(chain, _handTarget, _handQuat, _pole, FOREARM_TWIST_SHARE);
     }
   }
 

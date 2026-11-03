@@ -29,6 +29,9 @@ const _elbowPos = new THREE.Vector3();
 const _elbowDir = new THREE.Vector3();
 const _handDir = new THREE.Vector3();
 const _handParentQuat = new THREE.Quaternion();
+const _twist = new THREE.Quaternion();
+const _twistInv = new THREE.Quaternion();
+const _identity = new THREE.Quaternion();
 
 /** レスト姿勢(Tポーズ)のうちに呼んでボーン長とレスト方向を記録する */
 export function createTwoBoneChain(
@@ -62,12 +65,17 @@ function aimBone(bone: THREE.Object3D, restDirLocal: THREE.Vector3, targetDirWor
  * @param targetPos 末端のワールド目標位置
  * @param targetQuat 末端のワールド目標回転
  * @param polePos 中間関節(肘/膝)を向けるポール位置(ワールド)
+ * @param twistShare 末端のひねり(下節の軸まわりの回転)のうち、下節に肩代わりさせる割合(0〜1)。
+ *   VRMには前腕のひねりボーンが無いので、手首だけでひねると手首のメッシュが細く絞られる
+ *   (キャンディの包み紙のようになる)。実際の前腕も肘から手首にかけてひねりを分け持つので、
+ *   その一部を前腕へ移す。下節を自分の軸まわりに回すだけなので、手首の位置も最終的な向きも変わらない
  */
 export function solveTwoBoneIK(
   chain: TwoBoneChain,
   targetPos: THREE.Vector3,
   targetQuat: THREE.Quaternion,
   polePos: THREE.Vector3,
+  twistShare = 0,
 ): void {
   chain.upper.getWorldPosition(_rootPos);
   _toTarget.copy(targetPos).sub(_rootPos);
@@ -114,4 +122,19 @@ export function solveTwoBoneIK(
   // 末端(手首/足首): ワールド回転を目標値に一致させる
   chain.end.parent!.getWorldQuaternion(_handParentQuat);
   chain.end.quaternion.copy(_handParentQuat.invert().multiply(targetQuat));
+
+  if (twistShare > 0) {
+    // スイング・ツイスト分解: 末端のローカル回転から、下節の軸(lowerRestDir)まわりの成分だけを取り出す
+    const q = chain.end.quaternion;
+    const axis = chain.lowerRestDir;
+    const dot = q.x * axis.x + q.y * axis.y + q.z * axis.z;
+    _twist.set(axis.x * dot, axis.y * dot, axis.z * dot, q.w);
+    if (_twist.lengthSq() < 1e-12) return; // ちょうど180°のスイングでは軸まわりが定まらない
+    _twist.normalize();
+    _twistInv.copy(_twist); // 作業用に借りる(下で逆回転として使い直す)
+    _twist.slerpQuaternions(_identity, _twistInv, twistShare);
+    // 下節を軸まわりに回し、そのぶん末端から外してワールドの向きを保つ
+    chain.lower.quaternion.multiply(_twist);
+    q.premultiply(_twistInv.copy(_twist).invert());
+  }
 }
