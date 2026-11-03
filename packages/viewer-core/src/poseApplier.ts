@@ -2,6 +2,8 @@
  * 受信フレームをVRMへ適用するパイプライン(実装仕様書 §5 Phase 2a パイプライン2〜5)。
  * - 頭: 回転をheadボーンへ、頭位置の差分でhipsを平行移動(ルートモーション)
  * - 手: 手首位置・回転を目標に2ボーンIK。肘のポールは「体側やや後方・下方」固定
+ * - 体の向き(体が送られてこないとき): 頭の向きに遅れて追従させる。頭と体のずれが一定を超えたら体を回し、
+ *   足は向きや位置が大きくずれたら踏み替える(VRChat の元になっている VRIK と同じ考え方)
  * - 表情: expressionManagerへ適用
  * - 手指: カール値を各指3関節の回転に展開(カール1.0で握り込み)
  * - 体(ボディトラッキングの送信側だけ): 腰の位置・回転、胸の回転、足首目標と膝で足のIK。
@@ -66,6 +68,14 @@ const _bodyForward = new THREE.Vector3();
 const _feetMid = new THREE.Vector3();
 const _a = new THREE.Vector3();
 const _b = new THREE.Vector3();
+const _yawQuat = new THREE.Quaternion();
+const _feetYawQuat = new THREE.Quaternion();
+const _hipsLocal = new THREE.Vector3();
+
+/** -π..π に収める */
+function wrapAngle(angle: number): number {
+  return Math.atan2(Math.sin(angle), Math.cos(angle));
+}
 /** 脚の長さの比の範囲。トラッキングの乱れで極端な値にならないよう抑える */
 const LEG_SCALE_MIN = 0.6;
 const LEG_SCALE_MAX = 1.6;
@@ -73,6 +83,17 @@ const LEG_SCALE_MAX = 1.6;
 const LEG_SCALE_SMOOTHING = 0.05;
 /** 膝のポールを体の前方へ寄せる距離(m)。脚が伸びきると膝が股と足首の線上に乗り、向きが決まらないため */
 const KNEE_FORWARD_BIAS = 0.3;
+/**
+ * 体の向きの追従(体が送られてこないとき)。頭と体の向きのずれがこれを超えたら、超えたぶん体を回す。
+ * 首を少し振る程度では体は回らず、大きく振り向いたり旋回したりすると体ごと向きを変える
+ * (以前は体が常に正面のままで、旋回を重ねると首から上だけが回ってねじ切れて見えた)
+ */
+const BODY_YAW_DEADZONE = (40 * Math.PI) / 180;
+/** ずれが範囲内でも、体を頭の向きへ少しずつ寄せる割合(1フレームあたり) */
+const BODY_YAW_FOLLOW = 0.02;
+/** 足を踏み替える、体と足の向きのずれ(rad)と、腰と足の真ん中の水平のずれ(m、ワイヤ座標) */
+const STEP_ANGLE = (30 * Math.PI) / 180;
+const STEP_DISTANCE = 0.35;
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
@@ -107,6 +128,13 @@ export class PoseApplier {
   /** レスト時の足首ワールド位置。ここに足を固定して接地させる */
   private readonly footAnchors: Record<Side, THREE.Vector3 | null>;
   private readonly fingerJoints: Record<Side, (THREE.Object3D | null)[][]>;
+  /** 体の向き(ワイヤ座標の水平の角度、+Z が0)。頭の向きに遅れて追従する */
+  private bodyYaw = 0;
+  /** 足を置いている向きと、両足の真ん中(フレームローカルの水平位置) */
+  private feetYaw = 0;
+  private readonly feetCenter = new THREE.Vector3();
+  /** レストの両足の真ん中(フレームローカル) */
+  private readonly restFeetCenter = new THREE.Vector3();
   private readonly touchedExpressions = new Set<string>();
 
   /**
@@ -148,6 +176,11 @@ export class PoseApplier {
       left: anchorLocal(this.legChains.left),
       right: anchorLocal(this.legChains.right),
     };
+    if (this.footAnchors.left && this.footAnchors.right) {
+      this.restFeetCenter.addVectors(this.footAnchors.left, this.footAnchors.right).multiplyScalar(0.5);
+      this.restFeetCenter.y = 0;
+    }
+    this.feetCenter.copy(this.restFeetCenter);
     // 正規化リグのレストは回転が単位元なので、ローカルの位置を足すだけで腰からの距離になる
     const legLength = (chain: TwoBoneChain | null): number | null =>
       chain
@@ -274,9 +307,28 @@ export class PoseApplier {
       this.chest?.quaternion.identity();
     }
 
-    // 頭: ワイヤ回転は「レストからの差分」。リグ固有回転の共役変換はフレーム非依存
+    // 体の向き: 頭の向き(水平成分)に遅れて追従させる
+    _headQuat.fromArray(pose.head.rotation);
+    _a.set(0, 0, 1).applyQuaternion(_headQuat);
+    if (_a.x * _a.x + _a.z * _a.z > 0.04) {
+      const headYaw = Math.atan2(_a.x, _a.z);
+      const gap = wrapAngle(headYaw - this.bodyYaw);
+      if (Math.abs(gap) > BODY_YAW_DEADZONE) {
+        this.bodyYaw += gap - Math.sign(gap) * BODY_YAW_DEADZONE;
+      }
+      this.bodyYaw = wrapAngle(this.bodyYaw + wrapAngle(headYaw - this.bodyYaw) * BODY_YAW_FOLLOW);
+    }
+    _yawQuat.setFromAxisAngle(Y_AXIS, this.bodyYaw);
+    if (this.hips) {
+      this.toRigLocal(this.hips.quaternion.copy(_yawQuat));
+      // 腰を回したので、頭の位置を測り直す前に姿勢を確定させる
+      this.hips.updateWorldMatrix(true, true);
+    }
+
+    // 頭: ワイヤ回転は「レストからの差分(ワールド系)」。腰で回したぶんを外して首から先のローカルにする。
+    // リグ固有回転の共役変換はフレーム非依存
     if (this.head) {
-      this.toRigLocal(this.head.quaternion.fromArray(pose.head.rotation));
+      this.toRigLocal(this.head.quaternion.copy(_yawQuat).invert().multiply(_headQuat));
     }
 
     // ルートモーション: 頭位置のワールド差分でhipsを平行移動。
@@ -293,16 +345,39 @@ export class PoseApplier {
       );
     }
 
-    // 足: 接地固定IK。アンカー(フレームローカル)をワールドへ変換して固定する
+    // 足を踏み替える: 体の向きが足の向きから大きくずれたか、腰が足の真ん中から離れたら、
+    // 腰の真下に、体の向きで足を置き直す(足踏みして向きを変える・歩く)
+    if (this.hips) {
+      this.frame.worldToLocal(this.hips.getWorldPosition(_hipsLocal));
+      _hipsLocal.y = 0;
+      const turned = Math.abs(wrapAngle(this.bodyYaw - this.feetYaw)) > STEP_ANGLE;
+      const moved = _hipsLocal.distanceTo(this.feetCenter) > STEP_DISTANCE;
+      if (turned || moved) {
+        this.feetYaw = this.bodyYaw;
+        this.feetCenter.copy(_hipsLocal);
+      }
+    }
+    _feetYawQuat.setFromAxisAngle(Y_AXIS, this.feetYaw);
+
+    // 足: 接地固定IK。レストの足首の位置を、足を置いている向き・位置へ回して移し、ワールドへ変換して固定する
     for (const side of ['left', 'right'] as const) {
       const chain = this.legChains[side];
       const anchor = this.footAnchors[side];
       if (!chain || !anchor) continue;
-      _anchorWorld.copy(anchor).applyMatrix4(this.frame.matrixWorld);
-      _footQuat.copy(_frameQuat).multiply(this.rootQuat);
+      _anchorWorld
+        .copy(anchor)
+        .sub(this.restFeetCenter)
+        .applyQuaternion(_feetYawQuat)
+        .add(this.feetCenter)
+        .applyMatrix4(this.frame.matrixWorld);
+      _footQuat.copy(_frameQuat).multiply(_feetYawQuat).multiply(this.rootQuat);
       chain.upper.getWorldPosition(_pole);
-      _poleOffset.set(0, -0.4, 0.6).applyQuaternion(_frameQuat).multiplyScalar(scale);
-      _pole.add(_poleOffset); // 膝は前方(フレームの+Z)へ曲げる
+      _poleOffset
+        .set(0, -0.4, 0.6)
+        .applyQuaternion(_yawQuat)
+        .applyQuaternion(_frameQuat)
+        .multiplyScalar(scale);
+      _pole.add(_poleOffset); // 膝は体の前方へ曲げる
       solveTwoBoneIK(chain, _anchorWorld, _footQuat, _pole);
     }
   }
@@ -411,6 +486,9 @@ export class PoseApplier {
 
   reset(): void {
     this.legScale = null;
+    this.bodyYaw = 0;
+    this.feetYaw = 0;
+    this.feetCenter.copy(this.restFeetCenter);
     if (this.head) this.head.quaternion.identity();
     if (this.hips) {
       this.hips.position.copy(this.restHipsPos);
