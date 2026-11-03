@@ -1,6 +1,8 @@
 /**
  * Cloudflare Realtime SFU(Calls API)連携(実装仕様書 §5 Phase 2c)。
- * - SfuApi: REST APIクライアント。App Secretはここ(ブリッジ)以外に出さない
+ * - SfuApi: セッションとDataChannelを作る窓口。2通りある:
+ *   - WorkerSfuApi(配布版): ビューアWorkerの中継APIを配信者キーで使う。App Secretを持たない
+ *   - DirectSfuApi(開発用): REST APIをApp Secretで直接叩く。App Secretはここ(ブリッジ)以外に出さない
  * - SfuPublisher: ブリッジ側のパブリッシャーセッション。node-datachannelの
  *   WebRTCポリフィルでDataChannel(一方向: publisher→subscribers)を張る
  * 手順は公式 cloudflare/realtime-examples の echo-datachannels サンプルに準拠。
@@ -18,14 +20,60 @@ export interface SfuConfig {
 
 interface NewSessionResponse {
   sessionId: string;
-  sessionDescription: { type: string; sdp: string };
+  /** 応答のSDP(answer) */
+  sdp: string;
 }
 
 interface NewDataChannelsResponse {
   dataChannels: { id: number; dataChannelName: string }[];
 }
 
-export class SfuApi {
+type DataChannelRequest = {
+  location: 'local' | 'remote';
+  dataChannelName: string;
+  sessionId?: string;
+}[];
+
+export interface SfuApi {
+  newSession(offerSdp: string): Promise<NewSessionResponse>;
+  newDataChannels(sessionId: string, dataChannels: DataChannelRequest): Promise<NewDataChannelsResponse>;
+}
+
+/**
+ * ビューアWorker経由(配布版)。配信者キーは Authorization: Bearer で送る
+ * (ブラウザの配信者コンソールと同じAPI。Workerが App Secret を付けて SFU へ中継する)
+ */
+export class WorkerSfuApi implements SfuApi {
+  constructor(
+    private readonly origin: string,
+    private readonly room: string,
+    private readonly key: string,
+  ) {}
+
+  async post<T>(path: string, body: unknown): Promise<T> {
+    const res = await fetch(`${this.origin}${path}?room=${encodeURIComponent(this.room)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) throw new Error(`${path} が失敗: ${res.status} ${String(data.error ?? '')}`);
+    return data as T;
+  }
+
+  async newSession(offerSdp: string): Promise<NewSessionResponse> {
+    const data = await this.post<{ sessionId: string; sdp: string }>('/api/sfu/sessions/new', {
+      sdp: offerSdp,
+    });
+    return { sessionId: data.sessionId, sdp: data.sdp };
+  }
+
+  newDataChannels(sessionId: string, dataChannels: DataChannelRequest): Promise<NewDataChannelsResponse> {
+    return this.post('/api/sfu/datachannels/new', { sessionId, dataChannels });
+  }
+}
+
+export class DirectSfuApi implements SfuApi {
   constructor(private readonly config: SfuConfig) {}
 
   private async post<T>(path: string, body: unknown): Promise<T> {
@@ -43,16 +91,15 @@ export class SfuApi {
     return (await res.json()) as T;
   }
 
-  newSession(offerSdp: string): Promise<NewSessionResponse> {
-    return this.post('/sessions/new', {
-      sessionDescription: { type: 'offer', sdp: offerSdp },
-    });
+  async newSession(offerSdp: string): Promise<NewSessionResponse> {
+    const data = await this.post<{ sessionId: string; sessionDescription: { sdp: string } }>(
+      '/sessions/new',
+      { sessionDescription: { type: 'offer', sdp: offerSdp } },
+    );
+    return { sessionId: data.sessionId, sdp: data.sessionDescription.sdp };
   }
 
-  newDataChannels(
-    sessionId: string,
-    dataChannels: { location: 'local' | 'remote'; dataChannelName: string; sessionId?: string }[],
-  ): Promise<NewDataChannelsResponse> {
+  newDataChannels(sessionId: string, dataChannels: DataChannelRequest): Promise<NewDataChannelsResponse> {
     return this.post(`/sessions/${sessionId}/datachannels/new`, { dataChannels });
   }
 }
@@ -105,10 +152,7 @@ export class SfuPublisher {
 
     const session = await this.api.newSession(pc.localDescription!.sdp);
     this.sessionId = session.sessionId;
-    await pc.setRemoteDescription({
-      type: 'answer',
-      sdp: session.sessionDescription.sdp,
-    });
+    await pc.setRemoteDescription({ type: 'answer', sdp: session.sdp });
 
     const result = await this.api.newDataChannels(session.sessionId, [
       { location: 'local', dataChannelName: DATA_CHANNEL_NAME },

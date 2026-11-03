@@ -1,12 +1,13 @@
 {
   "name": "@xroomcast/bridge",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
     "sim": "tsx scripts/vmcSimulator.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:exe": "node scripts/build-exe.mjs"
   },
   "dependencies": {
     "@xroomcast/protocol": "*",
@@ -17,6 +18,8 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
+    "esbuild": "^0.25.12",
+    "postject": "^1.0.0-alpha.6",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }

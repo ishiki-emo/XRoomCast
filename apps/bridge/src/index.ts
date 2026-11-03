@@ -1,8 +1,12 @@
 /**
  * VMCブリッジ(実装仕様書 §5 Phase 2b)。
  * UDPでVMC(OSC)を受信 → Head/両手をFK合成+座標系変換(§7)→ §6形式に
- * シリアライズ → 同居のWebSocketサーバーへブロードキャストする。
+ * シリアライズ → Cloudflare Realtime SFU へ配信する(開発用には同居のWebSocketサーバーへも)。
  * 送信レート: ポーズ30Hz、表情・手指15Hz(受信レートが高くても間引く)。
+ *
+ * 設定は settings.ts。配布版は配信者URLだけで動き、App Secret を持たない。
+ * 単一の実行ファイル(Node.js の SEA)にしても動くよう、ソースの位置(import.meta.url)には
+ * 開発用の経路(.env・ローカル配信のVRM)でしか頼らない
  */
 import http from 'node:http';
 import { createReadStream, existsSync, statSync } from 'node:fs';
@@ -21,25 +25,26 @@ import type { Quat, Vec3 } from '@xroomcast/protocol';
 import { VmcSkeleton } from './skeleton.js';
 import { normalizeBlendName } from './blendNames.js';
 import { startVmcReceiver } from './vmcReceiver.js';
-import { DATA_CHANNEL_NAME, SfuApi, SfuPublisher } from './sfu.js';
+import { isSea } from 'node:sea';
+import { DATA_CHANNEL_NAME, DirectSfuApi, SfuPublisher, WorkerSfuApi } from './sfu.js';
+import { loadSettings, type BridgeSettings } from './settings.js';
 
-// リポジトリルートの .env を読む(App Secretをコード・ブラウザに出さないため)
-try {
-  process.loadEnvFile(fileURLToPath(new URL('../../../.env', import.meta.url)));
-} catch {
-  // .envが無ければ環境変数のみで動く
+// osc-min が古い Buffer() を使っていて、起動のたびに非推奨の警告が出る(動作には関係ない)
+process.noDeprecation = true;
+
+// 開発用: リポジトリルートの .env を読む(App Secretをコード・ブラウザに出さないため)。
+// 実行ファイル版はソースの位置が無いので読まない(設定は配信者URLだけ)
+if (!isSea()) {
+  try {
+    process.loadEnvFile(fileURLToPath(new URL('../../../.env', import.meta.url)));
+  } catch {
+    // .envが無ければ環境変数のみで動く
+  }
 }
 
 const VMC_PORT = Number(process.env.VMC_PORT ?? 39539);
 const WS_PORT = Number(process.env.WS_PORT ?? 8080);
 const POSE_INTERVAL_MS = 1000 / 30;
-/**
- * 配信するルーム。ビューアWorkerはルームごとにパブリッシャーを保持するため、
- * 視聴URLのルームと一致している必要がある(既定は 'main')
- */
-const ROOM = /^[A-Za-z0-9_-]{1,64}$/.test(process.env.ROOM ?? '') ? String(process.env.ROOM) : 'main';
-/** /vrm/ ルートで配信するVRMの置き場所(ビューアのpublicと共用) */
-const VRM_DIR = fileURLToPath(new URL('../../viewer/public', import.meta.url));
 
 // ---- 受信状態 ----
 const skeleton = new VmcSkeleton();
@@ -154,77 +159,113 @@ startVmcReceiver(VMC_PORT, {
 });
 
 // ---- Cloudflare Realtime SFU(Phase 2c) ----
-const sfuConfig =
-  process.env.CF_REALTIME_APP_ID && process.env.CF_REALTIME_APP_SECRET
-    ? { appId: process.env.CF_REALTIME_APP_ID, appSecret: process.env.CF_REALTIME_APP_SECRET }
-    : null;
-const sfuApi = sfuConfig ? new SfuApi(sfuConfig) : null;
-const publisher = sfuApi ? new SfuPublisher(sfuApi) : null;
+// 設定(配信者URL)が決まってから始める。それまでもVMCの受信は進めておく
+let settings: BridgeSettings | null = null;
+let publisher: SfuPublisher | null = null;
+/** ローカルのSFU中継API用。開発用(App Secretで直接)のときだけある */
+let directApi: DirectSfuApi | null = null;
 
-// ビューアWorkerへのパブリッシャーセッションID登録(トンネル不要化)。
-// VIEWER_ORIGIN / BRIDGE_TOKEN が.envにあるときだけ有効
-const VIEWER_ORIGIN = process.env.VIEWER_ORIGIN;
-const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN;
 /**
- * 配信元の自称ID。同じルームで複数のブリッジを動かす(複数配信者)場合に
- * それぞれ別の値を設定する。再接続しても同じ席(slot)を保つ鍵になる
+ * パブリッシャー登録の宛先と資格情報。配布版は配信者キー、開発用は BRIDGE_TOKEN。
+ * 開発用で VIEWER_ORIGIN / BRIDGE_TOKEN が無ければ登録しない(ローカルのWSだけで使う)
  */
-const PUBLISHER_ID = process.env.PUBLISHER_ID ?? 'default';
+function registration(): { origin: string; token: string; room: string; pid: string } | null {
+  if (!settings) return null;
+  if (settings.mode === 'worker') {
+    return { origin: settings.origin, token: settings.key, room: settings.room, pid: settings.pid };
+  }
+  if (!settings.viewerOrigin || !settings.bridgeToken) return null;
+  return {
+    origin: settings.viewerOrigin,
+    token: settings.bridgeToken,
+    room: settings.room,
+    pid: settings.pid,
+  };
+}
+
+async function postPublisher(sessionId: string | null): Promise<{ slot?: number }> {
+  const target = registration();
+  if (!target) return {};
+  const res = await fetch(`${target.origin}/api/sfu/publisher?room=${encodeURIComponent(target.room)}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${target.token}`,
+      'Content-Type': 'application/json',
+    },
+    // pid は席(slot)の識別子。再接続しても同じ席に戻る鍵になる
+    body: JSON.stringify({ sessionId, pid: target.pid }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  return (await res.json().catch(() => ({}))) as { slot?: number };
+}
 
 async function registerPublisher(): Promise<void> {
-  if (!VIEWER_ORIGIN || !BRIDGE_TOKEN || !publisher?.sessionId) return;
+  const target = registration();
+  if (!target || !publisher?.sessionId) return;
   try {
-    const res = await fetch(`${VIEWER_ORIGIN}/api/sfu/publisher?room=${encodeURIComponent(ROOM)}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${BRIDGE_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ sessionId: publisher.sessionId, pid: PUBLISHER_ID }),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    const data = (await res.json().catch(() => ({}))) as { slot?: number };
+    const data = await postPublisher(publisher.sessionId);
     const seat = typeof data.slot === 'number' ? ` / 席 ${data.slot}` : '';
-    console.log(`[sfu] ビューアWorkerへ登録完了: ${VIEWER_ORIGIN} (ルーム: ${ROOM}${seat})`);
+    console.log(`[sfu] 配信先に登録しました: ${target.origin} (ルーム: ${target.room}${seat})`);
   } catch (error) {
-    console.warn('[sfu] ビューアWorkerへの登録に失敗:', error);
+    console.warn('[sfu] 配信先への登録に失敗:', error);
   }
 }
 
 /** 明示的な退席。席のアバター・音声もサーバー側で片付けられる */
 async function unregisterPublisher(): Promise<void> {
-  if (!VIEWER_ORIGIN || !BRIDGE_TOKEN) return;
   try {
-    await fetch(`${VIEWER_ORIGIN}/api/sfu/publisher?room=${encodeURIComponent(ROOM)}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${BRIDGE_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ sessionId: null, pid: PUBLISHER_ID }),
-    });
-    console.log('[sfu] 席を空けました');
+    await postPublisher(null);
+    if (registration()) console.log('[sfu] 席を空けました');
   } catch {
     // 送れなくても15分で自動失効する
   }
 }
 
-if (publisher) {
+/** 設定で止まったときは、窓がすぐ閉じないよう Enter を待ってから終わる(ダブルクリックで起動したとき用) */
+async function exitAfterKey(code: number): Promise<never> {
+  if (process.stdin.isTTY) {
+    console.log('Enter を押すと終了します');
+    await new Promise((resolve) => process.stdin.once('data', resolve));
+  }
+  process.exit(code);
+}
+
+async function startSfu(): Promise<void> {
+  try {
+    settings = await loadSettings();
+  } catch (error) {
+    console.error(`[設定] ${error instanceof Error ? error.message : String(error)}`);
+    console.error('[設定] 配信者URLを入れ直すときは --reset を付けて起動してください');
+    return exitAfterKey(1);
+  }
+
+  if (settings.mode === 'worker') {
+    publisher = new SfuPublisher(new WorkerSfuApi(settings.origin, settings.room, settings.key));
+    console.log(`[設定] 配信先: ${settings.origin} / ルーム: ${settings.room} / 席の名前: ${settings.pid}`);
+  } else {
+    directApi = new DirectSfuApi({ appId: settings.appId, appSecret: settings.appSecret });
+    publisher = new SfuPublisher(directApi);
+    console.log(`[設定] 開発用: .env の App Secret で SFU に直接接続します(ルーム: ${settings.room})`);
+    if (!registration()) {
+      console.log('[sfu] VIEWER_ORIGIN / BRIDGE_TOKEN 未設定のためWorker登録はスキップ(トンネル/ローカルAPIのみ)');
+    }
+  }
+  // ローカルのWebSocket配信とSFU中継APIは開発用(ローカルのビューアで確かめるとき)。
+  // 配布版では開かない(ポートを開けずに済み、ファイアウォールの確認も出ない)
+  if (settings.mode === 'direct' || process.env.WS_PORT) startLocalServer();
+
   publisher.onConnected = () => void registerPublisher();
   void publisher.connectWithRetry();
   // ハートビート(Worker側は15分無登録でパブリッシャー不在とみなす)
   setInterval(() => void registerPublisher(), 5 * 60 * 1000);
-  // Ctrl+C等の正常終了では席をすぐ空ける(視聴側に15分残さない)
+  // Ctrl+C・窓を閉じたときは席をすぐ空ける(視聴側に15分残さない)。
+  // Windows で窓を閉じると SIGHUP が来る(10秒ほどで強制終了されるので、それまでに送る)
   const shutdown = (): void => {
     void unregisterPublisher().finally(() => process.exit(0));
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
-  if (!VIEWER_ORIGIN || !BRIDGE_TOKEN) {
-    console.log('[sfu] VIEWER_ORIGIN / BRIDGE_TOKEN 未設定のためWorker登録はスキップ(トンネル/ローカルAPIのみ)');
-  }
-} else {
-  console.log('[sfu] CF_REALTIME_APP_ID / CF_REALTIME_APP_SECRET 未設定のためSFUは無効(WS配信のみ)');
+  process.once('SIGHUP', shutdown);
 }
 
 // ---- HTTP API(ビューア向けSFUプロキシ。App Secretをブラウザに出さない)+ WebSocket配信 ----
@@ -253,8 +294,8 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
   try {
     if (req.method === 'GET' && pathname === '/api/sfu/status') {
       sendJson(res, 200, {
-        enabled: sfuApi !== null,
-        room: ROOM,
+        enabled: directApi !== null,
+        room: settings?.room ?? 'main',
         publisherReady: publisher?.ready ?? false,
         // 視聴側が配信元の変化を検知するために使う(Worker側と同じ形)
         publisherSessionId: publisher?.ready ? (publisher.sessionId ?? null) : null,
@@ -262,22 +303,22 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
       return;
     }
     if (req.method === 'POST' && pathname === '/api/sfu/sessions/new') {
-      if (!sfuApi) {
+      if (!directApi) {
         sendJson(res, 503, { error: 'SFU未設定(.envにCF_REALTIME_APP_ID/SECRETを設定)' });
         return;
       }
       const body = await readJsonBody(req);
-      const session = await sfuApi.newSession(String(body.sdp));
-      sendJson(res, 200, { sessionId: session.sessionId, sdp: session.sessionDescription.sdp });
+      const session = await directApi.newSession(String(body.sdp));
+      sendJson(res, 200, { sessionId: session.sessionId, sdp: session.sdp });
       return;
     }
     if (req.method === 'POST' && pathname === '/api/sfu/subscribe') {
-      if (!sfuApi || !publisher?.sessionId) {
+      if (!directApi || !publisher?.sessionId) {
         sendJson(res, 503, { error: 'パブリッシャーが未接続です(ブリッジのログを確認)' });
         return;
       }
       const body = await readJsonBody(req);
-      const result = await sfuApi.newDataChannels(String(body.sessionId), [
+      const result = await directApi.newDataChannels(String(body.sessionId), [
         { location: 'remote', sessionId: publisher.sessionId, dataChannelName: DATA_CHANNEL_NAME },
       ]);
       const channelId = result.dataChannels[0]?.id;
@@ -294,7 +335,9 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
     }
     // VRM配信: apps/viewer/public/ の .vrm をCORS付きで配る。
     // 公開ビューア(HTTPS)からトンネル経由で読み込むための簡易ホスティング
-    if (req.method === 'GET' && pathname.startsWith('/vrm/')) {
+    if (req.method === 'GET' && pathname.startsWith('/vrm/') && !isSea()) {
+      // ビューアのpublicと共用
+      const VRM_DIR = fileURLToPath(new URL('../../viewer/public', import.meta.url));
       const name = path.basename(decodeURIComponent(pathname.slice('/vrm/'.length)));
       if (!name.toLowerCase().endsWith('.vrm')) {
         sendJson(res, 404, { error: 'not found' });
@@ -319,13 +362,33 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
   }
 }
 
-const server = http.createServer((req, res) => {
-  void handleHttp(req, res);
-});
-const wss = new WebSocketServer({ server });
-server.listen(WS_PORT, () => {
-  console.log(`[ws] 配信待機: ws://localhost:${WS_PORT}(SFUプロキシAPI同居) ルーム: ${ROOM}`);
-});
+/** ローカルのWebSocket配信(開発用。startLocalServer で開く) */
+let wss: WebSocketServer | null = null;
+
+function startLocalServer(): void {
+  const server = http.createServer((req, res) => {
+    void handleHttp(req, res);
+  });
+  const sockets = new WebSocketServer({ server });
+  wss = sockets;
+  server.listen(WS_PORT, () => {
+    console.log(`[ws] 配信待機: ws://localhost:${WS_PORT}(SFUプロキシAPI同居) ルーム: ${settings?.room ?? 'main'}`);
+  });
+  sockets.on('connection', (client, request) => {
+    console.log(`[ws] クライアント接続: ${request.socket.remoteAddress}(計${sockets.clients.size}件)`);
+    // 接続時は辞書と現在の表情の全量を送る(§6.5: 2bでは接続時に必ず辞書を送信)
+    const welcome: Packet = {
+      sequence: nextSequence(),
+      timestamp: timestamp(),
+      dictionary: fullDictionary(),
+      expressions: fullExpressions(),
+    };
+    client.send(encodePacket(welcome));
+    client.on('close', () => {
+      console.log(`[ws] クライアント切断(計${sockets.clients.size}件)`);
+    });
+  });
+}
 
 let sequence = 0;
 
@@ -375,7 +438,7 @@ function poseNode(
 }
 
 function broadcast(bytes: Uint8Array): void {
-  for (const client of wss.clients) {
+  for (const client of wss?.clients ?? []) {
     if (client.readyState === WebSocket.OPEN) {
       client.send(bytes);
       stats.bytes += bytes.byteLength;
@@ -395,21 +458,6 @@ setInterval(() => {
   dictionaryDirty = true;
   lastSentExpression.clear();
 }, 5000);
-
-wss.on('connection', (client, request) => {
-  console.log(`[ws] クライアント接続: ${request.socket.remoteAddress}(計${wss.clients.size}件)`);
-  // 接続時は辞書と現在の表情の全量を送る(§6.5: 2bでは接続時に必ず辞書を送信)
-  const welcome: Packet = {
-    sequence: nextSequence(),
-    timestamp: timestamp(),
-    dictionary: fullDictionary(),
-    expressions: fullExpressions(),
-  };
-  client.send(encodePacket(welcome));
-  client.on('close', () => {
-    console.log(`[ws] クライアント切断(計${wss.clients.size}件)`);
-  });
-});
 
 // ---- 送信ループ(30Hz。表情・手指は2回に1回=15Hz) ----
 // WindowsのsetIntervalは分解能が粗く(約15.6ms)33ms指定では22Hz程度に落ちるため、
@@ -473,7 +521,8 @@ setInterval(() => {
   const kb = (stats.bytes / 1024).toFixed(1);
   const suppressed = stats.suppressed > 0 ? ` | スパイク抑制 ${stats.suppressed}件` : '';
   const sfuState = publisher ? ` | SFU ${publisher.ready ? '配信中' : '接続中...'}` : '';
-  const line = `[stats] 受信 ${stats.received} msg/s | 送信 ${stats.sent} pkt/s | ${kb} KB/s | WS ${wss.clients.size}件${sfuState}${suppressed}`;
+  const ws = wss ? ` | WS ${wss.clients.size}件` : '';
+  const line = `[stats] 受信 ${stats.received} msg/s | 送信 ${stats.sent} pkt/s | ${kb} KB/s${ws}${sfuState}${suppressed}`;
 
   const idle = stats.received === 0 && stats.sent === 0;
   if (!idle) {
@@ -504,5 +553,6 @@ setInterval(() => {
   }
 }, 1000);
 
-console.log(`[bridge] 起動しました(VMC_PORT=${VMC_PORT}, WS_PORT=${WS_PORT})`);
-console.log('[bridge] VSeeFace側: 設定 → OSC/VMCプロトコル → 送信を有効化, ポート39539');
+console.log(`[bridge] 起動しました(VMCの受信ポート: ${VMC_PORT})`);
+console.log(`[bridge] VSeeFace側: 設定 → OSC/VMCプロトコル → 送信を有効化, ポート${VMC_PORT}`);
+void startSfu();
