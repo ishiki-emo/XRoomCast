@@ -165,6 +165,11 @@ export function setupBroadcastPreview(options: {
       previous?.detach();
       avatar = next;
       if (previous) requestAnimationFrame(() => previous.dispose());
+      // 一人称表示の準備: 頭(髪・顔)を、自分の目からは見えない層と、他人からだけ見える層に分ける
+      // (VRMの firstPerson の設定に従う)。どちらの層を映すかは applyViewLayers が決める
+      next.vrm.firstPerson?.setup();
+      applyViewLayers();
+      updateXrLayout();
       // HMD配信の身長補正に使う(配信者の目の高さとの比を取る)
       broadcast.setAvatarHeight(next.restPose.height);
       options.onAvatarLoaded?.({
@@ -229,19 +234,29 @@ export function setupBroadcastPreview(options: {
     sections: [
       {
         title: 'アバター',
+        options: [{ label: '位置を合わせ直す', value: 'recalibrate', action: true }],
+        initial: '',
+        onSelect: () => {
+          broadcast.recalibrate();
+          setStatus('位置を合わせ直しています...');
+        },
+      },
+      {
+        // 自分に入る: VRChat のように、アバターを自分の体に重ねる(下を向くと自分の体が見える)。
+        // 鏡で見る: 右前方に立つアバターで、視聴者から見た自分を確かめる
+        title: '視点',
+        columns: 3,
         options: [
-          { label: '位置を合わせ直す', value: 'recalibrate', action: true },
-          { label: '鏡を表示', value: 'mirror-on' },
-          { label: '鏡を隠す', value: 'mirror-off' },
+          { label: '自分に入る', value: 'view-first' },
+          { label: '鏡で見る', value: 'view-mirror' },
+          { label: '隠す', value: 'view-hidden' },
         ],
-        initial: 'mirror-on',
+        initial: 'view-first',
         onSelect: (value) => {
-          if (value === 'recalibrate') {
-            broadcast.recalibrate();
-            setStatus('位置を合わせ直しています...');
-          } else {
-            setMirrorVisible(value === 'mirror-on');
-          }
+          viewMode = value === 'view-first' ? 'first' : value === 'view-mirror' ? 'mirror' : 'hidden';
+          setMirrorVisible(viewMode !== 'hidden');
+          applyViewLayers();
+          updateXrLayout();
         },
       },
       {
@@ -328,6 +343,7 @@ export function setupBroadcastPreview(options: {
     await renderer.xr.setSession(session);
     turnArmed = true;
     panel.setActive('broadcast-off');
+    applyViewLayers();
     setStatus('VRに入りました。操作パネルの「配信を開始」で配信が始まります');
     // トリガーでの位置合わせはやめた(パネルを押すつもりで合わせ直してしまい、混乱するため)。
     // 合わせ直しはパネルの「位置を合わせ直す」で行う
@@ -339,7 +355,9 @@ export function setupBroadcastPreview(options: {
       grid.visible = true;
       avatarRoot.position.set(0, 0, 0);
       avatarRoot.quaternion.identity();
+      setAvatarScale(1);
       avatarRoot.visible = true;
+      applyViewLayers();
       setStatus('HMD配信を終了しました');
     });
   }
@@ -421,9 +439,42 @@ export function setupBroadcastPreview(options: {
    * (視聴者と重なるとハイタッチの邪魔になる)
    */
   const _mirrorOffset = new THREE.Vector3();
+  /** VRでの自分のアバターの見せ方(パネルの「視点」) */
+  let viewMode: 'first' | 'mirror' | 'hidden' = 'first';
+
+  function setAvatarScale(scale: number): void {
+    if (avatarRoot.scale.x === scale) return;
+    avatarRoot.scale.setScalar(scale);
+    // 揺れもの(髪・スカート)の長さも配置の大きさに合わせる
+    avatar?.applyScale(scale);
+  }
+
+  /**
+   * カメラに映す層。自分に入っているときは「自分の目から見た」層(頭を消した体)、
+   * それ以外(鏡・画面のプレビュー)は「他人から見た」層(頭のある体)を映す
+   */
+  function applyViewLayers(): void {
+    const firstPerson = avatar?.vrm.firstPerson;
+    if (!firstPerson) return;
+    const inside = xrSession !== null && viewMode === 'first';
+    camera.layers.set(0);
+    camera.layers.enable(
+      inside ? firstPerson.firstPersonOnlyLayer : firstPerson.thirdPersonOnlyLayer,
+    );
+  }
+
   function updateXrLayout(): void {
-    if (!broadcast.getWireToXr(peerRoot)) return;
+    if (!xrSession || !broadcast.getWireToXr(peerRoot)) return;
     peerRoot.updateMatrixWorld();
+    if (viewMode === 'first') {
+      // 自分に入る: ワイヤ座標をそのまま現実へ戻す配置にして、身長の比で大きさを戻す。
+      // ワイヤの長さは「現実の長さ × 身長の比」なので、配置を 1/比 にすると、アバターの目が自分の目、
+      // 手がコントローラの位置に重なる
+      broadcast.getWireToXr(avatarRoot);
+      setAvatarScale(1 / broadcast.heightScale);
+      return;
+    }
+    setAvatarScale(1);
     // ワイヤ座標は「正面=+Z、右=-X」。右前方は (-x, +z) になる
     _mirrorOffset.set(-1.0, 0, 1.5).applyQuaternion(peerRoot.quaternion);
     avatarRoot.position.copy(peerRoot.position).add(_mirrorOffset);
@@ -500,7 +551,9 @@ export function setupBroadcastPreview(options: {
     }
 
     if (avatar) {
-      const localFrame = localPose?.() ?? null;
+      // 手元の姿勢: Webカメラ配信中ならその推定、VRの中ならヘッドセットとコントローラ。
+      // 届いた姿を待たずに当てる(配信前でも動き、もたつかない)
+      const localFrame = localPose?.() ?? (xrSession ? broadcast.localFrame() : null);
       const liveFrame = localFrame ?? player.sample(now);
       const live =
         Boolean(liveFrame.pose) && (localFrame !== null || now - lastPacketAt < IDLE_AFTER_MS);

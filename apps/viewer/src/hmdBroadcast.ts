@@ -27,7 +27,7 @@ import {
   type Quat,
   type Vec3,
 } from '@xroomcast/protocol';
-import type { AuthProvider } from '@xroomcast/sync';
+import type { AuthProvider, SampledFrame } from '@xroomcast/sync';
 import { readBody, type BodyFrame } from './bodyTracking';
 import { ExpressionChannel } from './expressionChannel';
 import {
@@ -51,13 +51,16 @@ const SEND_INTERVAL_MS = 1000 / 30;
 const FINGER_EVERY = 2;
 
 /**
- * コントローラの指の形を、ジェスチャーの形へ寄せていく割合(1フレームあたり。30Hz で約0.1秒)。
- * ジェスチャーが変わった瞬間に指がパッと切り替わると不自然に見えるため
+ * コントローラの指の形を、ジェスチャーの形へ寄せていく速さ(1/30秒あたりの割合。約0.1秒で寄る)。
+ * ジェスチャーが変わった瞬間に指がパッと切り替わると不自然に見えるため。
+ * 姿勢は毎フレーム作るので、フレームの間隔に合わせて割合を換算する
  */
 const CURL_FOLLOW = 0.35;
-/** ジェスチャーが切り替わるまでに続けて同じ判定が要るフレーム数(コントローラは入力が明確なので短く) */
-const CONTROLLER_GESTURE_FRAMES = 2;
-const HAND_GESTURE_FRAMES = 4;
+/** ジェスチャーが切り替わるまでに、同じ判定が続く必要のある時間(コントローラは入力が明確なので短く) */
+const CONTROLLER_GESTURE_HOLD_MS = 60;
+const HAND_GESTURE_HOLD_MS = 130;
+/** 手元の姿勢をプレビューへ当て続ける期限(これより古ければ、VRを出たか止まったとみなす) */
+const LOCAL_FRAME_FRESH_MS = 500;
 const NEUTRAL: GestureReading = { gesture: GESTURE.neutral, weight: 0 };
 /** SFUへの接続を試す回数 */
 const CONNECT_ATTEMPTS = 3;
@@ -155,12 +158,12 @@ export class HmdBroadcast {
   private readonly expressions = new ExpressionChannel(this.gestureMixer.expressionNames());
   private readonly stabilizers = {
     controller: {
-      left: new GestureStabilizer(CONTROLLER_GESTURE_FRAMES),
-      right: new GestureStabilizer(CONTROLLER_GESTURE_FRAMES),
+      left: new GestureStabilizer(CONTROLLER_GESTURE_HOLD_MS),
+      right: new GestureStabilizer(CONTROLLER_GESTURE_HOLD_MS),
     },
     hand: {
-      left: new GestureStabilizer(HAND_GESTURE_FRAMES),
-      right: new GestureStabilizer(HAND_GESTURE_FRAMES),
+      left: new GestureStabilizer(HAND_GESTURE_HOLD_MS),
+      right: new GestureStabilizer(HAND_GESTURE_HOLD_MS),
     },
   };
   /** いま送っているコントローラの指(ジェスチャーの形へなめらかに寄せる) */
@@ -170,6 +173,23 @@ export class HmdBroadcast {
   };
   private readonly controllerSpread = { left: 0.5, right: 0.5 };
   private lastExpressionAt = 0;
+  /** 手元で作った最新の姿勢(配信していなくても作る。プレビューのアバターへ直接当てる) */
+  private latest: SampledFrame | null = null;
+  private latestAt = 0;
+
+  /**
+   * 手元で作ったいまの姿勢。配信者コンソールのアバターに直接当てる
+   * (届いた姿を待つと、配信前は何も届かず、配信中も通信と再生の遅れでもたつくため)
+   */
+  localFrame(): SampledFrame | null {
+    if (!this.latest || performance.now() - this.latestAt > LOCAL_FRAME_FRESH_MS) return null;
+    return this.latest;
+  }
+
+  /** 配信者とアバターの身長の比(ワイヤの長さ = 現実の長さ × この値)。一人称でアバターを自分に重ねるのに使う */
+  get heightScale(): number {
+    return this.calibration?.scale ?? 1;
+  }
 
   /** ジェスチャーへの表情の割り当て(配信者ページで変える) */
   get gestureSettings(): Readonly<GestureExpressionSettings> {
@@ -328,15 +348,18 @@ export class HmdBroadcast {
     };
   }
 
-  /** XRのフレームごとに呼ぶ。30Hzに間引いて送信する */
+  /**
+   * XRのフレームごとに呼ぶ。姿勢は毎フレーム作って手元のアバターに当て、
+   * 配信中なら30Hzに間引いて送る(配信していなくても、手元のアバターは動く)
+   */
   sendFrame(frame: XRFrame, refSpace: XRReferenceSpace, session: XRSession): void {
-    if (!this.active || !this.calibration) return;
+    if (!this.calibration) return;
     const now = performance.now();
-    if (now - this.lastSentAt < SEND_INTERVAL_MS) return;
-
     const viewer = frame.getViewerPose(refSpace);
     if (!viewer) return;
-    this.lastSentAt = now;
+    // 前のフレームからの時間を 1/30秒 単位にしたもの(指の寄せ方をフレームの間隔によらず同じにする)
+    const steps = Math.min(3, Math.max(0, (now - this.lastExpressionAt) / (1000 / 30)));
+    const follow = 1 - (1 - CURL_FOLLOW) ** steps;
 
     // 頭は「開始時の姿勢からの差分」。開始時に単位元になる
     const headRestInverse = _restInverse.copy(this.calibration.headRest).invert();
@@ -366,7 +389,7 @@ export class HmdBroadcast {
         // 素手は指をそのまま送り、指の形から読んだジェスチャーは表情にだけ使う
         const fromHand = gestureFromCurls(reading.curls);
         gestures[side] = {
-          gesture: this.stabilizers.hand[side].update(fromHand.gesture),
+          gesture: this.stabilizers.hand[side].update(fromHand.gesture, now),
           weight: fromHand.weight,
         };
         continue;
@@ -384,13 +407,13 @@ export class HmdBroadcast {
       if (input) {
         const read = gestureFromController(input);
         gestures[side] = {
-          gesture: this.stabilizers.controller[side].update(read.gesture),
+          gesture: this.stabilizers.controller[side].update(read.gesture, now),
           weight: read.weight,
         };
         const target = gesturePose(gestures[side], input);
         const current = this.controllerCurls[side];
-        for (let f = 0; f < 5; f++) current[f] = current[f]! + (target.curls[f]! - current[f]!) * CURL_FOLLOW;
-        this.controllerSpread[side] += (target.spread - this.controllerSpread[side]) * CURL_FOLLOW;
+        for (let f = 0; f < 5; f++) current[f] = current[f]! + (target.curls[f]! - current[f]!) * follow;
+        this.controllerSpread[side] += (target.spread - this.controllerSpread[side]) * follow;
       }
       curls[side] = [...this.controllerCurls[side]] as FingerCurls;
       spread[side] = this.controllerSpread[side];
@@ -407,23 +430,34 @@ export class HmdBroadcast {
       rotation: [0, 0, sign * -0.707, 0.707] as Quat,
     });
 
-    const packet: Omit<Packet, 'sequence' | 'timestamp'> = {
-      pose: {
-        head,
-        leftHand: hands.left ?? fallback(1),
-        rightHand: hands.right ?? fallback(-1),
-      },
+    const pose = {
+      head,
+      leftHand: hands.left ?? fallback(1),
+      rightHand: hands.right ?? fallback(-1),
     };
-    // 体は補間の要なので毎パケット送る(取れないフレームは送らず、視聴者側は頭からの推定に戻る)
+    const fingers = {
+      leftCurls: curls.left,
+      rightCurls: curls.right,
+      leftSpread: spread.left,
+      rightSpread: spread.right,
+    };
     const body = readBody(frame as BodyFrame, refSpace, (p, out) => this.toWirePosition(p, out));
+    this.latest = {
+      pose,
+      fingers,
+      expressions: this.expressions.current,
+      ...(body ? { body } : {}),
+    };
+    this.latestAt = now;
+
+    // 配信中だけ、30Hzに間引いて送る
+    if (!this.active || now - this.lastSentAt < SEND_INTERVAL_MS) return;
+    this.lastSentAt = now;
+    const packet: Omit<Packet, 'sequence' | 'timestamp'> = { pose };
+    // 体は補間の要なので毎パケット送る(取れないフレームは送らず、視聴者側は頭からの推定に戻る)
     if (body) packet.body = body;
     if (this.publisher.packetIndex % FINGER_EVERY === 0) {
-      packet.fingers = {
-        leftCurls: curls.left,
-        rightCurls: curls.right,
-        leftSpread: spread.left,
-        rightSpread: spread.right,
-      };
+      packet.fingers = fingers;
       this.expressions.attachTo(packet, now);
     }
     this.publisher.send(packet, now);
@@ -440,6 +474,7 @@ export class HmdBroadcast {
     this.connecting = null;
     this.publisher.close();
     this.calibration = null;
+    this.latest = null;
     this.onStatus?.('HMD配信を停止しました');
   }
 }

@@ -156,37 +156,32 @@ export function gestureFromCurls(curls: FingerCurls): GestureReading {
 }
 
 /**
- * 判定のぶれを抑える。同じジェスチャーが続けて出たときだけ切り替える
- * (指の位置が境目にあると、フレームごとに判定が入れ替わって表情が点滅するため)
+ * 判定のぶれを抑える。同じジェスチャーが一定時間続いたときだけ切り替える
+ * (指の位置が境目にあると、フレームごとに判定が入れ替わって表情が点滅するため)。
+ * フレーム数ではなく時間で数える(ヘッドセットの表示は72〜120回/秒と端末で違うため)
  */
 export class GestureStabilizer {
   private current: Gesture = GESTURE.neutral;
   private candidate: Gesture = GESTURE.neutral;
-  private streak = 0;
+  private since = 0;
 
-  constructor(private readonly framesToSwitch = 4) {}
+  constructor(private readonly holdMs = 120) {}
 
-  update(next: Gesture): Gesture {
+  update(next: Gesture, now: number): Gesture {
     if (next === this.current) {
-      this.streak = 0;
+      this.candidate = next;
       return this.current;
     }
-    if (next === this.candidate) {
-      this.streak++;
-    } else {
+    if (next !== this.candidate) {
       this.candidate = next;
-      this.streak = 1;
+      this.since = now;
     }
-    if (this.streak >= this.framesToSwitch) {
-      this.current = next;
-      this.streak = 0;
-    }
+    if (now - this.since >= this.holdMs) this.current = next;
     return this.current;
   }
 
   reset(): void {
     this.current = this.candidate = GESTURE.neutral;
-    this.streak = 0;
   }
 }
 
