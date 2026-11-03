@@ -11,6 +11,14 @@
  * 結果を返さないため、rAFフレームで結果をキャッシュして設置時に使う。
  */
 import * as THREE from 'three';
+import { ArLighting } from './arLighting';
+import { HandOccluder } from './handOccluder';
+import { MeshOccluder } from './meshOccluder';
+import {
+  DEPTH_SENSING_INIT,
+  DepthOcclusion,
+  shouldRequestDepth,
+} from './depthOcclusion';
 import type { ArPanel } from './spatialUI';
 import { TouchAR } from './touchAR';
 
@@ -90,6 +98,12 @@ interface RayHit {
 export class ArController {
   /** スケールが変わったときに呼ばれる(スプリングボーン等の追従用) */
   onScaleChanged: ((scale: number) => void) | null = null;
+  /** 照明推定の開始・終了で、既定のライトへ掛ける倍率が変わったときに呼ばれる */
+  onDefaultLightScale: ((scale: number) => void) | null = null;
+  private readonly lighting: ArLighting;
+  private readonly depth: DepthOcclusion;
+  private readonly handOccluder: HandOccluder;
+  private readonly meshOccluder: MeshOccluder;
   /**
    * AR開始時、DOMオーバーレイが実際に有効かを通知する。
    * true(スマホ)なら画面固定のUIを、false(HMD)なら空間パネルを使う
@@ -157,6 +171,9 @@ export class ArController {
   /** AR機能の探りボード(初回フレームで判定して表示) */
   private probePending = false;
   private probeBoard: THREE.Mesh | null = null;
+  private probeLines: string[] = [];
+  /** 深度の中身をボードへ足すのを待っているか(深度は開始から遅れて届く) */
+  private depthProbePending = false;
 
   /**
    * 平面ベースのオクルージョン: plane-detectionで検出した現実の面
@@ -176,6 +193,10 @@ export class ArController {
     private readonly elements: ArElements,
     private readonly onModeChange: (arActive: boolean) => void,
   ) {
+    this.lighting = new ArLighting(scene, (scale) => this.onDefaultLightScale?.(scale));
+    this.depth = new DepthOcclusion(renderer, scene);
+    this.handOccluder = new HandOccluder(scene);
+    this.meshOccluder = new MeshOccluder(scene);
     this.reticle = new THREE.Mesh(
       new THREE.RingGeometry(0.12, 0.16, 32).rotateX(-Math.PI / 2),
       new THREE.MeshBasicMaterial({ color: 0xffffff, opacity: 0.9, transparent: true }),
@@ -235,9 +256,10 @@ export class ArController {
   private async start(): Promise<void> {
     if (this.session) return;
     try {
-      // 注意: depth-sensing は要求しない。Chrome(ARCore)では許可されると
+      // 注意: depth-sensing は既定では Quest でだけ要求する。Chrome(ARCore)では許可されると
       // three.js が自動で深度オクルージョン処理を始め、深度データが流れ始める
-      // 瞬間(=床認識確立時)にフリーズする事例があったため、当面無効化
+      // 瞬間(=床認識確立時)にフリーズする事例があった(depthOcclusion.ts)
+      const depth = shouldRequestDepth();
       const session = await navigator.xr!.requestSession('immersive-ar', {
         requiredFeatures: ['hit-test'],
         // local-floor は既定機能ではないため、ここで要求しないと
@@ -248,11 +270,21 @@ export class ArController {
           'mesh-detection',
           'plane-detection',
           'anchors',
+          // 部屋の明るさと光の向き(Chrome のみ。arLighting.ts)
+          'light-estimation',
+          // 現実の人や物でアバターを隠す(Quest 3 等。depthOcclusion.ts)
+          ...(depth ? ['depth-sensing'] : []),
+          // 視聴者自身の手でアバターを隠す(関節から手の形を作る。handOccluder.ts)
+          'hand-tracking',
         ],
+        ...(depth ? { depthSensing: DEPTH_SENSING_INIT } : {}),
         domOverlay: { root: this.elements.overlayRoot },
       } as XRSessionInit);
       this.probePending = true;
       this.session = session;
+      this.lighting.start(session);
+      // three.js の深度処理を避けるため、setSession より前に呼ぶ(depthOcclusion.ts)
+      this.depth.start(session);
       this.onModeChange(true);
       this.elements.overlayRoot.hidden = false;
       this.elements.hint.textContent = '床にかざしてタップで設置 / 二本指で伸縮';
@@ -404,27 +436,75 @@ export class ArController {
       `mesh-detection: ${has('mesh-detection', 'detectedMeshes' in frame)}`,
       `plane-detection: ${has('plane-detection', 'detectedPlanes' in frame)}`,
       `anchors: ${has('anchors', 'createAnchor' in frame)}`,
+      `light-estimation: ${has('light-estimation', false)}`,
+      `depth-sensing: ${this.depth.description ?? '❌'}`,
+      `hand-tracking: ${has('hand-tracking', false)}`,
       `dom-overlay: ${has('dom-overlay', false)}`,
     ];
     console.log('[ar probe]', lines.join(' / '), 'enabledFeatures=', enabled);
+    this.probeLines = lines;
+    this.depthProbePending = this.depth.description !== null;
 
     const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 320;
+    canvas.width = 800;
+    canvas.height = 560;
+    const board = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.8, 0.56),
+      new THREE.MeshBasicMaterial({
+        map: new THREE.CanvasTexture(canvas),
+        transparent: true,
+        // 深度オクルージョンが誤って全部を隠すときでも読めるよう、深度を見ずに最前面へ出す
+        depthTest: false,
+      }),
+    );
+    board.renderOrder = 10;
+    board.position.set(0, 1.5, -1.2); // 開始時の正面・目の高さ
+    this.probeBoard = board;
+    this.drawProbeBoard();
+    this.scene.add(board);
+    window.setTimeout(() => this.removeProbeBoard(), 20000);
+  }
+
+  private drawProbeBoard(): void {
+    const material = this.probeBoard?.material as THREE.MeshBasicMaterial | undefined;
+    const texture = material?.map as THREE.CanvasTexture | undefined;
+    const canvas = texture?.image as HTMLCanvasElement | undefined;
+    if (!texture || !canvas) return;
     const ctx = canvas.getContext('2d')!;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#ffffff';
-    ctx.font = '30px sans-serif';
-    lines.forEach((line, i) => ctx.fillText(line, 24, 52 + i * 44));
-    const board = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.8, 0.4),
-      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true }),
-    );
-    board.position.set(0, 1.5, -1.2); // 開始時の正面・目の高さ
-    this.probeBoard = board;
-    this.scene.add(board);
-    window.setTimeout(() => this.removeProbeBoard(), 20000);
+    ctx.font = '26px sans-serif';
+    this.probeLines.forEach((line, i) => ctx.fillText(line, 20, 42 + i * 40));
+    texture.needsUpdate = true;
+  }
+
+  /** 深度が届いたら、その中身の手がかりをボードへ足す */
+  private probeDepth(): void {
+    const lines = this.depth.takeInfoLines();
+    if (!lines) return;
+    this.depthProbePending = false;
+    console.log('[ar probe]', lines.join(' / '));
+    this.probeLines = [...this.probeLines, ...lines];
+    this.drawProbeBoard();
+  }
+
+  /**
+   * 描画で例外が続いたとき(main.ts の描画ループから呼ぶ)。AR中は何も見えなくなるので、
+   * ARを終了して、エラーと対応状況(深度の診断を含む)を通常画面で見せる
+   */
+  abortOnRenderError(error: unknown): void {
+    if (!this.session) return;
+    const text = [
+      'ARの描画でエラーが続いたため、ARを終了しました。',
+      String(error),
+      ...this.probeLines,
+    ].join('\n');
+    console.error('[ar]', text);
+    void this.session.end().catch(() => undefined);
+    // セッションが閉じて通常画面へ戻ってから出す
+    window.setTimeout(() => window.alert(text), 500);
   }
 
   private removeProbeBoard(): void {
@@ -453,6 +533,10 @@ export class ArController {
   private onFrameInner(frame: XRFrame | undefined): void {
     if (!frame || !this.session) return;
     if (this.probePending) this.probeFeatures(frame);
+    this.lighting.update(frame);
+    this.depth.update(frame);
+    this.handOccluder.update(frame, this.renderer.xr.getReferenceSpace());
+    if (this.depthProbePending && this.probeBoard) this.probeDepth();
 
     // 視点の姿勢はヒットテストの有無に関わらず要る(初期配置・設置時の向き)
     const viewer = this.refSpace ? frame.getViewerPose(this.refSpace) : null;
@@ -492,6 +576,14 @@ export class ArController {
     }
 
     this.updatePlaneOccluders(frame);
+    this.meshOccluder.update(frame, this.renderer.xr.getReferenceSpace());
+    if (this.probeBoard) {
+      const summary = this.meshOccluder.takeSummary();
+      if (summary) {
+        this.probeLines = [...this.probeLines, summary];
+        this.drawProbeBoard();
+      }
+    }
     this.updateRays();
     this.updateGrab();
   }
@@ -870,11 +962,16 @@ export class ArController {
 
   private cleanup(): void {
     this.removeProbeBoard();
+    this.lighting.stop();
+    this.depth.stop();
+    this.handOccluder.hide();
     this.probePending = false;
+    this.depthProbePending = false;
     this.frameErrorShown = false;
     this.exitFullResolution();
     this.touchAR.setEnabled(false);
     for (const entry of this.planeOccluders.values()) this.disposeOccluder(entry.mesh);
+    this.meshOccluder.clear();
     this.planeOccluders.clear();
     this.session = null;
     this.hitTestSource = null;

@@ -19,6 +19,11 @@ export interface Scenery {
    * `null` を渡した項目は既定値へ戻す。ARでは背景も地面も出ないので効かない
    */
   setTheme(theme: { sky?: string | null; ground?: string | null }): void;
+  /**
+   * ライトの強さの倍率(1が既定)。ARで部屋の照明を推定できたときに絞り、
+   * 推定した光と置き換える(完全には消さず、暗い部屋での下限として残す)
+   */
+  setLightScale(scale: number): void;
 }
 
 /** 配信者が色を決めなかったときの既定 */
@@ -63,10 +68,12 @@ export function setupScenery(scene: THREE.Scene): Scenery {
   let decorationsWanted = true;
 
   // ライティング: パステルに合わせて柔らかく明るく
-  const hemisphere = new THREE.HemisphereLight(0xffffff, 0xe6d9ee, 1.1);
+  const HEMISPHERE_INTENSITY = 1.1;
+  const SUN_INTENSITY = 1.8;
+  const hemisphere = new THREE.HemisphereLight(0xffffff, 0xe6d9ee, HEMISPHERE_INTENSITY);
   scene.add(hemisphere);
 
-  const sun = new THREE.DirectionalLight(0xfff6e8, 1.8);
+  const sun = new THREE.DirectionalLight(0xfff6e8, SUN_INTENSITY);
   sun.position.set(2.5, 4.5, 3);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
@@ -184,6 +191,10 @@ export function setupScenery(scene: THREE.Scene): Scenery {
       // ARでは装飾床が消えるので太陽の影は不要。切ることで接地影プレーンへの
       // 二重影を防ぐ(太陽自体はアバターのライティングとして残す)
       sun.castShadow = !on;
+    },
+    setLightScale(scale: number): void {
+      hemisphere.intensity = HEMISPHERE_INTENSITY * scale;
+      sun.intensity = SUN_INTENSITY * scale;
     },
   };
 }
