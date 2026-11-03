@@ -8,8 +8,6 @@
 import * as THREE from 'three';
 import type { ArPanel } from './spatialUI';
 
-const LASER_DEFAULT_LEN = 1.5;
-
 const _matrix = new THREE.Matrix4();
 const _raycaster = new THREE.Raycaster();
 const _quat = new THREE.Quaternion();
@@ -62,7 +60,6 @@ export class XrPanelController {
    */
   show(origin: THREE.Vector3, yawAngle: number): void {
     this.enabled = true;
-    for (const laser of this.lasers) laser.visible = true;
     for (const panel of this.panels) {
       _quat.setFromAxisAngle(UP, yawAngle);
       _offset.copy(panel.arPlacement.position).applyQuaternion(_quat).add(origin);
@@ -109,7 +106,10 @@ export class XrPanelController {
         }
       }
       this.hits[i] = best ? { panel: best.panel, index: best.index } : { panel: null, index: -1 };
-      laser.scale.z = best ? best.distance : LASER_DEFAULT_LEN;
+      // ビームはパネルを指しているときだけ出す(普段から出ていると手元が見づらく、鏡にも映る)。
+      // 長さは当たった位置まで
+      laser.visible = best !== null;
+      if (best) laser.scale.z = best.distance;
       if (best && best.index >= 0) hover.set(best.panel, best.index);
     }
 
