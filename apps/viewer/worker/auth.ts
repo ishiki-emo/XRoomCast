@@ -68,6 +68,8 @@ export interface AuthResult {
    * アカウントに紐づけられる
    */
   userId?: string;
+  /** 断った理由(管理画面のAccessで、トークンが届いていたのに通らなかったとき) */
+  reason?: string;
 }
 
 const OK: AuthResult = { ok: true };
@@ -169,11 +171,14 @@ export async function authorize(
 
   if (scope === 'admin') {
     // Cloudflare Access のログインを優先する。利用者IDはログインしたメールアドレス
-    const email = await verifyAccess(env, request);
-    if (email !== null) return { ok: true, userId: email || undefined };
+    const access = await verifyAccess(env, request);
+    if ('email' in access) return { ok: true, userId: access.email || undefined };
     // 予備の入り口。未設定なら使えない(安全側)。配信者キーでは代替できない
-    if (!env.ADMIN_KEY) return DENIED;
-    return timingSafeEqual(env.ADMIN_KEY, readCredential(request, url, ['key'])) ? OK : DENIED;
+    const keyMatches =
+      Boolean(env.ADMIN_KEY) &&
+      timingSafeEqual(env.ADMIN_KEY!, readCredential(request, url, ['key']));
+    if (keyMatches) return OK;
+    return access.failure ? { ok: false, reason: access.failure } : DENIED;
   }
 
   if (scope === 'publisher') {

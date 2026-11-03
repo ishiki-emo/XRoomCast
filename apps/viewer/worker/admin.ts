@@ -88,7 +88,11 @@ function isRoomFileKey(key: string): boolean {
 export async function handleAdminApi(request: Request, env: AdminEnv, url: URL): Promise<Response> {
   const auth = await authorize(env, request, url, { scope: 'admin', room: '' });
   if (!auth.ok) {
-    return json(403, { error: 'forbidden(Cloudflare Access のログインか管理者キーが必要です)' });
+    return json(403, {
+      error: auth.reason
+        ? `Cloudflare Access のログインを確認できません: ${auth.reason}`
+        : 'forbidden(Cloudflare Access のログインか管理者キーが必要です)',
+    });
   }
   // Accessのログインは Cookie でも通るので、よそのサイトから送らせる書き込み(CSRF)を断る
   if (request.method !== 'GET' && request.headers.get('Origin') !== url.origin) {

@@ -58,7 +58,16 @@ async function fetchKeys(teamDomain: string, force: boolean): Promise<Jwk[]> {
 }
 
 export function accessConfigured(env: AccessEnv): boolean {
-  return Boolean(env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD);
+  return Boolean(env.ACCESS_TEAM_DOMAIN?.trim() && env.ACCESS_AUD?.trim());
+}
+
+/**
+ * チームのドメインを `https://<チーム名>.cloudflareaccess.com` の形に揃える。
+ * secret の入力で `https://` を付け忘れたり、末尾にスラッシュや空白が入ったりしても通す
+ */
+function normalizeTeamDomain(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, '').toLowerCase();
+  return /^https?:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
 /** リクエストから Access のJWTを取り出す。ブラウザの直接アクセスではCookieにだけ載ることがある */
@@ -70,28 +79,49 @@ function readToken(request: Request): string | null {
 }
 
 /**
- * 正当な Access のログインなら利用者のメールアドレスを返す(無ければ空文字)。
- * 検証できなければ null
+ * 検証の結果。通れば利用者のメールアドレス(無ければ空文字)。
+ * 断ったときの failure は、Accessのトークンが届いていたのに通らなかった理由
+ * (設定の食い違いを、秘密の値を見ずに突き止めるため画面へ出す)。
+ * トークンが無い・Access未設定のときは null
  */
+export type AccessResult = { email: string } | { failure: string | null };
+
 export async function verifyAccess(
   env: AccessEnv,
   request: Request,
   now = Date.now(),
-): Promise<string | null> {
-  if (!accessConfigured(env)) return null;
+): Promise<AccessResult> {
+  if (!accessConfigured(env)) return { failure: null };
   const token = readToken(request);
-  if (!token) return null;
+  // Accessを設定しているのにトークンが無い = そのパスがAccessの保護から漏れている
+  if (!token) {
+    return {
+      failure: 'Accessのログイン情報が届いていません(api/admin のパスもAccessで保護してください)',
+    };
+  }
   const [headerPart, payloadPart, signaturePart] = token.split('.');
-  if (!headerPart || !payloadPart || !signaturePart) return null;
+  if (!headerPart || !payloadPart || !signaturePart) return { failure: 'トークンの形式が不正です' };
 
+  const teamDomain = normalizeTeamDomain(env.ACCESS_TEAM_DOMAIN!);
+  const expectedAud = env.ACCESS_AUD!.trim();
   try {
     const header = decodeJson<{ alg?: string; kid?: string }>(headerPart);
-    if (header.alg !== 'RS256' || !header.kid) return null;
-    const teamDomain = env.ACCESS_TEAM_DOMAIN!.replace(/\/$/, '');
-    let jwk = (await fetchKeys(teamDomain, false)).find((key) => key.kid === header.kid);
+    if (header.alg !== 'RS256' || !header.kid) return { failure: '未対応の署名形式です' };
+    let keys: Jwk[];
+    try {
+      keys = await fetchKeys(teamDomain, false);
+    } catch {
+      return { failure: 'チームの公開鍵を取得できません(ACCESS_TEAM_DOMAIN を確認してください)' };
+    }
+    let jwk = keys.find((key) => key.kid === header.kid);
     // 知らない鍵IDなら、ローテーション直後かもしれないので一度だけ取り直す
     if (!jwk) jwk = (await fetchKeys(teamDomain, true)).find((key) => key.kid === header.kid);
-    if (!jwk) return null;
+    if (!jwk) {
+      return {
+        failure:
+          '署名の鍵がチームの公開鍵にありません(ACCESS_TEAM_DOMAIN が別のチームかもしれません)',
+      };
+    }
 
     const key = await crypto.subtle.importKey(
       'jwk',
@@ -106,17 +136,25 @@ export async function verifyAccess(
       base64urlDecode(signaturePart),
       new TextEncoder().encode(`${headerPart}.${payloadPart}`),
     );
-    if (!valid) return null;
+    if (!valid) return { failure: '署名が正しくありません' };
 
     const claims = decodeJson<AccessClaims>(payloadPart);
     const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-    if (!audiences.includes(env.ACCESS_AUD)) return null;
-    if (claims.iss !== teamDomain) return null;
+    if (!audiences.includes(expectedAud)) {
+      return { failure: 'AUDタグが一致しません(ACCESS_AUD を、このアプリのAUDタグにしてください)' };
+    }
+    if (claims.iss?.replace(/\/+$/, '').toLowerCase() !== teamDomain) {
+      return { failure: '発行元が一致しません(ACCESS_TEAM_DOMAIN を確認してください)' };
+    }
     const seconds = now / 1000;
-    if (typeof claims.exp !== 'number' || claims.exp <= seconds) return null;
-    if (typeof claims.nbf === 'number' && claims.nbf > seconds + 60) return null;
-    return claims.email ?? '';
+    if (typeof claims.exp !== 'number' || claims.exp <= seconds) {
+      return { failure: 'ログインの期限が切れています(再読み込みしてログインし直してください)' };
+    }
+    if (typeof claims.nbf === 'number' && claims.nbf > seconds + 60) {
+      return { failure: 'トークンの有効開始前です' };
+    }
+    return { email: claims.email ?? '' };
   } catch {
-    return null;
+    return { failure: 'トークンを読み取れません' };
   }
 }
