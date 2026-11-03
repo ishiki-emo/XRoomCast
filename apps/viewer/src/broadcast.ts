@@ -564,7 +564,7 @@ function setupBodySettings(hmd: HmdBroadcast): { setStature(height: number | nul
     const cm = Math.round((body.realHeight ?? hmd.estimatedRealHeight()) * 100);
     height.value = String(cm);
     heightValue.textContent = body.realHeight === null ? '自動' : `${cm}cm`;
-    const eyeCm = Math.round(body.eyeAdjust * 100);
+    const eyeCm = Math.round(body.heightShift * 100);
     eye.value = String(eyeCm);
     eyeValue.textContent = `${eyeCm > 0 ? '+' : ''}${eyeCm}cm`;
   };
@@ -578,7 +578,7 @@ function setupBodySettings(hmd: HmdBroadcast): { setStature(height: number | nul
     hmd.setBodySettings({ ...hmd.bodySettings, realHeight: Number(height.value) / 100 });
   });
   eye.addEventListener('input', () => {
-    hmd.setBodySettings({ ...hmd.bodySettings, eyeAdjust: Number(eye.value) / 100 });
+    hmd.setBodySettings({ ...hmd.bodySettings, heightShift: Number(eye.value) / 100 });
   });
   hmd.bodyListeners.push(render);
   render();

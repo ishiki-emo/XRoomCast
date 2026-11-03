@@ -347,20 +347,23 @@ export function setupBroadcastPreview(options: {
         },
       },
       {
-        // 目線の高さの微調整。＋で一人称の視点が上がる
+        // 目線の高さ(OVR の空間の高さのオフセットと同じ)。大きさは変えずに、自分の追跡位置ごと上下にずらす。
+        // 下げると膝が曲がり、上げると浮く
         title: '目線',
-        columns: 3,
+        columns: 5,
         options: [
-          { label: '−1cm', value: 'eye--1', action: true },
-          { label: '0に戻す', value: 'eye-0', action: true },
-          { label: '＋1cm', value: 'eye-1', action: true },
+          { label: '−5', value: 'shift--5', action: true },
+          { label: '−1', value: 'shift--1', action: true },
+          { label: '0', value: 'shift-0', action: true },
+          { label: '＋1', value: 'shift-1', action: true },
+          { label: '＋5', value: 'shift-5', action: true },
         ],
         initial: '',
         onSelect: (value) => {
           const body = broadcast.bodySettings;
-          const eyeAdjust =
-            value === 'eye-0' ? 0 : body.eyeAdjust + Number(value.slice('eye-'.length)) / 100;
-          broadcast.setBodySettings({ ...body, eyeAdjust: Math.round(eyeAdjust * 100) / 100 });
+          const step = Number(value.slice('shift-'.length)) / 100;
+          const heightShift = step === 0 ? 0 : body.heightShift + step;
+          broadcast.setBodySettings({ ...body, heightShift: Math.round(heightShift * 100) / 100 });
         },
       },
       {
@@ -445,10 +448,15 @@ export function setupBroadcastPreview(options: {
       heightSection,
       `身長 ${body.realHeight ? `${Math.round(body.realHeight * 100)}cm` : '自動'} ${avatarText}`,
     );
-    const eye = Math.round(body.eyeAdjust * 100);
-    panel.setSectionTitle(eyeSection, `目線 ${eye > 0 ? '＋' : eye < 0 ? '−' : '±'}${Math.abs(eye)}cm`);
+    const shift = Math.round(body.heightShift * 100);
+    panel.setSectionTitle(
+      eyeSection,
+      `目線の高さ ${shift > 0 ? '＋' : shift < 0 ? '−' : '±'}${Math.abs(shift)}cm`,
+    );
   }
   broadcast.bodyListeners.push(updateBodyTitles);
+  // 目線の高さは合わせ直さずに効くので、周りの世界の置き場所もその場で動かす
+  broadcast.bodyListeners.push(() => updateXrLayout());
   updateBodyTitles();
   // 合わせ直すまでの秒読みを、アバターの欄の見出しに出す
   broadcast.onCalibrationCountdown = (seconds) =>

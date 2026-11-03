@@ -178,16 +178,18 @@ const DEFAULT_STANDING_EYE = 1.5;
  *   選ぶと、身長から見積もった立った目の高さ(× HUMAN_EYE_RATIO)とアバターの目の高さで比を決める。
  *   位置合わせのときの姿勢や、立っている・座っているに左右されないので、配信者によらず同じ感覚になる
  *   (床の高さが正しい前提)
- * - eyeAdjust: 目線の高さの微調整(m)。一人称で、アバターに対して自分の視点を上下させる。
- *   自動のときは比を計算し直すので接地はずれない。身長を選んでいるときは比が固定なので、＋でアバターが下がる
+ * - heightShift: 目線の高さ(m、現実の長さ)。OVR Advanced Settings の空間の高さのオフセットと同じで、
+ *   大きさは変えずに、自分の追跡位置ごと上下にずらす。下げるとアバターの頭ごと下がって膝が曲がり、
+ *   上げると浮く。自分に入っているときは、アバターの目と自分の目は重なったまま、周りの世界が上下する。
+ *   位置合わせはやり直さず、その場で効く
  */
 export interface BodySettings {
   realHeight: number | null;
-  eyeAdjust: number;
+  heightShift: number;
 }
 const BODY_SETTINGS_KEY = 'xroomcast.hmd.body';
 export const REAL_HEIGHT_RANGE = [1.3, 2.0] as const;
-export const EYE_ADJUST_RANGE = [-0.1, 0.1] as const;
+export const HEIGHT_SHIFT_RANGE = [-0.3, 0.3] as const;
 
 function loadBodySettings(): BodySettings {
   try {
@@ -198,13 +200,13 @@ function loadBodySettings(): BodySettings {
       value.realHeight <= REAL_HEIGHT_RANGE[1]
         ? value.realHeight
         : null;
-    const eyeAdjust =
-      typeof value?.eyeAdjust === 'number'
-        ? Math.min(EYE_ADJUST_RANGE[1], Math.max(EYE_ADJUST_RANGE[0], value.eyeAdjust))
+    const heightShift =
+      typeof value?.heightShift === 'number'
+        ? Math.min(HEIGHT_SHIFT_RANGE[1], Math.max(HEIGHT_SHIFT_RANGE[0], value.heightShift))
         : 0;
-    return { realHeight, eyeAdjust };
+    return { realHeight, heightShift };
   } catch {
-    return { realHeight: null, eyeAdjust: 0 };
+    return { realHeight: null, heightShift: 0 };
   }
 }
 
@@ -263,14 +265,18 @@ export class HmdBroadcast {
     this.avatarFullHeight = height && height > 0.3 ? height : null;
   }
 
-  /** 体格の設定を変える(保存して、位置を合わせ直す) */
+  /**
+   * 体格の設定を変える(保存する)。身長が変わったら位置を合わせ直す。
+   * 目線の高さは追跡位置をずらすだけなので、合わせ直さずにその場で効く
+   */
   setBodySettings(next: BodySettings): void {
+    const heightChanged = next.realHeight !== this.body.realHeight;
     this.body = {
       realHeight:
         next.realHeight === null
           ? null
           : Math.min(REAL_HEIGHT_RANGE[1], Math.max(REAL_HEIGHT_RANGE[0], next.realHeight)),
-      eyeAdjust: Math.min(EYE_ADJUST_RANGE[1], Math.max(EYE_ADJUST_RANGE[0], next.eyeAdjust)),
+      heightShift: Math.min(HEIGHT_SHIFT_RANGE[1], Math.max(HEIGHT_SHIFT_RANGE[0], next.heightShift)),
     };
     try {
       localStorage.setItem(BODY_SETTINGS_KEY, JSON.stringify(this.body));
@@ -278,7 +284,7 @@ export class HmdBroadcast {
       // 覚えられないだけ
     }
     for (const listener of this.bodyListeners) listener(this.body);
-    if (this.calibration) this.recalibrate();
+    if (heightChanged && this.calibration) this.recalibrate();
   }
 
   /** 自動のとき、前回の位置合わせから見積もったリアルの身長(m)。身長を選び始めるときの初期値に使う */
@@ -286,7 +292,7 @@ export class HmdBroadcast {
     const scale = this.calibration?.scale;
     if (this.avatarHeight && scale && this.mode === 'standing') {
       // 立ちモードで合わせた比から、配信者の立った目の高さ → 身長を逆算する
-      const eye = (this.avatarHeight + this.avatarEye.y + this.body.eyeAdjust) / scale;
+      const eye = (this.avatarHeight + this.avatarEye.y) / scale;
       return Math.round((eye / HUMAN_EYE_RATIO) * 100) / 100;
     }
     return 1.65;
@@ -475,10 +481,8 @@ export class HmdBroadcast {
     // アバター側も目の高さ(頭の骨の高さ + 目までのずれ)で比べる。
     // 座りモードでは、座った目の高さは身長の目安にならないので比は1のまま、アバターの立った目の高さまで持ち上げる
     const eyeHeight = Math.max(p.y, 0.5);
-    // アバターの目の高さ(目線の微調整を含む)
-    const avatarEye = this.avatarHeight
-      ? this.avatarHeight + this.avatarEye.y + this.body.eyeAdjust
-      : null;
+    // アバターの目の高さ
+    const avatarEye = this.avatarHeight ? this.avatarHeight + this.avatarEye.y : null;
     const seated = this.mode === 'seated';
     // 身長の比: リアルの身長を選んでいれば、その立った目の高さ(身長 × 人の目の高さの割合)とアバターの目の高さの比
     // (姿勢に左右されない)。頭頂どうしの比にしないのは、アバターは頭が大きく目の高さの割合が人と違うことが多く、
@@ -533,7 +537,7 @@ export class HmdBroadcast {
     if (!this.calibration) return false;
     // ワイヤ = (現実 + 持ち上げ - 足元) を回して × 比。その逆: 足元から持ち上げぶん下げ、向きを戻し、1/比
     target.position.copy(this.calibration.origin);
-    target.position.y -= this.calibration.heightOffset;
+    target.position.y -= this.calibration.heightOffset + this.body.heightShift;
     target.quaternion.setFromAxisAngle(UP, this.calibration.yawAngle);
     target.scale.setScalar(1 / this.calibration.scale);
     return true;
@@ -548,7 +552,7 @@ export class HmdBroadcast {
   private toWirePosition(p: DOMPointReadOnly, out: THREE.Vector3): THREE.Vector3 {
     const calibration = this.calibration!;
     return out
-      .set(p.x, p.y + calibration.heightOffset, p.z)
+      .set(p.x, p.y + calibration.heightOffset + this.body.heightShift, p.z)
       .sub(calibration.origin)
       .applyQuaternion(calibration.yaw)
       .multiplyScalar(calibration.scale);
@@ -593,7 +597,6 @@ export class HmdBroadcast {
     // 目の位置から頭の骨の位置へ戻す(目までのずれを、頭の向きに合わせて回して引く)
     _eye
       .copy(this.avatarEye)
-      .setY(this.avatarEye.y + this.body.eyeAdjust)
       .applyQuaternion(_headRot.set(head.rotation[0], head.rotation[1], head.rotation[2], head.rotation[3]));
     head.position = [
       head.position[0] - _eye.x,
