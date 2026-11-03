@@ -63,11 +63,33 @@ export function accessConfigured(env: AccessEnv): boolean {
 
 /**
  * チームのドメインを `https://<チーム名>.cloudflareaccess.com` の形に揃える。
- * secret の入力で `https://` を付け忘れたり、末尾にスラッシュや空白が入ったりしても通す
+ * secret の入力で `https://` を付け忘れたり、チーム名だけを入れたり、末尾にスラッシュや空白が
+ * 入ったりしても通す
  */
 function normalizeTeamDomain(value: string): string {
-  const trimmed = value.trim().replace(/\/+$/, '').toLowerCase();
-  return /^https?:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`;
+  // スキームとパスを外してホスト名だけにする
+  const host = value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/.*$/, '');
+  // チーム名だけ(ドットなし)なら Access の既定ドメインを補う
+  return `https://${host.includes('.') ? host : `${host}.cloudflareaccess.com`}`;
+}
+
+/**
+ * 設定の食い違いを直すための手がかり。ログイン情報に書かれた発行元(=正しいチームのドメイン)を添える。
+ * 送り手が書いた値をそのまま返すだけなので、偽のトークンでも秘密は漏れない
+ */
+function issuerHint(payloadPart: string): string {
+  try {
+    const iss = decodeJson<AccessClaims>(payloadPart).iss ?? '';
+    return /^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/i.test(iss)
+      ? `。このログインの発行元は ${iss} です。ACCESS_TEAM_DOMAIN にこれを設定してください`
+      : '';
+  } catch {
+    return '';
+  }
 }
 
 /** リクエストから Access のJWTを取り出す。ブラウザの直接アクセスではCookieにだけ載ることがある */
@@ -111,15 +133,16 @@ export async function verifyAccess(
     try {
       keys = await fetchKeys(teamDomain, false);
     } catch {
-      return { failure: 'チームの公開鍵を取得できません(ACCESS_TEAM_DOMAIN を確認してください)' };
+      return {
+        failure: `チームの公開鍵を取得できません(ACCESS_TEAM_DOMAIN を確認してください)${issuerHint(payloadPart)}`,
+      };
     }
     let jwk = keys.find((key) => key.kid === header.kid);
     // 知らない鍵IDなら、ローテーション直後かもしれないので一度だけ取り直す
     if (!jwk) jwk = (await fetchKeys(teamDomain, true)).find((key) => key.kid === header.kid);
     if (!jwk) {
       return {
-        failure:
-          '署名の鍵がチームの公開鍵にありません(ACCESS_TEAM_DOMAIN が別のチームかもしれません)',
+        failure: `署名の鍵がチームの公開鍵にありません(ACCESS_TEAM_DOMAIN が別のチームかもしれません)${issuerHint(payloadPart)}`,
       };
     }
 
@@ -144,7 +167,9 @@ export async function verifyAccess(
       return { failure: 'AUDタグが一致しません(ACCESS_AUD を、このアプリのAUDタグにしてください)' };
     }
     if (claims.iss?.replace(/\/+$/, '').toLowerCase() !== teamDomain) {
-      return { failure: '発行元が一致しません(ACCESS_TEAM_DOMAIN を確認してください)' };
+      return {
+        failure: `発行元が一致しません(ACCESS_TEAM_DOMAIN を確認してください)${issuerHint(payloadPart)}`,
+      };
     }
     const seconds = now / 1000;
     if (typeof claims.exp !== 'number' || claims.exp <= seconds) {
