@@ -22,9 +22,15 @@ const FINGER_SEGMENTS = ['Proximal', 'Intermediate', 'Distal'] as const;
 /** 関節ごとの最大屈曲角(rad)。カール1.0でこの角度まで曲がる */
 const CURL_MAX = [1.2, 1.4, 1.0] as const;
 const THUMB_CURL_MAX = [0.4, 0.6, 0.6] as const;
-/** スプレッド(指の開き)の最大角と指ごとの係数(人差し指→小指) */
-const SPREAD_MAX = 0.25;
-const SPREAD_FACTORS = [1, 0.35, -0.35, -1] as const;
+/**
+ * スプレッド(指の開き)。0.5が自然位置で、1で開き切る・0で閉じ切る。
+ * 開く側は人差し指と小指の間が最大約46°(パーで指の間に隙間ができ、ピースがV字に見える)。
+ * 閉じる側を同じだけ動かすと指どうしが重なるので、小さくしてある。
+ * 中指は動かさず、人差し指を大きく外へ振る(ピースで人差し指と中指の間が開くように)
+ */
+const SPREAD_OPEN_MAX = 0.4;
+const SPREAD_CLOSE_MAX = 0.15;
+const SPREAD_FACTORS = [1, 0, -0.5, -1] as const;
 /**
  * 手首のひねりのうち前腕に分け持たせる割合。手首だけでひねると手首のメッシュが細く絞られるため
  * (実際の前腕も肘から手首にかけてひねりを分け持つ)。twoBoneIK.ts の twistShare
@@ -333,7 +339,8 @@ export class PoseApplier {
             if (j === 0) {
               const factor = SPREAD_FACTORS[fingerIndex - 1]!;
               const spreadSign = side === 'left' ? 1 : -1;
-              _spreadQuat.setFromAxisAngle(Y_AXIS, spreadSign * factor * (spread - 0.5) * SPREAD_MAX);
+              const amount = (spread - 0.5) * 2 * (spread > 0.5 ? SPREAD_OPEN_MAX : SPREAD_CLOSE_MAX);
+              _spreadQuat.setFromAxisAngle(Y_AXIS, spreadSign * factor * amount);
               joint.quaternion.premultiply(_spreadQuat);
             }
           }

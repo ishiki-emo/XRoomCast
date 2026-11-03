@@ -13,6 +13,12 @@ const CF_STUN_URL = 'stun:stun.cloudflare.com:3478';
 const DATA_CHANNEL_NAME = 'pose';
 /** パブリッシャー登録のハートビート(Worker側は15分で失効とみなす) */
 const HEARTBEAT_MS = 4 * 60 * 1000;
+/**
+ * 送信の待ち行列がこれを超えていたら、そのフレームは捨てる。通信が詰まったときに送り続けると、
+ * 待ち行列があふれて send がエラーを投げる(描画ループごと止まる原因になる)。
+ * ポーズは新しいものほど価値があるので、古いものを溜めずに捨てる
+ */
+const MAX_BUFFERED_BYTES = 64 * 1024;
 
 export class PosePublisher {
   private pc: RTCPeerConnection | null = null;
@@ -112,17 +118,24 @@ export class PosePublisher {
 
   /** 連番と時刻を付けて送る */
   send(packet: Omit<Packet, 'sequence' | 'timestamp'>, now = performance.now()): void {
-    if (!this.channel) return;
+    const channel = this.channel;
+    if (!channel || channel.readyState !== 'open') return;
+    if (channel.bufferedAmount > MAX_BUFFERED_BYTES) return;
     const bytes = encodePacket({
       ...packet,
       sequence: this.sequence & 0xffff,
       timestamp: Math.round(now - this.startedAt) >>> 0,
     });
     this.sequence++;
-    // encodePacketの戻りはUint8Array<ArrayBufferLike>。sendはArrayBufferを要求する
-    this.channel.send(
-      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
-    );
+    try {
+      // encodePacketの戻りはUint8Array<ArrayBufferLike>。sendはArrayBufferを要求する
+      channel.send(
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      );
+    } catch (error) {
+      // 閉じかけ・あふれは、このフレームを捨てるだけにする
+      console.warn('[publisher] 送信できませんでした(このフレームは捨てます):', error);
+    }
   }
 
   close(): void {

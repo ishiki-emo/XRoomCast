@@ -207,13 +207,13 @@ export function gesturePose(
       return pose([0.8 * w, w, w, w, w], 0.3);
     }
     case GESTURE.handOpen:
-      return pose([0, 0, 0, 0, 0], 0.8);
+      return pose([0, 0, 0, 0, 0], 1);
     case GESTURE.fingerPoint:
       return pose([0.75, 0, 1, 1, 1], 0.4);
     case GESTURE.victory:
       return pose([0.75, 0, 0, 1, 1], 1);
     case GESTURE.rockNRoll:
-      return pose([0.75, 0, 1, 1, 0], 0.8);
+      return pose([0.75, 0, 1, 1, 0], 1);
     case GESTURE.handGun:
       return pose([0, 0, 1, 1, 1], 0.4);
     case GESTURE.thumbsUp:

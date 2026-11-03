@@ -297,9 +297,14 @@ export function setupBroadcastPreview(options: {
     scene.background = mode === 'ar' ? null : backgroundColor;
     grid.visible = mode === 'vr';
 
-    await broadcast.connect();
+    // 先に描画を始める。SFUへの接続(DataChannel が開くまで数秒〜十数秒かかることがある)を
+    // 待ってからだと、その間ヘッドセットへ1枚も絵を送れず、頭もコントローラも止まって見える。
+    // 接続は裏で進め、つながるまでは送らないだけにする(sendFrame は接続前なら何もしない)
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(session);
+    broadcast.connect().catch((error: unknown) => {
+      setStatus(`HMD配信の接続に失敗しました(VRは続けられます): ${String(error)}`);
+    });
     // パネルを指していないときのトリガーは位置合わせに使う
     session.addEventListener('select', (event) => {
       if (panelController.pointing) return;
@@ -354,7 +359,32 @@ export function setupBroadcastPreview(options: {
   }
 
   const clock = new THREE.Clock();
-  renderer.setAnimationLoop((_time: number, frame?: XRFrame) => {
+  /**
+   * 毎フレームの処理。three.js(0.172)の描画ループは、処理の中でエラーが1回でも起きると
+   * 次のフレームを予約しないまま止まる。VRでは絵が固まり、頭もコントローラも動かなくなったように
+   * 見えるので、エラーは記録して次のフレームへ進む(同じエラーを毎フレーム書かないよう間引く)
+   */
+  let lastFrameErrorAt = 0;
+  renderer.setAnimationLoop((time: number, frame?: XRFrame) => {
+    try {
+      renderFrame(time, frame);
+    } catch (error) {
+      const now = performance.now();
+      if (now - lastFrameErrorAt > 5000) {
+        lastFrameErrorAt = now;
+        console.error('[preview] フレームの処理でエラー(描画は続けます):', error);
+        setStatus(`処理中にエラーが起きました(続けています): ${String(error)}`);
+      }
+      // エラーの起きたフレームでも絵は出す(出さないとVRで画面が固まる)
+      try {
+        renderer.render(scene, camera);
+      } catch {
+        // 描画そのものが失敗したときは、次のフレームでやり直す
+      }
+    }
+  });
+
+  function renderFrame(_time: number, frame?: XRFrame): void {
     const delta = clock.getDelta();
     const now = performance.now();
     peers.update();
@@ -415,7 +445,7 @@ export function setupBroadcastPreview(options: {
 
     controls.update();
     renderer.render(scene, camera);
-  });
+  }
 
   return handle;
 }
