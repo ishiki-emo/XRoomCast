@@ -22,6 +22,7 @@ import { PoseStreamPlayer } from '@xroomcast/sync';
 import { SfuTransport } from '@xroomcast/sync';
 import { SpatialPanel, type PanelSection } from './spatialUI';
 import { XrPanelController } from './xrPanelController';
+import { HandMenu } from './handMenu';
 import { MicLipSync } from './micLipSync';
 
 const IDLE_AFTER_MS = 5000;
@@ -274,6 +275,7 @@ export function setupBroadcastPreview(options: {
   const panelSections: PanelSection[] = [
       {
         title: 'アバター',
+        tab: '体',
         options: [{ label: '位置を合わせ直す', value: 'recalibrate', action: true }],
         initial: '',
         onSelect: () => {
@@ -287,6 +289,7 @@ export function setupBroadcastPreview(options: {
         // 自分＋鏡: 自分に入ったまま、右前方の姿見に自分の姿が映る(VRChat の鏡と同じ)。
         // アバターを前に: 右前方にアバターを立たせて、視聴者から見た自分を確かめる
         title: '視点',
+        tab: '視点',
         columns: 2,
         options: [
           { label: '自分に入る', value: 'view-first' },
@@ -312,6 +315,7 @@ export function setupBroadcastPreview(options: {
       {
         // VRChat の立ちモード・座りモード。切り替えると位置を合わせ直す
         title: '姿勢',
+        tab: '体',
         columns: 2,
         options: [
           { label: '立って遊ぶ', value: 'play-standing' },
@@ -326,6 +330,7 @@ export function setupBroadcastPreview(options: {
       {
         // リアルの身長。選ぶと、身長の比を「アバターの身長 ÷ リアルの身長」で決める(姿勢に左右されない)
         title: '身長',
+        tab: '体',
         columns: 4,
         options: [
           { label: '−5', value: 'height--5', action: true },
@@ -350,6 +355,7 @@ export function setupBroadcastPreview(options: {
         // 目線の高さ(OVR の空間の高さのオフセットと同じ)。大きさは変えずに、自分の追跡位置ごと上下にずらす。
         // 下げると膝が曲がり、上げると浮く
         title: '目線',
+        tab: '体',
         columns: 5,
         options: [
           { label: '−5', value: 'shift--5', action: true },
@@ -369,6 +375,7 @@ export function setupBroadcastPreview(options: {
       {
         // 軸ごとに −/＋ を別のボタンにする(1つのボタンで一周させると、戻すのに何回も押す必要があった)
         title: '手首',
+        tab: '手首',
         columns: 2,
         options: [
           { label: 'X −15°', value: 'wrist-x-', action: true },
@@ -392,6 +399,7 @@ export function setupBroadcastPreview(options: {
       {
         // 「手で切替」はジェスチャーに割り当てた表情、ほかは選んだ表情に固定(ジェスチャーより優先)
         title: '表情',
+        tab: '表情',
         columns: 3,
         options: [
           { label: '手で切替', value: 'gesture' },
@@ -406,6 +414,7 @@ export function setupBroadcastPreview(options: {
       },
       {
         title: 'マイク',
+        tab: '配信',
         columns: 2,
         options: [
           { label: 'ON', value: 'mic-on' },
@@ -417,6 +426,7 @@ export function setupBroadcastPreview(options: {
       {
         // VRに入るのと配信は別。入ったあと、ここで始める(入った瞬間から映らないように)
         title: '配信',
+        tab: '配信',
         columns: 2,
         options: [
           { label: '配信を開始', value: 'broadcast-on' },
@@ -428,6 +438,7 @@ export function setupBroadcastPreview(options: {
       },
       {
         title: 'VR',
+        tab: '配信',
         options: [{ label: 'VRを終了する', value: 'exit', action: true }],
         initial: '',
         onSelect: () => exitHmd(),
@@ -437,7 +448,14 @@ export function setupBroadcastPreview(options: {
   const avatarSection = panelSections.findIndex((section) => section.title === 'アバター');
   const heightSection = panelSections.findIndex((section) => section.title === '身長');
   const eyeSection = panelSections.findIndex((section) => section.title === '目線');
-  const panel = new SpatialPanel({ title: '配信', sections: panelSections });
+  // 操作パネルはタブに分けて、手に載せる(VRChat のクイックメニューのように。handMenu.ts)
+  const panel = new SpatialPanel({
+    title: 'メニュー(B/Yで開閉)',
+    tabs: ['配信', '視点', '表情', '体', '手首'],
+    sections: panelSections,
+    width: 0.28,
+    anchor: 'bottom',
+  });
 
   /** 身長・目線の欄の見出しに、いまの値を出す(VRの中からは配信者ページが見えないため) */
   function updateBodyTitles(): void {
@@ -461,9 +479,10 @@ export function setupBroadcastPreview(options: {
   // 合わせ直すまでの秒読みを、アバターの欄の見出しに出す
   broadcast.onCalibrationCountdown = (seconds) =>
     panel.setSectionTitle(avatarSection, seconds ? `位置合わせまで ${seconds}…` : 'アバター');
-  // 鏡は右前方に出すので、パネルは左前方の手が届く距離へ(向きはshow()が合わせる)
-  panel.arPlacement = { position: new THREE.Vector3(0.45, 1.15, 0.7), yaw: 0 };
   const panelController = new XrPanelController(renderer, scene, [panel]);
+  const handMenu = new HandMenu(panel);
+  /** VRに入って最初の位置合わせで、左手にメニューを開いて置き場所を知らせる */
+  let menuIntroduced = false;
 
   async function enterHmd(mode: XrMode): Promise<void> {
     if (xrSession) return;
@@ -490,13 +509,15 @@ export function setupBroadcastPreview(options: {
     turnArmed = true;
     panel.setActive('broadcast-off');
     applyViewLayers();
-    setStatus('VRに入りました。操作パネルの「配信を開始」で配信が始まります');
+    setStatus('VRに入りました。左手のメニュー(B/Yで開閉・手のひらを顔に向けても開く)の「配信を開始」で配信が始まります');
     // トリガーでの位置合わせはやめた(パネルを押すつもりで合わせ直してしまい、混乱するため)。
     // 合わせ直しはパネルの「位置を合わせ直す」で行う
     session.addEventListener('end', () => {
       xrSession = null;
       broadcast.close();
       panelController.hide();
+      handMenu.close();
+      menuIntroduced = false;
       scene.background = backgroundColor;
       grid.visible = true;
       avatarRoot.position.set(0, 0, 0);
@@ -718,6 +739,12 @@ export function setupBroadcastPreview(options: {
     const delta = clock.getDelta();
     const now = performance.now();
     peers.update();
+    // 手に載せたメニューを先に動かしてから、ビームの当たりを調べる
+    if (frame && xrSession) {
+      const refSpace = renderer.xr.getReferenceSpace();
+      if (refSpace) handMenu.update(frame, refSpace, xrSession);
+    }
+    panelController.exclude = handMenu.holder;
     panelController.update();
 
     // HMDで入っている間は自分の姿勢を配信する
@@ -733,11 +760,12 @@ export function setupBroadcastPreview(options: {
           const viewer = frame.getViewerPose(refSpace);
           if (viewer && broadcast.tryCalibrate(viewer)) {
             updateXrLayout();
-            // パネルも配信者の前方へ出し直す(現実の床を基準に。座りモードの持ち上げは掛けない)
-            panelController.show(broadcast.floorOrigin ?? peerRoot.position, Math.atan2(
-              2 * (peerRoot.quaternion.w * peerRoot.quaternion.y),
-              1 - 2 * peerRoot.quaternion.y * peerRoot.quaternion.y,
-            ));
+            // メニューは手に載せるので、置き場所は決めずに押せるようにだけする
+            panelController.enable();
+            if (!menuIntroduced) {
+              menuIntroduced = true;
+              handMenu.open('left');
+            }
           }
         } else {
           broadcast.sendFrame(frame, refSpace, xrSession);

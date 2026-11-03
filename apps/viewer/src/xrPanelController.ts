@@ -23,6 +23,10 @@ export class XrPanelController {
     { panel: null, index: -1 },
   ];
   private enabled = false;
+  /** 各コントローラの手(three.js のコントローラの番号は入力の並び順で、左右とは限らない) */
+  private readonly handedness: (XRHandedness | null)[] = [null, null];
+  /** この手のビームでは選ばない(手に載せたメニューを、持っている手で押してしまわないように) */
+  exclude: XRHandedness | null = null;
 
   constructor(
     renderer: THREE.WebGLRenderer,
@@ -48,6 +52,10 @@ export class XrPanelController {
     for (const i of [0, 1] as const) {
       const controller = this.controllers[i]!;
       controller.add(this.lasers[i]!);
+      controller.addEventListener('connected', (event) => {
+        this.handedness[i] = (event as unknown as { data: XRInputSource }).data.handedness;
+      });
+      controller.addEventListener('disconnected', () => (this.handedness[i] = null));
       controller.addEventListener('selectstart', () => this.onSelect(i));
       scene.add(controller);
     }
@@ -67,6 +75,11 @@ export class XrPanelController {
       _quat.setFromAxisAngle(UP, Math.atan2(origin.x - _offset.x, origin.z - _offset.z));
       panel.show(_offset, _quat);
     }
+  }
+
+  /** パネルの置き場所は変えずに、指して押せるようにする(手に載せるメニューのように、置き場所を別に決めるとき) */
+  enable(): void {
+    this.enabled = true;
   }
 
   hide(): void {
@@ -94,6 +107,11 @@ export class XrPanelController {
     for (const i of [0, 1] as const) {
       const controller = this.controllers[i]!;
       const laser = this.lasers[i]!;
+      if (this.exclude && this.handedness[i] === this.exclude) {
+        laser.visible = false;
+        this.hits[i] = { panel: null, index: -1 };
+        continue;
+      }
       _matrix.identity().extractRotation(controller.matrixWorld);
       _raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
       _raycaster.ray.direction.set(0, 0, -1).applyMatrix4(_matrix);

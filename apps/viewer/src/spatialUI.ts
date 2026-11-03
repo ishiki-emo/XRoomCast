@@ -5,6 +5,8 @@
  *
  * 設定項目が増えたため複数セクションを1枚にまとめられる構造にしている
  * (パネルを何枚も浮かべると視界が埋まるため)。
+ * さらに増えたときは、セクションをタブに分けて1タブずつ見せられる(tabs)。
+ * パネルの大きさは開いているタブの中身に合わせる
  */
 import * as THREE from 'three';
 
@@ -34,6 +36,8 @@ export interface PanelSection {
   options: PanelOption[];
   /** 1行に並べるボタンの数(既定1)。短いラベルのボタンが多い欄を詰めて並べる */
   columns?: number;
+  /** 載せるタブ(PanelSpec.tabs の名前)。タブを使うパネルで指定する */
+  tab?: string;
   initial: string;
   onSelect: (value: string) => void;
 }
@@ -41,6 +45,12 @@ export interface PanelSection {
 export interface PanelSpec {
   title: string;
   sections: PanelSection[];
+  /** タブの名前。指定するとタブの行を出し、選んだタブのセクションだけを見せる */
+  tabs?: string[];
+  /** パネルの幅(m)。既定 0.34 */
+  width?: number;
+  /** 置き場所の基準。center(既定): パネルの中央 / bottom: 下辺の中央(手の上に載せるとき) */
+  anchor?: 'center' | 'bottom';
 }
 
 const CANVAS_W = 512;
@@ -51,6 +61,8 @@ const SECTION_TITLE_H = 40;
 const BUTTON_H = 52;
 const BUTTON_GAP = 12;
 const SECTION_GAP = 18;
+const TAB_H = 50;
+const TAB_GAP = 8;
 
 interface ButtonRect {
   x: number;
@@ -58,7 +70,10 @@ interface ButtonRect {
   w: number;
   h: number;
   option: PanelOption;
+  /** セクションの番号。タブのボタンは -1 - タブの番号 */
   section: number;
+  /** 載っているタブ(タブを使わないパネルは0) */
+  tab: number;
 }
 
 export class SpatialPanel implements ArPanel {
@@ -71,16 +86,43 @@ export class SpatialPanel implements ArPanel {
   private readonly buttons: ButtonRect[] = [];
   private readonly sectionTitleY: number[] = [];
   private readonly canvasHeight: number;
+  /** タブごとの中身の高さ(キャンバスのpx) */
+  private readonly tabHeights: number[] = [];
+  private readonly tabs: string[];
+  private readonly panelWidth: number;
+  private currentTab = 0;
   /** セクションごとの選択値 */
   private readonly active: string[];
   private hover = -1;
 
   constructor(private readonly spec: PanelSpec) {
     this.active = spec.sections.map((section) => section.initial);
+    this.tabs = spec.tabs ?? [];
+    this.panelWidth = spec.width ?? PANEL_W;
 
-    // レイアウトを先に確定させてキャンバス高さを決める
-    let y = HEADER_H;
+    // レイアウトを先に確定させてキャンバス高さを決める。タブを使うときは、
+    // タブの行の下からタブごとに並べ、いちばん高いタブに合わせてキャンバスを作る
+    let top = HEADER_H;
+    if (this.tabs.length > 0) {
+      const width = (CANVAS_W - PAD * 2 - TAB_GAP * (this.tabs.length - 1)) / this.tabs.length;
+      this.tabs.forEach((label, i) => {
+        this.buttons.push({
+          x: PAD + i * (width + TAB_GAP),
+          y: top,
+          w: width,
+          h: TAB_H,
+          option: { label, value: `tab:${i}`, action: true },
+          section: -1 - i,
+          tab: -1,
+        });
+      });
+      top += TAB_H + SECTION_GAP;
+    }
+    const tabCount = Math.max(1, this.tabs.length);
+    const tabY = new Array<number>(tabCount).fill(top);
     spec.sections.forEach((section, sectionIndex) => {
+      const tab = Math.max(0, this.tabs.indexOf(section.tab ?? ''));
+      let y = tabY[tab]!;
       this.sectionTitleY.push(y);
       y += SECTION_TITLE_H;
       const columns = Math.max(1, section.columns ?? 1);
@@ -94,13 +136,16 @@ export class SpatialPanel implements ArPanel {
           h: BUTTON_H,
           option,
           section: sectionIndex,
+          tab,
         });
         // 行の最後のボタン(か、欄の最後)で次の行へ
         if (column === columns - 1 || i === section.options.length - 1) y += BUTTON_H + BUTTON_GAP;
       });
       y += SECTION_GAP - BUTTON_GAP;
+      tabY[tab] = y;
     });
-    this.canvasHeight = y + PAD;
+    for (const y of tabY) this.tabHeights.push(y + PAD);
+    this.canvasHeight = Math.max(...this.tabHeights);
 
     this.canvas = document.createElement('canvas');
     this.canvas.width = CANVAS_W;
@@ -110,19 +155,43 @@ export class SpatialPanel implements ArPanel {
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.colorSpace = THREE.SRGBColorSpace;
     this.mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(PANEL_W, (PANEL_W * this.canvasHeight) / CANVAS_W),
+      new THREE.PlaneGeometry(this.panelWidth, (this.panelWidth * this.canvasHeight) / CANVAS_W),
       new THREE.MeshBasicMaterial({ map: this.texture, transparent: true }),
     );
     this.object = new THREE.Group();
     this.object.add(this.mesh);
     this.object.visible = false;
+    this.layoutTab();
     this.redraw();
+  }
+
+  /** いま見えている中身の高さ(キャンバスのpx) */
+  private get visibleHeight(): number {
+    return this.tabHeights[this.currentTab] ?? this.canvasHeight;
+  }
+
+  /** パネルの高さ(m)。手に載せるときの置き場所の計算に使う */
+  get height(): number {
+    return (this.panelWidth * this.visibleHeight) / CANVAS_W;
+  }
+
+  /**
+   * 開いているタブの高さにパネルを縮める。キャンバスの上から見えている高さぶんだけを貼り、
+   * 板もその高さにする(タブごとに中身の量が違うので、空いた下側を出さない)
+   */
+  private layoutTab(): void {
+    const ratio = this.visibleHeight / this.canvasHeight;
+    this.texture.repeat.set(1, ratio);
+    this.texture.offset.set(0, 1 - ratio);
+    this.mesh.scale.y = ratio;
+    const height = (this.panelWidth * this.canvasHeight * ratio) / CANVAS_W;
+    this.mesh.position.y = this.spec.anchor === 'bottom' ? height / 2 : 0;
   }
 
   private redraw(): void {
     const ctx = this.ctx;
-    const height = this.canvasHeight;
-    ctx.clearRect(0, 0, CANVAS_W, height);
+    const height = this.visibleHeight;
+    ctx.clearRect(0, 0, CANVAS_W, this.canvasHeight);
     // 背景
     ctx.fillStyle = 'rgba(20,20,26,0.92)';
     roundRect(ctx, 0, 0, CANVAS_W, height, 24);
@@ -133,8 +202,9 @@ export class SpatialPanel implements ArPanel {
     ctx.textBaseline = 'middle';
     ctx.fillText(this.spec.title, 26, 40);
 
-    // セクション見出し
+    // セクション見出し(タブを使うときは開いているタブのものだけ)
     this.spec.sections.forEach((section, i) => {
+      if (!this.onCurrentTab(i)) return;
       const titleY = this.sectionTitleY[i]!;
       ctx.fillStyle = '#8fd0ff';
       ctx.font = 'bold 25px sans-serif';
@@ -143,7 +213,11 @@ export class SpatialPanel implements ArPanel {
 
     // ボタン
     this.buttons.forEach((b, i) => {
-      const isActive = !b.option.action && b.option.value === this.active[b.section];
+      if (b.tab >= 0 && b.tab !== this.currentTab && this.tabs.length > 0) return;
+      const isActive =
+        b.section < 0
+          ? -1 - b.section === this.currentTab
+          : !b.option.action && b.option.value === this.active[b.section];
       const isHover = i === this.hover;
       ctx.fillStyle = isActive ? '#3a6f4a' : isHover ? '#3a3a44' : '#2a2a32';
       roundRect(ctx, b.x, b.y, b.w, b.h, 14);
@@ -154,7 +228,8 @@ export class SpatialPanel implements ArPanel {
         ctx.stroke();
       }
       ctx.fillStyle = isActive ? '#bff0cf' : '#eeeeee';
-      const label = (isActive ? '● ' : '') + b.option.label;
+      // タブは●を付けず、色だけで開いているタブを示す
+      const label = (isActive && b.section >= 0 ? '● ' : '') + b.option.label;
       if (b.w < CANVAS_W - PAD * 2) {
         // 並べたボタンは幅が狭いので、文字を小さくして中央に置く
         ctx.font = '25px sans-serif';
@@ -190,10 +265,16 @@ export class SpatialPanel implements ArPanel {
     if (!this.object.visible) return null;
     const hit = raycaster.intersectObject(this.mesh, false)[0];
     if (!hit || !hit.uv) return null;
+    // 板の UV は板全体で 0..1。板は見えている高さに縮めてあるので、その高さで px に戻す
     const cx = hit.uv.x * CANVAS_W;
-    const cy = (1 - hit.uv.y) * this.canvasHeight;
+    const cy = (1 - hit.uv.y) * this.visibleHeight;
     const index = this.buttons.findIndex(
-      (b) => cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h,
+      (b) =>
+        (b.tab < 0 || b.tab === this.currentTab || this.tabs.length === 0) &&
+        cx >= b.x &&
+        cx <= b.x + b.w &&
+        cy >= b.y &&
+        cy <= b.y + b.h,
     );
     return { index: index >= 0 ? index : -2, distance: hit.distance };
   }
@@ -207,9 +288,27 @@ export class SpatialPanel implements ArPanel {
   activate(index: number): void {
     const button = this.buttons[index];
     if (!button) return;
+    if (button.section < 0) {
+      this.selectTab(-1 - button.section);
+      return;
+    }
     if (!button.option.action) this.active[button.section] = button.option.value;
     this.redraw();
     this.spec.sections[button.section]!.onSelect(button.option.value);
+  }
+
+  /** タブを開く */
+  selectTab(index: number): void {
+    if (index === this.currentTab || index < 0 || index >= this.tabs.length) return;
+    this.currentTab = index;
+    this.hover = -1;
+    this.layoutTab();
+    this.redraw();
+  }
+
+  private onCurrentTab(section: number): boolean {
+    if (this.tabs.length === 0) return true;
+    return Math.max(0, this.tabs.indexOf(this.spec.sections[section]?.tab ?? '')) === this.currentTab;
   }
 
   /** 外部(画面側UI・ピンチ操作など)で変わった選択状態を反映する */
