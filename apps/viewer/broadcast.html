@@ -17,7 +17,7 @@
       #wrap {
         max-width: 560px;
         margin: 0 auto;
-        padding: 48px 16px;
+        padding: 32px 16px;
       }
       h1 {
         font-size: 22px;
@@ -45,8 +45,7 @@
         color: #ff6b6b;
       }
       #b-toggle {
-        margin-top: 16px;
-        width: 100%;
+        flex: 1 1 200px;
         padding: 14px;
         font-size: 16px;
         border-radius: 10px;
@@ -63,15 +62,15 @@
         cursor: default;
       }
       .note {
-        margin-top: 20px;
+        margin-top: 12px;
         color: #999;
         font-size: 13px;
         line-height: 1.8;
       }
       h2 {
         font-size: 17px;
-        margin: 40px 0 8px;
-        padding-top: 24px;
+        margin: 24px 0 8px;
+        padding-top: 16px;
         border-top: 1px solid #333;
       }
       .row {
@@ -150,6 +149,7 @@
       }
       #p-canvas {
         display: block;
+        box-sizing: border-box; /* 枠線のぶん列からはみ出さない */
         width: 100%;
         aspect-ratio: 16 / 10;
         border-radius: 10px;
@@ -245,231 +245,332 @@
         color: #666;
         font-size: 13px;
       }
+      /* 広い画面では2列: 左に配信操作とプレビュー(スクロールしても残す)、右に設定のタブ */
+      #layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 24px;
+      }
+      @media (min-width: 980px) {
+        #wrap {
+          max-width: 1200px;
+        }
+        #layout {
+          grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+          align-items: start;
+        }
+        #col-live {
+          position: sticky;
+          top: 16px;
+          max-height: calc(100vh - 32px);
+          overflow-y: auto;
+        }
+      }
+      .tabs {
+        display: flex;
+        gap: 4px;
+        flex-wrap: wrap;
+        border-bottom: 1px solid #333;
+      }
+      .tab {
+        padding: 10px 14px;
+        font-size: 14px;
+        border: 1px solid transparent;
+        border-bottom: none;
+        border-radius: 8px 8px 0 0;
+        background: none;
+        color: #aaa;
+        cursor: pointer;
+      }
+      .tab[aria-selected='true'] {
+        background: #1e1e1e;
+        border-color: #333;
+        color: #eee;
+        margin-bottom: -1px;
+        border-bottom: 1px solid #1e1e1e;
+      }
+      .panel {
+        padding: 4px 2px 0;
+      }
+      .panel[hidden] {
+        display: none;
+      }
+      .panel > :first-child {
+        margin-top: 16px;
+      }
+      h3 {
+        font-size: 15px;
+        margin: 24px 0 0;
+      }
+      /* 説明は折りたたむ。開いたときだけ読む */
+      details.note {
+        margin-top: 12px;
+      }
+      details.note summary {
+        cursor: pointer;
+        color: #8ab;
+        list-style-position: inside;
+      }
+      details.note[open] summary {
+        margin-bottom: 4px;
+      }
+      details.note[hidden] {
+        display: none;
+      }
+      .warn {
+        margin: 10px 0 0;
+        color: #ff9d9d;
+        font-size: 13px;
+      }
     </style>
   </head>
   <body>
     <div id="wrap">
       <h1>🎙 配信者コンソール</h1>
       <p class="sub" id="b-room">このページを開いている間だけ、マイク音声が視聴ページへ配信されます</p>
-      <div id="b-status">待機中</div>
-      <div class="row" style="margin-top: 12px">
-        <label for="b-pid">配信者名</label>
-        <input id="b-pid" maxlength="32" placeholder="例: emo(英数字・-・_)" />
-      </div>
-      <div class="row">
-        <label for="m-slot">声の席</label>
-        <select id="m-slot">
-          <option value="auto" selected>自動(自分の席)</option>
-          <option value="0">席0</option>
-          <option value="1">席1</option>
-          <option value="2">席2</option>
-          <option value="3">席3</option>
-        </select>
-      </div>
-      <button id="b-toggle">マイク配信を開始</button>
-      <div class="row" style="margin-top: 8px">
-        <button id="b-leave" class="small danger">退室する(席を空ける)</button>
-      </div>
-      <p class="note">
-        ・音声はCloudflare Realtime SFUの音声トラック(Opus)として配信されます<br />
-        ・ポーズ配信(VSeeFace+ブリッジ)とは独立して動きます<br />
-        ・タブを閉じる/停止ボタンで配信は止まります<br />
-        ・<strong>配信者名</strong>は席の割り当ての鍵です。ブリッジを使う場合は
-        .env の <code>PUBLISHER_ID</code> と同じ値にしてください(HMD配信は自動で一致します)。
-        配信中は変えないでください<br />
-        ・<strong>声の席</strong>は「自動」で自分(配信者名)の席に届きます。
-        配信元がまだ無いときは席0に流れ、HMD配信の開始後に自動で席を合わせ直します<br />
-        ・<strong>退室する</strong>は自分(配信者名)の席を空けます(マイクも停止。
-        席1以降はアバターも片付きます)。<strong>ブリッジが動いたままだと数分で席を
-        取り直す</strong>ので、ブリッジ利用時は先にブリッジを止めてください
-      </p>
+      <div id="layout">
+        <!-- 左列(広い画面ではスクロールしても残る): 配信の開始・停止とプレビュー -->
+        <section id="col-live">
+          <div id="b-status">待機中</div>
+          <div class="row">
+            <label for="b-pid">配信者名</label>
+            <input id="b-pid" maxlength="32" placeholder="例: emo(英数字・-・_)" />
+            <label for="m-slot">声の席</label>
+            <select id="m-slot">
+              <option value="auto" selected>自動(自分の席)</option>
+              <option value="0">席0</option>
+              <option value="1">席1</option>
+              <option value="2">席2</option>
+              <option value="3">席3</option>
+            </select>
+          </div>
+          <div class="row">
+            <button id="b-toggle">マイク配信を開始</button>
+            <button id="b-leave" class="small danger">退室する(席を空ける)</button>
+          </div>
+          <details class="note">
+            <summary>ⓘ マイク・配信者名・退室について</summary>
+            ・音声はCloudflare Realtime SFUの音声トラック(Opus)として配信されます<br />
+            ・ポーズ配信(VSeeFace+ブリッジ)とは独立して動きます<br />
+            ・タブを閉じる/停止ボタンで配信は止まります<br />
+            ・<strong>配信者名</strong>は席の割り当ての鍵です。ブリッジを使う場合は
+            .env の <code>PUBLISHER_ID</code> と同じ値にしてください(HMD配信は自動で一致します)。
+            配信中は変えないでください<br />
+            ・<strong>声の席</strong>は「自動」で自分(配信者名)の席に届きます。
+            配信元がまだ無いときは席0に流れ、HMD配信の開始後に自動で席を合わせ直します<br />
+            ・<strong>退室する</strong>は自分(配信者名)の席を空けます(マイクも停止。
+            席1以降はアバターも片付きます)。<strong>ブリッジが動いたままだと数分で席を
+            取り直す</strong>ので、ブリッジ利用時は先にブリッジを止めてください
+          </details>
 
-      <h2>👀 プレビューと視聴者</h2>
-      <p class="note" style="margin-top: 0">
-        視聴者に実際に届いている姿です。視聴者の位置は端末ごとの形で表示されます
-      </p>
-      <canvas id="p-canvas"></canvas>
-      <div id="p-status">準備中...</div>
-      <div class="row">
-        <button id="p-hmd-ar" class="small primary" hidden>🥽 パススルーで配信</button>
-        <button id="p-hmd-vr" class="small primary" hidden>🌌 VRで配信</button>
-        <button id="p-mirror" class="small on" hidden>🪞 鏡を表示</button>
-      </div>
-      <div id="wrist-row" hidden>
-        <div class="row">
-          <span class="ar-label">手首の向き</span>
-          <span class="wrist-axis">
-            X <button class="small" data-wrist="x-">−</button>
-            <span id="wrist-x">0°</span>
-            <button class="small" data-wrist="x+">＋</button>
-          </span>
-          <span class="wrist-axis">
-            Y <button class="small" data-wrist="y-">−</button>
-            <span id="wrist-y">0°</span>
-            <button class="small" data-wrist="y+">＋</button>
-          </span>
-          <span class="wrist-axis">
-            Z <button class="small" data-wrist="z-">−</button>
-            <span id="wrist-z">0°</span>
-            <button class="small" data-wrist="z+">＋</button>
-          </span>
-          <button class="small" data-wrist="reset">戻す</button>
-        </div>
-        <p class="note">
-          手首がねじれて見えるときに調整します(15°刻み・左右対称)。設定は次回も保持されます。<br />
-          既定値は PICO 4 Ultra で合わせたものです。「戻す」でその値に戻ります
-        </p>
-      </div>
-      <p class="note" id="p-hmd-note" hidden>
-        ・VSeeFaceもブリッジも不要で、ヘッドセット単体で配信できます<br />
-        ・<strong>マイクも自動で開始します</strong>(HMD内蔵マイクが使われます。音声とモーションは別経路なので同時に配信されます)<br />
-        ・パススルーは現実が見え、VRは暗い空間にアバターと視聴者だけが見えます<br />
-        ・入った瞬間の立ち位置と向きが基準になります。<strong>コントローラのトリガーでいつでも取り直せます</strong><br />
-        ・<strong>HMD内にも操作パネルが出ます</strong>(左前方)。手首の調整やマイクもそこから触れます<br />
-        ・身長はアバターに自動で合わせます(目の高さの比で補正)<br />
-        ・自分の少し前にアバターが立つので、視聴者から見た姿を確認できます<br />
-        ・<strong>ブリッジは止めてください</strong>(同時に配信すると後から登録した方が優先されます)<br />
-        ・顔の表情は送れません(WebXRに顔トラッキングのAPIがないため)
-      </p>
-      <div class="row">
-        <span class="ar-label">視聴者の位置を</span>
-        <button class="small" data-peermode="all">全員に見せる</button>
-        <button class="small" data-peermode="broadcaster">配信者のみ</button>
-        <button class="small" data-peermode="off">無効</button>
-      </div>
-      <p class="note">
-        ・「全員に見せる」は少人数のミーティング向け。視聴者どうしもお互いが見えます<br />
-        ・「配信者のみ」は中継量が人数に比例するだけなので、大人数のイベントでも軽い<br />
-        ・視聴者側でも各自「隠す」を選べます
-      </p>
+          <h2>👀 プレビューと視聴者</h2>
+          <canvas id="p-canvas"></canvas>
+          <div id="p-status">準備中...</div>
+          <div class="row">
+            <button id="p-hmd-ar" class="small primary" hidden>🥽 パススルーで配信</button>
+            <button id="p-hmd-vr" class="small primary" hidden>🌌 VRで配信</button>
+            <button id="p-mirror" class="small on" hidden>🪞 鏡を表示</button>
+          </div>
+          <div id="wrist-row" hidden>
+            <div class="row">
+              <span class="ar-label">手首の向き</span>
+              <span class="wrist-axis">
+                X <button class="small" data-wrist="x-">−</button>
+                <span id="wrist-x">0°</span>
+                <button class="small" data-wrist="x+">＋</button>
+              </span>
+              <span class="wrist-axis">
+                Y <button class="small" data-wrist="y-">−</button>
+                <span id="wrist-y">0°</span>
+                <button class="small" data-wrist="y+">＋</button>
+              </span>
+              <span class="wrist-axis">
+                Z <button class="small" data-wrist="z-">−</button>
+                <span id="wrist-z">0°</span>
+                <button class="small" data-wrist="z+">＋</button>
+              </span>
+              <button class="small" data-wrist="reset">戻す</button>
+            </div>
+            <details class="note">
+              <summary>ⓘ 手首の向きの調整について</summary>
+              手首がねじれて見えるときに調整します(15°刻み・左右対称)。設定は次回も保持されます。<br />
+              既定値は PICO 4 Ultra で合わせたものです。「戻す」でその値に戻ります
+            </details>
+          </div>
+          <details class="note" id="p-hmd-note" hidden>
+            <summary>ⓘ HMD配信について(ブリッジは止めてください)</summary>
+            ・VSeeFaceもブリッジも不要で、ヘッドセット単体で配信できます<br />
+            ・<strong>マイクも自動で開始します</strong>(HMD内蔵マイクが使われます。音声とモーションは別経路なので同時に配信されます)<br />
+            ・パススルーは現実が見え、VRは暗い空間にアバターと視聴者だけが見えます<br />
+            ・入った瞬間の立ち位置と向きが基準になります。<strong>コントローラのトリガーでいつでも取り直せます</strong><br />
+            ・<strong>HMD内にも操作パネルが出ます</strong>(左前方)。手首の調整やマイクもそこから触れます<br />
+            ・身長はアバターに自動で合わせます(目の高さの比で補正)<br />
+            ・自分の少し前にアバターが立つので、視聴者から見た姿を確認できます<br />
+            ・<strong>ブリッジは止めてください</strong>(同時に配信すると後から登録した方が優先されます)<br />
+            ・顔の表情は送れません(WebXRに顔トラッキングのAPIがないため)
+          </details>
+          <details class="note">
+            <summary>ⓘ プレビューについて</summary>
+            視聴者に実際に届いている姿です。視聴者の位置は端末ごとの形で表示されます
+          </details>
+        </section>
 
-      <h2>🔗 視聴URL</h2>
-      <div class="row">
-        <input id="s-watch-url" type="text" readonly placeholder="読み込み中..." style="flex: 1; min-width: 18em" />
-        <button class="small primary" id="s-watch-copy">コピー</button>
-        <button class="small" id="s-watch-open">開く</button>
-      </div>
-      <div class="row">
-        <div id="s-qr" aria-label="視聴URLのQRコード"></div>
-        <button class="small" id="s-qr-big">大きく表示(会場掲示用)</button>
-      </div>
-      <p class="note">
-        ・このURLを渡せば視聴できます。<strong>会場ではQRを掲示すると案内が楽です</strong><br />
-        ・「招待された人だけ」に設定している場合、<strong>このURLを経由した人だけが視聴できます</strong><br />
-        ・視聴URLと配信者URLは別の鍵です。<strong>視聴URLを渡しても配信は操作されません</strong>
-      </p>
+        <!-- 右列: 設定をタブで切り替える -->
+        <section id="col-settings">
+          <div class="tabs" role="tablist">
+            <button class="tab" role="tab" data-tab="avatar">🧍 アバター</button>
+            <button class="tab" role="tab" data-tab="stage">🎪 ステージ</button>
+            <button class="tab" role="tab" data-tab="room">⚙️ ルーム設定</button>
+            <button class="tab" role="tab" data-tab="share">🔗 共有</button>
+          </div>
 
-      <h2>🥽 Questでこのページを開く</h2>
-      <div class="row">
-        <button class="small" id="s-host-qr">配信者URLのQRを大きく表示</button>
-      </div>
-      <p class="note">
-        ・QuestのQR読み取り(カメラ)で読むと、Questのブラウザでこのページが開きます。そのままHMD配信を始められます<br />
-        ・<strong>配信者URLは配信を操作できる鍵です。</strong>配信画面に映したり、他人に見せたりしないでください
-      </p>
+          <div class="panel" role="tabpanel" data-panel="avatar">
+            <div id="a-status">読み込み中...</div>
+            <div class="row">
+              <label for="a-slot">席</label>
+              <select id="a-slot">
+                <option value="auto" selected>自動(自分の席)</option>
+                <option value="0">席0</option>
+                <option value="1">席1</option>
+                <option value="2">席2</option>
+                <option value="3">席3</option>
+              </select>
+            </div>
+            <div class="row">
+              <input type="file" id="a-file" accept=".vrm,model/vrm" />
+              <button id="a-upload" class="small primary">アップロード</button>
+            </div>
+            <progress id="a-progress" max="100" value="0" hidden></progress>
+            <ul id="a-list"></ul>
+            <p class="empty" id="a-empty" hidden>
+              このルームにはまだVRMがありません。上から追加してください
+            </p>
+            <div class="row">
+              <button id="a-default" class="small" hidden>既定のVRMに切り替え</button>
+              <button id="a-reload" class="small">一覧を更新</button>
+              <button id="a-clear" class="small danger">この席を空ける</button>
+            </div>
+            <details class="note">
+              <summary>ⓘ アバターと席について</summary>
+              ・アップロードすると、そのまま今の席に切り替わります。「切り替え」で一覧の別のVRMに戻せます<br />
+              ・切り替えると、視聴中の全員がそのVRMを読み込み直します<br />
+              ・読み込み完了まで各視聴者には元のアバター(初回はクリスタル)が表示されます<br />
+              ・アップロードしたVRMはこのルーム専用です。イベント後は削除してください<br />
+              ・<strong>席</strong>は「自動」で自分(配信者名)の席に適用されます。
+              自分の配信元(ブリッジ/HMD)がまだ動いていないときは、席0が空いていれば席0に入ります
+              (一人配信ならそのままでOK)。席0がほかの配信者で埋まっているときは、席番号を手動で選んでください
+            </details>
+          </div>
 
-      <h2>⚙️ ルーム設定</h2>
-      <div id="s-status">読み込み中...</div>
-      <div class="row">
-        <span class="ar-label">視聴を</span>
-        <button class="small" data-access="public">誰でも</button>
-        <button class="small" data-access="invite">招待された人だけ</button>
-      </div>
-      <div class="row">
-        <span class="ar-label">コメントを</span>
-        <button class="small" data-chat="on">受け付ける</button>
-        <button class="small" data-chat="off">止める</button>
-      </div>
-      <div class="row">
-        <span class="ar-label">配信を</span>
-        <button class="small" data-stopped="off">見せる</button>
-        <button class="small danger" data-stopped="on">緊急停止</button>
-      </div>
-      <div class="row">
-        <span class="ar-label">同時に見られる人数</span>
-        <input id="s-capacity" type="number" min="1" max="10000" placeholder="無制限" style="width: 7em" />
-        <button class="small" id="s-capacity-apply">適用</button>
-        <button class="small" id="s-capacity-clear">無制限に戻す</button>
-      </div>
-      <p class="note">
-        ・<strong>デプロイし直さずに切り替わります。</strong>公開配信・非公開配信・イベント会場を、この設定だけで使い分けます<br />
-        ・「招待された人だけ」にすると、<strong>視聴URL経由で開いた人しか繋がりません</strong>。ルーム名を推測しただけでは入れません<br />
-        ・<strong>人数の上限は課金の歯止めです。</strong>URLが出回ったときに視聴者数とともに費用が伸びるのを防げます<br />
-        ・数えるのは<strong>視聴者だけ</strong>です。この配信者コンソールは含みません<br />
-        ・上限に達すると、以降の入室はモーションと音声ごと断られます(既に見ている人はそのままです)<br />
-        ・<strong>緊急停止</strong>は新規の視聴を断り、視聴中の画面にも「一時停止中」を出します。
-        ただし<strong>既に流れている購読をサーバーから切ることはできません</strong>(視聴者の接続を追跡していないため)。
-        配信そのものを止めるには、マイクとブリッジ(またはHMD配信)も停止してください
-      </p>
+          <div class="panel" role="tabpanel" data-panel="stage">
+            <div id="st-status">読み込み中...</div>
+            <div class="row">
+              <span class="ar-label">表示</span>
+              <button class="small" data-stagesource="none">なし</button>
+              <button class="small" data-stagesource="builtin">組み込みの装飾</button>
+              <button class="small" data-stagesource="model">モデル</button>
+            </div>
+            <div class="row">
+              <input type="file" id="st-file" accept=".glb,.gltf,model/gltf-binary,model/gltf+json" />
+              <button id="st-upload" class="small primary">アップロード</button>
+            </div>
+            <ul id="st-list"></ul>
+            <p class="empty" id="st-empty" hidden>
+              まだモデルがありません。上から追加してください
+            </p>
+            <div class="row">
+              <span class="ar-label">空の色</span>
+              <input type="color" id="st-sky" value="#f3edff" />
+              <span class="ar-label">地面の色</span>
+              <input type="color" id="st-ground" value="#fbf8ff" />
+              <button class="small primary" id="st-color-apply">適用</button>
+              <button class="small" id="st-color-reset">既定に戻す</button>
+            </div>
+            <details class="note">
+              <summary>ⓘ ステージのモデルについて(10MB以内・足元が原点・正面が -Z)</summary>
+              ・ステージは<strong>PC表示でもAR中でも出ます</strong>(配信の見た目そのものなので)<br />
+              ・ステージを出している間は、PC表示の既定の装飾(浮遊する図形)は引っ込みます<br />
+              ・モデルは<strong>アバターの足元が原点・正面が -Z</strong> で作ってください。
+              そのままアバターの位置に置かれるので、ARで設置・拡大縮小するとステージごと追従します<br />
+              ・<strong>10MB以内</strong>にしてください。視聴者全員がダウンロードします<br />
+              ・空と地面の色はPC表示のみです(ARでは現実の風景が背景になります)
+            </details>
+          </div>
 
-      <h2>🧍 アバター</h2>
-      <div id="a-status">読み込み中...</div>
-      <div class="row">
-        <label for="a-slot">席</label>
-        <select id="a-slot">
-          <option value="auto" selected>自動(自分の席)</option>
-          <option value="0">席0</option>
-          <option value="1">席1</option>
-          <option value="2">席2</option>
-          <option value="3">席3</option>
-        </select>
-      </div>
-      <div class="row">
-        <input type="file" id="a-file" accept=".vrm,model/vrm" />
-        <button id="a-upload" class="small primary">アップロード</button>
-      </div>
-      <progress id="a-progress" max="100" value="0" hidden></progress>
-      <ul id="a-list"></ul>
-      <p class="empty" id="a-empty" hidden>
-        このルームにはまだVRMがありません。上から追加してください
-      </p>
-      <div class="row">
-        <button id="a-default" class="small" hidden>既定のVRMに切り替え</button>
-        <button id="a-reload" class="small">一覧を更新</button>
-        <button id="a-clear" class="small danger">この席を空ける</button>
-      </div>
-      <p class="note">
-        ・アップロードすると、そのまま今の席に切り替わります。「切り替え」で一覧の別のVRMに戻せます<br />
-        ・切り替えると、視聴中の全員がそのVRMを読み込み直します<br />
-        ・読み込み完了まで各視聴者には元のアバター(初回はクリスタル)が表示されます<br />
-        ・アップロードしたVRMはこのルーム専用です。イベント後は削除してください<br />
-        ・<strong>席</strong>は「自動」で自分(配信者名)の席に適用されます。
-        自分の配信元(ブリッジ/HMD)がまだ動いていないときは、席0が空いていれば席0に入ります
-        (一人配信ならそのままでOK)。席0がほかの配信者で埋まっているときは、席番号を手動で選んでください
-      </p>
+          <div class="panel" role="tabpanel" data-panel="room">
+            <div id="s-status">読み込み中...</div>
+            <div class="row">
+              <span class="ar-label">視聴を</span>
+              <button class="small" data-access="public">誰でも</button>
+              <button class="small" data-access="invite">招待された人だけ</button>
+            </div>
+            <div class="row">
+              <span class="ar-label">コメントを</span>
+              <button class="small" data-chat="on">受け付ける</button>
+              <button class="small" data-chat="off">止める</button>
+            </div>
+            <div class="row">
+              <span class="ar-label">配信を</span>
+              <button class="small" data-stopped="off">見せる</button>
+              <button class="small danger" data-stopped="on">緊急停止</button>
+            </div>
+            <div class="row">
+              <span class="ar-label">同時に見られる人数</span>
+              <input id="s-capacity" type="number" min="1" max="10000" placeholder="無制限" style="width: 7em" />
+              <button class="small" id="s-capacity-apply">適用</button>
+              <button class="small" id="s-capacity-clear">無制限に戻す</button>
+            </div>
+            <div class="row">
+              <span class="ar-label">視聴者の位置を</span>
+              <button class="small" data-peermode="all">全員に見せる</button>
+              <button class="small" data-peermode="broadcaster">配信者のみ</button>
+              <button class="small" data-peermode="off">無効</button>
+            </div>
+            <details class="note">
+              <summary>ⓘ ルーム設定について(緊急停止の効き方など)</summary>
+              ・<strong>デプロイし直さずに切り替わります。</strong>公開配信・非公開配信・イベント会場を、この設定だけで使い分けます<br />
+              ・「招待された人だけ」にすると、<strong>視聴URL経由で開いた人しか繋がりません</strong>。ルーム名を推測しただけでは入れません<br />
+              ・<strong>人数の上限は課金の歯止めです。</strong>URLが出回ったときに視聴者数とともに費用が伸びるのを防げます<br />
+              ・数えるのは<strong>視聴者だけ</strong>です。この配信者コンソールは含みません<br />
+              ・上限に達すると、以降の入室はモーションと音声ごと断られます(既に見ている人はそのままです)<br />
+              ・<strong>緊急停止</strong>は新規の視聴を断り、視聴中の画面にも「一時停止中」を出します。
+              ただし<strong>既に流れている購読をサーバーから切ることはできません</strong>(視聴者の接続を追跡していないため)。
+              配信そのものを止めるには、マイクとブリッジ(またはHMD配信)も停止してください<br />
+              ・<strong>視聴者の位置</strong>:「全員に見せる」は少人数のミーティング向けで、視聴者どうしもお互いが見えます。
+              「配信者のみ」は中継量が人数に比例するだけなので、大人数のイベントでも軽い。視聴者側でも各自「隠す」を選べます
+            </details>
+          </div>
 
-      <h2>🎪 ステージ</h2>
-      <div id="st-status">読み込み中...</div>
-      <div class="row">
-        <span class="ar-label">表示</span>
-        <button class="small" data-stagesource="none">なし</button>
-        <button class="small" data-stagesource="builtin">組み込みの装飾</button>
-        <button class="small" data-stagesource="model">モデル</button>
+          <div class="panel" role="tabpanel" data-panel="share">
+            <h3>視聴URL</h3>
+            <div class="row">
+              <input id="s-watch-url" type="text" readonly placeholder="読み込み中..." style="flex: 1; min-width: 14em" />
+              <button class="small primary" id="s-watch-copy">コピー</button>
+              <button class="small" id="s-watch-open">開く</button>
+            </div>
+            <div class="row">
+              <div id="s-qr" aria-label="視聴URLのQRコード"></div>
+              <button class="small" id="s-qr-big">大きく表示(会場掲示用)</button>
+            </div>
+            <details class="note">
+              <summary>ⓘ 視聴URLについて</summary>
+              ・このURLを渡せば視聴できます。<strong>会場ではQRを掲示すると案内が楽です</strong><br />
+              ・「招待された人だけ」に設定している場合、<strong>このURLを経由した人だけが視聴できます</strong><br />
+              ・視聴URLと配信者URLは別の鍵です。<strong>視聴URLを渡しても配信は操作されません</strong>
+            </details>
+
+            <h3>Questでこのページを開く</h3>
+            <div class="row">
+              <button class="small" id="s-host-qr">配信者URLのQRを大きく表示</button>
+            </div>
+            <p class="warn">配信者URLは配信を操作できる鍵です。配信画面に映したり、他人に見せたりしないでください</p>
+            <details class="note">
+              <summary>ⓘ 読み取り方</summary>
+              QuestのQR読み取り(カメラ)で読むと、Questのブラウザでこのページが開きます。そのままHMD配信を始められます
+            </details>
+          </div>
+        </section>
       </div>
-      <div class="row">
-        <input type="file" id="st-file" accept=".glb,.gltf,model/gltf-binary,model/gltf+json" />
-        <button id="st-upload" class="small primary">アップロード</button>
-      </div>
-      <ul id="st-list"></ul>
-      <p class="empty" id="st-empty" hidden>
-        まだモデルがありません。上から追加してください
-      </p>
-      <div class="row">
-        <span class="ar-label">空の色</span>
-        <input type="color" id="st-sky" value="#f3edff" />
-        <span class="ar-label">地面の色</span>
-        <input type="color" id="st-ground" value="#fbf8ff" />
-        <button class="small primary" id="st-color-apply">適用</button>
-        <button class="small" id="st-color-reset">既定に戻す</button>
-      </div>
-      <p class="note">
-        ・ステージは<strong>PC表示でもAR中でも出ます</strong>(配信の見た目そのものなので)<br />
-        ・ステージを出している間は、PC表示の既定の装飾(浮遊する図形)は引っ込みます<br />
-        ・モデルは<strong>アバターの足元が原点・正面が -Z</strong> で作ってください。
-        そのままアバターの位置に置かれるので、ARで設置・拡大縮小するとステージごと追従します<br />
-        ・<strong>10MB以内</strong>にしてください。視聴者全員がダウンロードします<br />
-        ・空と地面の色はPC表示のみです(ARでは現実の風景が背景になります)
-      </p>
 
       <p class="note" id="app-version"></p>
     </div>

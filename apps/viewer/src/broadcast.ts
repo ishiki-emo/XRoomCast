@@ -391,6 +391,34 @@ window.addEventListener('pagehide', () => {
   }
 });
 
+const TAB_STORAGE_KEY = 'xroomcast.broadcast.tab';
+
+/**
+ * 設定欄(アバター/ステージ/ルーム設定/共有)のタブ。開いていたタブは次回も開く。
+ * 保存できない環境(プライベートウィンドウ等)でも先頭のタブで動く
+ */
+function setupTabs(): void {
+  const tabs = [...document.querySelectorAll<HTMLButtonElement>('[data-tab]')];
+  const panels = [...document.querySelectorAll<HTMLElement>('[data-panel]')];
+  const select = (name: string): void => {
+    for (const tab of tabs) tab.setAttribute('aria-selected', String(tab.dataset.tab === name));
+    for (const panel of panels) panel.hidden = panel.dataset.panel !== name;
+    try {
+      localStorage.setItem(TAB_STORAGE_KEY, name);
+    } catch {
+      // 覚えられないだけ
+    }
+  };
+  for (const tab of tabs) tab.addEventListener('click', () => select(tab.dataset.tab!));
+  let saved: string | null = null;
+  try {
+    saved = localStorage.getItem(TAB_STORAGE_KEY);
+  } catch {
+    // 既定のタブで開く
+  }
+  select(tabs.some((tab) => tab.dataset.tab === saved) ? saved! : tabs[0]!.dataset.tab!);
+}
+
 /**
  * 手首の向きの微調整。
  * コントローラのグリップ姿勢とVRMのTポーズの手の対応は端末によって
@@ -453,6 +481,8 @@ function setupWristTuner(preview?: PreviewHandle): void {
 // 不具合報告のときに「どのバージョンを動かしているか」が分かるように出す
 const versionLabel = document.getElementById('app-version');
 if (versionLabel) versionLabel.textContent = `XRoomCast v${__APP_VERSION__}`;
+
+setupTabs();
 
 const roomLabel = document.getElementById('b-room');
 if (roomLabel) {
