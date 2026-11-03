@@ -5,57 +5,193 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎙</text></svg>" />
     <title>配信者コンソール</title>
+    <!-- 丸ゴシックの文字(読めなければ端末の丸ゴシック・ゴシックで表示する) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;700;800&display=swap"
+    />
     <style>
+      /*
+       * 見た目: VTuber 向けに、淡いピンク・ラベンダー・ミントの丸いカードと、ころんとしたボタンにする。
+       * 色はここ(:root)の変数で決め、暗い画面設定では夜っぽい紫に切り替える
+       */
+      :root {
+        --bg: #fff6fb;
+        --blob-1: rgba(255, 166, 207, 0.45);
+        --blob-2: rgba(190, 168, 255, 0.4);
+        --blob-3: rgba(150, 236, 210, 0.35);
+        --card: #ffffff;
+        --soft: #fbf3ff;
+        --line: #f0dcef;
+        --text: #3d2b4f;
+        --muted: #8c7a9e;
+        --pink: #ff6fa8;
+        --lavender: #9b7cf6;
+        --mint: #22b98a;
+        --coral: #ff5d73;
+        --link: #8a63f0;
+        --gradient: linear-gradient(135deg, #ff7eb3 0%, #b48cff 100%);
+        --gradient-live: linear-gradient(135deg, #ff5d8f 0%, #ff8a5c 100%);
+        --shadow: 0 10px 30px rgba(155, 124, 246, 0.14), 0 2px 6px rgba(255, 111, 168, 0.08);
+        --preview: #241a35;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #191325;
+          --blob-1: rgba(255, 111, 168, 0.16);
+          --blob-2: rgba(155, 124, 246, 0.18);
+          --blob-3: rgba(34, 185, 138, 0.12);
+          --card: #241b35;
+          --soft: #2d2342;
+          --line: #3f3159;
+          --text: #f6eefc;
+          --muted: #b6a6cb;
+          --pink: #ff8bbb;
+          --lavender: #b9a2ff;
+          --mint: #5fe0b4;
+          --coral: #ff8090;
+          --link: #c4b0ff;
+          --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+          --preview: #150f20;
+          color-scheme: dark;
+        }
+      }
       html,
       body {
         margin: 0;
         padding: 0;
-        background: #141414;
-        color: #eee;
-        font-family: system-ui, sans-serif;
+      }
+      body {
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at 8% 4%, var(--blob-1), transparent 34%),
+          radial-gradient(circle at 92% 12%, var(--blob-2), transparent 36%),
+          radial-gradient(circle at 50% 100%, var(--blob-3), transparent 40%),
+          var(--bg);
+        background-attachment: fixed;
+        color: var(--text);
+        font-family: 'M PLUS Rounded 1c', 'Hiragino Maru Gothic ProN', 'BIZ UDPGothic', 'Yu Gothic UI', system-ui,
+          sans-serif;
+        line-height: 1.6;
+      }
+      a {
+        color: var(--link);
+      }
+      code {
+        padding: 1px 6px;
+        border-radius: 6px;
+        background: var(--soft);
+        font-size: 0.92em;
       }
       #wrap {
         max-width: 560px;
         margin: 0 auto;
-        padding: 32px 16px;
+        padding: 28px 16px 40px;
       }
       h1 {
-        font-size: 22px;
-        margin: 0 0 8px;
+        font-size: 26px;
+        font-weight: 800;
+        margin: 0 0 4px;
+        letter-spacing: 0.02em;
+      }
+      h1 .title {
+        background: var(--gradient);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
       }
       .sub {
-        color: #aaa;
+        color: var(--muted);
         font-size: 13px;
-        margin: 0 0 24px;
+        margin: 0 0 20px;
       }
+      /* 左右の列をカードにする */
+      #col-live,
+      #col-settings {
+        box-sizing: border-box;
+        min-width: 0;
+        background: var(--card);
+        border: 2px solid var(--line);
+        border-radius: 24px;
+        padding: 18px;
+        box-shadow: var(--shadow);
+      }
+      /* いまの状態。配信中は ON AIR らしく、赤い丸がゆっくり光る */
       #b-status {
-        padding: 10px 14px;
-        border-radius: 8px;
-        background: #1e1e1e;
-        border: 1px solid #333;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 16px;
+        border-radius: 20px; /* 長い文で2行になっても形が崩れないよう、丸めすぎない */
+        background: var(--soft);
+        border: 2px solid var(--line);
         font-size: 14px;
+        font-weight: 700;
         min-height: 1.4em;
       }
+      #b-status::before {
+        content: '';
+        flex: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--muted);
+        opacity: 0.6;
+      }
       #b-status.live {
-        border-color: #3a5f3a;
-        color: #8fa;
+        border-color: transparent;
+        background: color-mix(in srgb, var(--pink) 14%, var(--card));
+        color: var(--pink);
+      }
+      #b-status.live::before {
+        background: #ff3b6b;
+        opacity: 1;
+        animation: onair 1.6s ease-in-out infinite;
       }
       #b-status.error {
-        border-color: #5f3a3a;
-        color: #ff6b6b;
+        border-color: color-mix(in srgb, var(--coral) 45%, transparent);
+        color: var(--coral);
       }
+      #b-status.error::before {
+        background: var(--coral);
+        opacity: 1;
+      }
+      @keyframes onair {
+        0%,
+        100% {
+          box-shadow: 0 0 0 0 rgba(255, 59, 107, 0.55);
+        }
+        50% {
+          box-shadow: 0 0 0 7px rgba(255, 59, 107, 0);
+        }
+      }
+      /* いちばん大事なボタン(マイク配信の開始・停止) */
       #b-toggle {
         flex: 1 1 200px;
-        padding: 14px;
+        padding: 14px 20px;
+        font: inherit;
         font-size: 16px;
-        border-radius: 10px;
-        border: 1px solid #444;
-        background: #2d4a2d;
-        color: #eee;
+        font-weight: 800;
+        border-radius: 999px;
+        border: none;
+        background: var(--gradient);
+        color: #fff;
         cursor: pointer;
+        box-shadow: 0 8px 20px rgba(180, 140, 255, 0.35);
+        transition:
+          transform 0.15s ease,
+          box-shadow 0.15s ease;
+      }
+      #b-toggle:hover:not(:disabled) {
+        transform: translateY(-2px);
+        box-shadow: 0 12px 24px rgba(180, 140, 255, 0.45);
       }
       #b-toggle.live {
-        background: #5f3a3a;
+        background: var(--gradient-live);
+        box-shadow: 0 8px 22px rgba(255, 93, 143, 0.45);
       }
       #b-toggle:disabled {
         opacity: 0.5;
@@ -63,15 +199,24 @@
       }
       .note {
         margin-top: 12px;
-        color: #999;
+        color: var(--muted);
         font-size: 13px;
         line-height: 1.8;
       }
       h2 {
+        display: flex;
+        align-items: center;
+        gap: 6px;
         font-size: 17px;
-        margin: 24px 0 8px;
-        padding-top: 16px;
-        border-top: 1px solid #333;
+        font-weight: 800;
+        margin: 26px 0 10px;
+      }
+      h2::after {
+        content: '';
+        flex: 1;
+        height: 2px;
+        border-radius: 2px;
+        background: linear-gradient(90deg, var(--line), transparent);
       }
       .row {
         display: flex;
@@ -80,35 +225,107 @@
         margin-top: 12px;
         flex-wrap: wrap;
       }
+      label {
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+      }
+      /* 入力欄・選択欄は丸く、選ぶとラベンダーの輪が出る */
+      input[type='text'],
+      input[type='number'],
+      input:not([type]),
+      select {
+        box-sizing: border-box;
+        min-width: 0;
+        padding: 8px 12px;
+        border-radius: 12px;
+        border: 2px solid var(--line);
+        background: var(--soft);
+        color: var(--text);
+        font: inherit;
+        font-size: 14px;
+        outline: none;
+        transition:
+          border-color 0.15s ease,
+          box-shadow 0.15s ease;
+      }
+      input:focus-visible,
+      select:focus-visible,
+      button:focus-visible,
+      summary:focus-visible {
+        outline: none;
+        border-color: var(--lavender);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--lavender) 30%, transparent);
+      }
+      input[type='range'],
+      input[type='checkbox'],
+      progress {
+        accent-color: var(--pink);
+      }
       input[type='file'] {
         flex: 1 1 240px;
         min-width: 0;
+        font: inherit;
         font-size: 13px;
-        color: #ccc;
+        color: var(--muted);
       }
-      button.small {
-        padding: 8px 14px;
-        font-size: 13px;
-        border-radius: 8px;
-        border: 1px solid #444;
-        background: #2b2b2b;
-        color: #eee;
+      input[type='file']::file-selector-button {
+        margin-right: 10px;
+        padding: 7px 14px;
+        border-radius: 999px;
+        border: 2px solid var(--line);
+        background: var(--card);
+        color: var(--text);
+        font: inherit;
+        font-weight: 700;
         cursor: pointer;
+      }
+      /* ふつうのボタンは白いころんとした形。主なものはグラデーション、危ないものは珊瑚色の縁 */
+      button.small {
+        padding: 7px 14px;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        border-radius: 999px;
+        border: 2px solid var(--line);
+        background: var(--card);
+        color: var(--text);
+        cursor: pointer;
+        transition:
+          transform 0.15s ease,
+          border-color 0.15s ease,
+          background 0.15s ease;
+      }
+      button.small:hover:not(:disabled) {
+        transform: translateY(-1px);
+        border-color: var(--lavender);
       }
       button.small:disabled {
         opacity: 0.5;
         cursor: default;
       }
       button.small.primary {
-        background: #2d4a2d;
+        border-color: transparent;
+        background: var(--gradient);
+        color: #fff;
+        box-shadow: 0 4px 12px rgba(180, 140, 255, 0.3);
       }
       button.small.danger {
-        border-color: #5f3a3a;
-        color: #ff9d9d;
+        border-color: color-mix(in srgb, var(--coral) 50%, transparent);
+        color: var(--coral);
+      }
+      button.small.danger:hover:not(:disabled) {
+        border-color: var(--coral);
+        background: color-mix(in srgb, var(--coral) 10%, var(--card));
+      }
+      button.small.on {
+        border-color: transparent;
+        background: color-mix(in srgb, var(--mint) 20%, var(--card));
+        color: color-mix(in srgb, var(--mint) 70%, var(--text));
       }
       #a-progress {
         width: 100%;
-        height: 6px;
+        height: 8px;
         margin-top: 10px;
       }
       #a-list {
@@ -120,41 +337,43 @@
         display: flex;
         gap: 8px;
         align-items: center;
-        padding: 10px 12px;
-        border: 1px solid #333;
-        border-radius: 8px;
-        background: #1b1b1b;
+        padding: 10px 14px;
+        border: 2px solid var(--line);
+        border-radius: 16px;
+        background: var(--card);
         margin-bottom: 8px;
         font-size: 14px;
       }
       #a-list li.current {
-        border-color: #3a5f3a;
-        background: #1b241b;
+        border-color: color-mix(in srgb, var(--mint) 60%, transparent);
+        background: color-mix(in srgb, var(--mint) 9%, var(--card));
       }
       #a-list .name {
         flex: 1 1 auto;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        font-weight: 700;
       }
       #a-list .size {
-        color: #888;
+        color: var(--muted);
         font-size: 12px;
         flex: 0 0 auto;
       }
       .empty {
-        color: #777;
+        color: var(--muted);
         font-size: 13px;
         margin: 14px 0 0;
       }
+      /* プレビュー。夜空のような紫の枠に、アバターが立つ */
       #p-canvas {
         display: block;
         box-sizing: border-box; /* 枠線のぶん列からはみ出さない */
         width: 100%;
         aspect-ratio: 16 / 10;
-        border-radius: 10px;
-        border: 1px solid #333;
-        background: #1b1b22;
+        border-radius: 20px;
+        border: 3px solid var(--line);
+        background: var(--preview);
         touch-action: none;
       }
       /* Webカメラの映像(本人の確認用。鏡のように左右反転して見せる) */
@@ -162,27 +381,27 @@
         display: block;
         width: min(240px, 100%);
         margin-top: 8px;
-        border-radius: 8px;
-        border: 1px solid #333;
+        border-radius: 16px;
+        border: 3px solid var(--line);
         transform: scaleX(-1);
       }
       #p-webcam-video[hidden] {
         display: none;
       }
       .webcam-settings {
-        margin-top: 10px;
-        padding: 8px 12px;
-        border: 1px solid #333;
-        border-radius: 8px;
-        background: #1a1a1a;
+        margin-top: 12px;
+        padding: 10px 14px;
+        border: 2px solid var(--line);
+        border-radius: 18px;
+        background: var(--soft);
       }
       .webcam-settings[hidden] {
         display: none;
       }
       .webcam-settings > summary {
         cursor: pointer;
-        font-size: 13px;
-        color: #ccc;
+        font-size: 14px;
+        font-weight: 700;
       }
       .gestures {
         width: 100%;
@@ -192,13 +411,13 @@
       }
       .gestures th {
         text-align: left;
-        color: #999;
-        font-weight: normal;
+        color: var(--muted);
+        font-weight: 700;
         padding: 4px;
       }
       .gestures td {
         padding: 4px;
-        border-top: 1px solid #2a2a2a;
+        border-top: 2px solid var(--line);
       }
       .gestures select {
         width: 100%;
@@ -213,7 +432,7 @@
         gap: 8px;
         align-items: center;
         padding: 6px 0;
-        border-top: 1px solid #2a2a2a;
+        border-top: 2px solid var(--line);
         font-size: 13px;
       }
       .templates .name {
@@ -225,46 +444,44 @@
         flex: 1 1 auto;
         height: 8px;
         border-radius: 4px;
-        background: #2b2b2b;
+        background: var(--card);
         overflow: hidden;
       }
       .templates .meter span {
         display: block;
         height: 100%;
         width: 0;
-        background: #6fbf8a;
+        background: var(--gradient);
         transition: width 0.12s linear;
       }
-      #p-status {
+      #p-status,
+      #a-status {
         margin-top: 8px;
-        color: #aaa;
+        color: var(--muted);
         font-size: 13px;
         min-height: 1.3em;
       }
       .ar-label {
-        color: #bbb;
+        color: var(--muted);
         font-size: 13px;
+        font-weight: 700;
       }
       .wrist-axis {
         display: inline-flex;
         align-items: center;
         gap: 4px;
-        color: #bbb;
+        color: var(--muted);
         font-size: 13px;
+        font-weight: 700;
       }
       .wrist-axis span {
         display: inline-block;
         min-width: 3.2em;
         text-align: center;
-        color: #eee;
+        color: var(--text);
       }
       .wrist-axis button {
         padding: 4px 10px;
-      }
-      button.small.on {
-        background: #3a6f4a;
-        border-color: #5c9c72;
-        color: #d7f5e2;
       }
       /* 視聴URLのQR。会場掲示用に全画面へ拡大できる */
       #s-qr img {
@@ -273,7 +490,8 @@
         height: 108px;
         background: #fff;
         padding: 6px;
-        border-radius: 6px;
+        border-radius: 12px;
+        border: 2px solid var(--line);
       }
       #qr-stage[hidden] {
         display: none !important;
@@ -327,7 +545,7 @@
       #layout {
         display: grid;
         grid-template-columns: minmax(0, 1fr);
-        gap: 24px;
+        gap: 20px;
       }
       @media (min-width: 980px) {
         #wrap {
@@ -344,28 +562,38 @@
           overflow-y: auto;
         }
       }
+      /* 設定のタブは、丸い切り替えスイッチのように並べる */
       .tabs {
         display: flex;
         gap: 4px;
         flex-wrap: wrap;
-        border-bottom: 1px solid #333;
+        padding: 4px;
+        border-radius: 999px;
+        background: var(--soft);
+        border: 2px solid var(--line);
       }
       .tab {
-        padding: 10px 14px;
+        flex: 1 1 auto;
+        padding: 8px 12px;
+        font: inherit;
         font-size: 14px;
-        border: 1px solid transparent;
-        border-bottom: none;
-        border-radius: 8px 8px 0 0;
+        font-weight: 700;
+        border: none;
+        border-radius: 999px;
         background: none;
-        color: #aaa;
+        color: var(--muted);
         cursor: pointer;
+        transition:
+          background 0.15s ease,
+          color 0.15s ease;
+      }
+      .tab:hover {
+        color: var(--text);
       }
       .tab[aria-selected='true'] {
-        background: #1e1e1e;
-        border-color: #333;
-        color: #eee;
-        margin-bottom: -1px;
-        border-bottom: 1px solid #1e1e1e;
+        background: var(--gradient);
+        color: #fff;
+        box-shadow: 0 4px 12px rgba(180, 140, 255, 0.3);
       }
       .panel {
         padding: 4px 2px 0;
@@ -378,15 +606,20 @@
       }
       h3 {
         font-size: 15px;
+        font-weight: 800;
         margin: 24px 0 0;
       }
-      /* 説明は折りたたむ。開いたときだけ読む */
+      /* 説明は折りたたむ。開いたときだけ読む(やわらかい吹き出しの箱) */
       details.note {
         margin-top: 12px;
+        padding: 8px 14px;
+        border-radius: 16px;
+        background: var(--soft);
       }
       details.note summary {
         cursor: pointer;
-        color: #8ab;
+        color: var(--link);
+        font-weight: 700;
         list-style-position: inside;
       }
       details.note[open] summary {
@@ -395,16 +628,30 @@
       details.note[hidden] {
         display: none;
       }
+      p.note#app-version {
+        text-align: center;
+      }
       .warn {
         margin: 10px 0 0;
-        color: #ff9d9d;
+        padding: 8px 12px;
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--coral) 10%, transparent);
+        color: var(--coral);
         font-size: 13px;
+        font-weight: 700;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before {
+          animation: none !important;
+          transition: none !important;
+        }
       }
     </style>
   </head>
   <body>
     <div id="wrap">
-      <h1>🎙 配信者コンソール</h1>
+      <h1>🎙 <span class="title">配信者コンソール</span></h1>
       <p class="sub" id="b-room">このページを開いている間だけ、マイク音声が視聴ページへ配信されます</p>
       <div id="layout">
         <!-- 左列(広い画面ではスクロールしても残る): 配信の開始・停止とプレビュー -->
