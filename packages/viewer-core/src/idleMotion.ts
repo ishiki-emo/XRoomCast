@@ -37,9 +37,10 @@ function quatToArray(q: THREE.Quaternion): Quat {
 
 /**
  * まばたき。等間隔だと機械的に見えるので、間隔を疑似乱数で少し揺らす。
- * 時刻の純関数を保つため Math.random は使わない
+ * 時刻の純関数を保つため Math.random は使わない。
+ * 配信がまばたきを送ってこない間(HMD配信など)の自動まばたきにも使う
  */
-function blinkAt(t: number): number {
+export function blinkAt(t: number): number {
   const index = Math.floor(t / BLINK_INTERVAL_SEC);
   // インデックスから決まる 0〜1 の疑似乱数(同じindexなら常に同じ値)
   const jitter = (Math.sin(index * 127.1) * 43758.5453) % 1;

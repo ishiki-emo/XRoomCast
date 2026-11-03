@@ -17,7 +17,7 @@
 export { Avatar, type RestPose } from './avatar';
 export { AvatarScaleAdapter } from './avatarScale';
 export { PoseApplier } from './poseApplier';
-export { IdleMotion, blendPose } from './idleMotion';
+export { IdleMotion, blendPose, blinkAt } from './idleMotion';
 export { PeerPresence, type PeerDevice, type PeerState } from './peers';
 export { PlaceholderAvatar } from './placeholderAvatar';
 export { SpatialAudio, isSpatialAudioSupported } from './spatialAudio';
