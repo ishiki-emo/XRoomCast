@@ -1,0 +1,42 @@
+{
+  "name": "@xroomcast/bridge-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "XRoomCast PC配信の中継アプリ(画面つき)",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/build.mjs && electron .",
+    "dist": "node scripts/build.mjs && electron-builder --win zip",
+    "typecheck": "tsc --noEmit"
+  },
+  "build": {
+    "appId": "com.xroomcast.bridge",
+    "productName": "XRoomCast 中継",
+    "electronVersion": "44.7.2",
+    "npmRebuild": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../node_modules/node-datachannel/build/Release/node_datachannel.node",
+        "to": "node_datachannel.node"
+      }
+    ],
+    "win": {
+      "target": [
+        "zip"
+      ],
+      "artifactName": "xroomcast-bridge-app-windows-${arch}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "44.7.2",
+    "electron-builder": "26.17.0"
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "extends": "../bridge/tsconfig.json",
+  "include": ["src", "../bridge/src"]
+}

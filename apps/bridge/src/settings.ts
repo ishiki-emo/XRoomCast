@@ -170,6 +170,28 @@ function argValue(name: string): string | undefined {
 }
 
 /** 設定を決める。配信者URLが無く、聞くこともできなければ例外 */
+/** 保存した配信者URLがあるか(デスクトップアプリが、最初に URL の欄を出すかを決める) */
+export function hasSavedBroadcastUrl(): boolean {
+  return Boolean(readSaved().broadcastUrl);
+}
+
+/** 保存した配信者URLから設定を作る(無ければ null。URL が使えなくなっていたら例外) */
+export async function savedWorkerSettings(): Promise<WorkerSettings | null> {
+  const saved = readSaved();
+  if (!saved.broadcastUrl) return null;
+  const resolved = await resolveBroadcastUrl(saved.broadcastUrl);
+  await checkKey(resolved.origin, resolved.room, resolved.key);
+  return { mode: 'worker', ...resolved, pid: publisherId(saved) };
+}
+
+/** 配信者URLを確かめてから保存し、設定を返す(デスクトップアプリの URL の欄から) */
+export async function saveBroadcastUrl(input: string): Promise<WorkerSettings> {
+  const resolved = await resolveBroadcastUrl(input);
+  await checkKey(resolved.origin, resolved.room, resolved.key);
+  writeSaved({ ...readSaved(), broadcastUrl: input.trim() });
+  return { mode: 'worker', ...resolved, pid: publisherId(readSaved()) };
+}
+
 export async function loadSettings(): Promise<BridgeSettings> {
   if (process.argv.includes('--reset')) {
     forgetBroadcastUrl();

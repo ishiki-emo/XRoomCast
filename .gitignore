@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# 中継アプリ(Electron)の配布物(electron-builder の出力)
+apps/bridge-app/release/
 .env
 .env.local
 

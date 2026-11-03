@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'"
+    />
+    <title>XRoomCast 中継</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>XRoomCast 中継</h1>
+      <p class="sub">VSeeFace などの動きを、XRoomCast の視聴者へ届けます</p>
+    </header>
+
+    <!-- 配信者URL(はじめて使うとき・変えるとき) -->
+    <section id="url-card" class="card" hidden>
+      <h2>配信者URL</h2>
+      <p class="note">
+        運営者から受け取った「配信者URL」を貼り付けてください(管理画面の「配信者URLを表示する」で出るURL)。
+        このPCに保存され、次からは貼らずに始まります。
+      </p>
+      <div class="row">
+        <input id="url-input" type="password" placeholder="https://…/broadcast/…" autocomplete="off" />
+        <button id="url-save" class="primary">保存して配信を始める</button>
+      </div>
+      <p id="url-error" class="error" hidden></p>
+      <button id="url-cancel" class="link" hidden>やめる</button>
+    </section>
+
+    <!-- 状態 -->
+    <section id="status-card" class="card">
+      <h2>状態</h2>
+      <div class="status-row">
+        <span id="vmc-dot" class="dot"></span>
+        <div>
+          <div id="vmc-title" class="status-title">VSeeFace などからの受信</div>
+          <div id="vmc-detail" class="status-detail"></div>
+        </div>
+      </div>
+      <div class="status-row">
+        <span id="sfu-dot" class="dot"></span>
+        <div>
+          <div id="sfu-title" class="status-title">配信</div>
+          <div id="sfu-detail" class="status-detail"></div>
+        </div>
+      </div>
+      <p id="warning" class="warning" hidden></p>
+      <div class="row buttons">
+        <button id="start" class="primary">配信を始める</button>
+        <button id="stop">配信を止める</button>
+        <button id="open-console">配信者コンソールを開く</button>
+      </div>
+      <p class="note">
+        マイクとアバターは、ブラウザの配信者コンソールで設定します。ここから開くと、声とアバターがこの配信と同じ席になります。
+      </p>
+      <button id="change-url" class="link">配信者URLを変える</button>
+    </section>
+
+    <details class="card" id="log-card">
+      <summary>ログ</summary>
+      <pre id="log"></pre>
+    </details>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

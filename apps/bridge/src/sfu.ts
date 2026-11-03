@@ -125,6 +125,7 @@ export class SfuPublisher {
     while (!this.closed) {
       try {
         await this.connect();
+        if (this.closed) return;
         console.log(`[sfu] パブリッシャー接続完了: sessionId=${this.sessionId}`);
         this.onConnected?.();
         return;
@@ -177,6 +178,11 @@ export class SfuPublisher {
         reject(new Error(`DataChannelエラー: ${String(event)}`));
       };
     });
+    // つないでいる途中で閉じられた(配信を止めた)ときは、出来たつながりも捨てる
+    if (this.closed) {
+      pc.close();
+      return;
+    }
     channel.onclose = () => {
       this.channel = null;
       if (!this.closed) {

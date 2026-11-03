@@ -1,4 +1,5 @@
-# PC配信の中継アプリ(apps/bridge)を、Node.js なしで動く実行ファイルにして GitHub Releases に置く。
+# PC配信の中継アプリを GitHub Releases に置く。画面つき(apps/bridge-app。Electron)と、
+# 黒い窓のコンソール版(apps/bridge。Node.js なしで動く単一の実行ファイル)の2つ。
 # タグ bridge-v<版>(例: bridge-v0.1.0)を push すると動く。手動でも動かせる(そのときは成果物だけ残す)
 name: bridge-release
 
@@ -36,12 +37,18 @@ jobs:
           Copy-Item apps/bridge/dist/${{ matrix.exe }} package/
           Copy-Item apps/bridge/配布用/はじめにお読みください.txt package/
           Compress-Archive -Path package/* -DestinationPath ${{ matrix.zip }}
+      - name: 画面つきのアプリ(Electron)を zip にする
+        run: npm run dist -w apps/bridge-app
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.zip }}
-          path: ${{ matrix.zip }}
+          name: xroomcast-bridge-${{ matrix.os }}
+          path: |
+            ${{ matrix.zip }}
+            apps/bridge-app/release/*.zip
       - name: リリースに添付する
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.zip }}
+          files: |
+            ${{ matrix.zip }}
+            apps/bridge-app/release/*.zip
