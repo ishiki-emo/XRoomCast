@@ -14,6 +14,7 @@ import {
   IdleMotion,
   PlaceholderAvatar,
   blendPose,
+  blinkAt,
   type LipSyncWeights,
   type ShadowMode,
 } from '@xroomcast/viewer-core';
@@ -22,6 +23,13 @@ import {
 export const IDLE_AFTER_MS = 5000;
 /** 待機↔配信のクロスフェード時間 */
 const IDLE_BLEND_MS = 700;
+
+const BLINK_EXPRESSIONS = ['blink', 'blinkLeft', 'blinkRight'] as const;
+
+/** 配信側がまばたきを送ってきているか(一度でも送られた表情は値が残り続ける) */
+function sendsBlink(expressions: ReadonlyMap<string, number> | undefined): boolean {
+  return BLINK_EXPRESSIONS.some((name) => expressions?.has(name));
+}
 
 export interface AvatarUnitHooks {
   onProgress?(loaded: number, total: number): void;
@@ -160,6 +168,11 @@ export class AvatarUnit {
         this.liveOnly = true;
       }
       avatar.applyPose(liveFrame);
+      // 配信側がまばたきを送ってこない(HMD配信など)間は、こちらで自動でまばたきさせる。
+      // 送ってくる配信(ブリッジのVMCなど)はその値を優先し、上書きしない
+      if (!sendsBlink(liveFrame.expressions)) {
+        avatar.vrm.expressionManager?.setValue('blink', blinkAt(input.now / 1000));
+      }
     } else {
       this.liveOnly = false;
       const idleFrame = this.idleMotion.sample(input.now, avatar.restPose);
