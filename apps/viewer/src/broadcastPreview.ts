@@ -267,7 +267,11 @@ export function setupBroadcastPreview(options: {
     onWristReset: null,
     // 見出しは欄を番号ではなく中身で探して書き換える(欄を足すと番号がずれ、別の欄の見出しを上書きしていた)
     setWristLabel: (text) => panel.setSectionTitle(wristSection, text),
-    setMicLabel: (on) => panel.setActive(on ? 'mic-on' : 'mic-off'),
+    setMicLabel: (on) => {
+      panel.setActive(on ? 'mic-on' : 'mic-off');
+      micToggling = false;
+      pulseMic(on);
+    },
     setMicTrack: (track) => micLipSync.setTrack(track),
     setLocalPose: (source) => (localPose = source),
   };
@@ -559,6 +563,42 @@ export function setupBroadcastPreview(options: {
   const TURN_RELEASE = 0.3;
   let turnArmed = true;
   const _turnQuat = new THREE.Quaternion();
+  /**
+   * 左スティックの押し込みでマイクのミュートと復帰を切り替える(メニューを開かずに)。
+   * 切り替わったら左のコントローラを振動させて知らせる(オン: 1回、オフ: 2回)。
+   * 左スティックは何にも使っていないので、旋回(右スティック)やジェスチャーとぶつからない
+   */
+  const MIC_BUTTON = 3;
+  let micButtonDown = false;
+  /** 切り替えの途中(マイクの開始には少しかかる)は、押しても受け付けない */
+  let micToggling = false;
+  function handleMicButton(): void {
+    const session = xrSession;
+    if (!session) return;
+    for (const source of session.inputSources) {
+      if (source.handedness !== 'left' || source.hand || !source.gamepad) continue;
+      const pressed = source.gamepad.buttons[MIC_BUTTON]?.pressed ?? false;
+      if (pressed && !micButtonDown && !micToggling && handle.onMicToggle) {
+        micToggling = true;
+        handle.onMicToggle();
+      }
+      micButtonDown = pressed;
+    }
+  }
+  function pulseMic(on: boolean): void {
+    const session = xrSession;
+    if (!session) return;
+    for (const source of session.inputSources) {
+      if (source.handedness !== 'left' || source.hand) continue;
+      const actuator = source.gamepad?.hapticActuators?.[0] as
+        | { pulse?: (value: number, duration: number) => Promise<boolean> }
+        | undefined;
+      if (!actuator?.pulse) continue;
+      void actuator.pulse(0.6, 80);
+      if (!on) window.setTimeout(() => void actuator.pulse?.(0.6, 80), 180);
+    }
+  }
+
   function handleSnapTurn(frame: XRFrame): void {
     const session = xrSession;
     const space = renderer.xr.getReferenceSpace();
@@ -754,6 +794,7 @@ export function setupBroadcastPreview(options: {
     }
     if (frame && xrSession) {
       handleSnapTurn(frame);
+      handleMicButton();
       const refSpace = renderer.xr.getReferenceSpace();
       if (refSpace) {
         if (!broadcast.calibrated) {
