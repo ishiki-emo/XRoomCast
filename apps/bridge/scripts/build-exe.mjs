@@ -32,8 +32,14 @@ const datachannelRoot = resolved.slice(0, resolved.lastIndexOf('node-datachannel
 const addon = path.join(datachannelRoot, 'build', 'Release', 'node_datachannel.node');
 const ADDON_ASSET = 'node_datachannel.node';
 
-rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
+// 前の exe を動かしたままだと上書きできない(Windows はファイルが使用中になる)。分かる言葉で止める
+try {
+  rmSync(path.join(dist, exeName), { force: true });
+} catch {
+  console.error(`[build] ${exeName} を動かしたままです。中継アプリの窓を閉じてから、もう一度ビルドしてください`);
+  process.exit(1);
+}
 
 /** node-datachannel の .node の読み込みを、SEA の asset から読む形に差し替える */
 const nativeAddonPlugin = {

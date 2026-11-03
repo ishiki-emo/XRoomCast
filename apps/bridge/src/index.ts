@@ -28,6 +28,7 @@ import { startVmcReceiver } from './vmcReceiver.js';
 import { isSea } from 'node:sea';
 import { DATA_CHANNEL_NAME, DirectSfuApi, SfuPublisher, WorkerSfuApi } from './sfu.js';
 import { loadSettings, type BridgeSettings } from './settings.js';
+import { offerConsole } from './console.js';
 
 // osc-min が古い Buffer() を使っていて、起動のたびに非推奨の警告が出る(動作には関係ない)
 process.noDeprecation = true;
@@ -266,6 +267,9 @@ async function startSfu(): Promise<void> {
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
   process.once('SIGHUP', shutdown);
+
+  // 配布版: マイクとアバターの設定に使う配信者コンソールを、この席の名前で開けるようにする
+  if (settings.mode === 'worker') offerConsole(settings);
 }
 
 // ---- HTTP API(ビューア向けSFUプロキシ。App Secretをブラウザに出さない)+ WebSocket配信 ----
