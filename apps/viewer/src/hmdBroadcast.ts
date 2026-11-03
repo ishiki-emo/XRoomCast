@@ -62,6 +62,16 @@ const HAND_GESTURE_HOLD_MS = 130;
 /** 手元の姿勢をプレビューへ当て続ける期限(これより古ければ、VRを出たか止まったとみなす) */
 const LOCAL_FRAME_FRESH_MS = 500;
 const NEUTRAL: GestureReading = { gesture: GESTURE.neutral, weight: 0 };
+/**
+ * 位置合わせは、頭の高さがこの時間落ち着いてから行う。VRに入った直後の数フレームは、
+ * 端末によって頭の位置がまだ正しく取れていない(高さが0付近など)ことがあり、
+ * そこで合わせると身長の比が大きく狂う(一人称でアバターが縮んで見えた)
+ */
+const CALIBRATE_STABLE_MS = 500;
+/** 落ち着いているとみなす高さの揺れ(m) */
+const CALIBRATE_STABLE_RANGE = 0.03;
+/** これより低い頭の高さは、まだ取れていないとみなす(座っていても目はこれより高い) */
+const CALIBRATE_MIN_EYE = 0.6;
 /** SFUへの接続を試す回数 */
 const CONNECT_ATTEMPTS = 3;
 /** 手が取れず体側に下ろしているとき(待機モーションと同じ軽い曲げ) */
@@ -153,6 +163,14 @@ export class HmdBroadcast {
   private lastSentAt = 0;
   /** 表示中のアバターの頭の高さ(m)。身長補正に使う */
   private avatarHeight: number | null = null;
+  /**
+   * アバターの頭の骨から目までのずれ(アバターのレスト姿勢で、正面+Z の座標)。
+   * HMDの頭の位置は目の位置なので、送るときはこのぶん頭の骨の位置へ戻す
+   * (そのまま頭の骨に合わせると、アバターの目が配信者の目より上に来て、一人称で視点が低く感じた)
+   */
+  private avatarEye = new THREE.Vector3();
+  /** 位置合わせ待ちの、頭の高さが落ち着き始めた時刻と高さ */
+  private settling: { since: number; y: number } | null = null;
   private readonly handReader = new HandReader();
   private readonly gestureMixer = new GestureExpressionMixer();
   private readonly expressions = new ExpressionChannel(this.gestureMixer.expressionNames());
@@ -212,9 +230,38 @@ export class HmdBroadcast {
     this.avatarHeight = height > 0.2 ? height : null;
   }
 
+  /** アバターの頭の骨から目までのずれ(レスト姿勢・正面+Z)。分からなければ null */
+  setAvatarEye(offset: THREE.Vector3 | null): void {
+    this.avatarEye.copy(offset ?? _noEyeOffset);
+  }
+
+  /**
+   * 位置合わせを試す。頭の位置が実際に追跡できていて、高さが少しのあいだ落ち着いたら合わせる。
+   * 合わせたら true(それまでは毎フレーム呼ぶ)
+   */
+  tryCalibrate(viewer: XRViewerPose, now = performance.now()): boolean {
+    const y = viewer.transform.position.y;
+    // 推定の位置(追跡が切れて向きだけのとき等)や、低すぎる高さでは合わせない
+    if (viewer.emulatedPosition || y < CALIBRATE_MIN_EYE) {
+      this.settling = null;
+      this.onStatus?.('位置を合わせています。正面を向いて、少しそのままでいてください...');
+      return false;
+    }
+    if (!this.settling || Math.abs(y - this.settling.y) > CALIBRATE_STABLE_RANGE) {
+      this.settling = { since: now, y };
+      this.onStatus?.('位置を合わせています。正面を向いて、少しそのままでいてください...');
+      return false;
+    }
+    if (now - this.settling.since < CALIBRATE_STABLE_MS) return false;
+    this.settling = null;
+    this.calibrate(viewer);
+    return true;
+  }
+
   /** 立ち位置と向きを取り直す(姿勢が崩れたときや、立ち位置を変えたとき) */
   recalibrate(): void {
     this.calibration = null;
+    this.settling = null;
   }
 
   constructor(
@@ -285,9 +332,10 @@ export class HmdBroadcast {
     const yawAngle = Math.atan2(_forward.x, _forward.z);
     const yaw = new THREE.Quaternion().setFromAxisAngle(UP, -yawAngle);
 
-    // 目の高さの比でアバターに合わせる(床からの高さがそのまま身長の目安になる)
+    // 目の高さの比でアバターに合わせる(床からの高さがそのまま身長の目安になる)。
+    // アバター側も目の高さ(頭の骨の高さ + 目までのずれ)で比べる
     const eyeHeight = Math.max(p.y, 0.5);
-    const scale = this.avatarHeight ? this.avatarHeight / eyeHeight : 1;
+    const scale = this.avatarHeight ? (this.avatarHeight + this.avatarEye.y) / eyeHeight : 1;
 
     this.calibration = {
       origin: new THREE.Vector3(p.x, 0, p.z), // 高さはlocal-floorの床(0)を使う
@@ -364,6 +412,15 @@ export class HmdBroadcast {
     // 頭は「開始時の姿勢からの差分」。開始時に単位元になる
     const headRestInverse = _restInverse.copy(this.calibration.headRest).invert();
     const head = this.toNode(viewer.transform, headRestInverse);
+    // 目の位置から頭の骨の位置へ戻す(目までのずれを、頭の向きに合わせて回して引く)
+    _eye
+      .copy(this.avatarEye)
+      .applyQuaternion(_headRot.set(head.rotation[0], head.rotation[1], head.rotation[2], head.rotation[3]));
+    head.position = [
+      head.position[0] - _eye.x,
+      head.position[1] - _eye.y,
+      head.position[2] - _eye.z,
+    ] as Vec3;
 
     const hands: Record<'left' | 'right', PoseNode | null> = { left: null, right: null };
     const curls: Record<'left' | 'right', FingerCurls> = {
@@ -480,4 +537,7 @@ export class HmdBroadcast {
 }
 
 const _restInverse = new THREE.Quaternion();
+const _eye = new THREE.Vector3();
+const _headRot = new THREE.Quaternion();
+const _noEyeOffset = new THREE.Vector3();
 const _grip = new THREE.Quaternion();

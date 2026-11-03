@@ -148,6 +148,23 @@ export function setupBroadcastPreview(options: {
   };
   transport.connect();
 
+  /**
+   * アバターの頭の骨から目までのずれ(配置のローカル座標・レスト姿勢)。VRM の視線の設定
+   * (lookAt の offsetFromHeadBone)から求める。設定が無ければ null(ずれなしとして扱う)
+   */
+  function measureEyeOffset(target: Avatar): THREE.Vector3 | null {
+    const head = target.vrm.humanoid.getNormalizedBoneNode('head');
+    const lookAt = target.vrm.lookAt;
+    if (!head || !lookAt) return null;
+    avatarRoot.updateMatrixWorld(true);
+    const eye = avatarRoot.worldToLocal(lookAt.getLookAtWorldPosition(new THREE.Vector3()));
+    const headLocal = avatarRoot.worldToLocal(head.getWorldPosition(new THREE.Vector3()));
+    // worldToLocal は配置の拡大縮小も戻すので、これでアバター本来の大きさでのずれになる
+    const offset = eye.sub(headLocal);
+    // おかしな値(モデルの設定ミス)は使わない。目は頭の骨の上・前、数cm〜十数cm
+    return offset.length() < 0.3 ? offset : null;
+  }
+
   function setStatus(text: string): void {
     statusEl.textContent = text;
   }
@@ -172,6 +189,7 @@ export function setupBroadcastPreview(options: {
       updateXrLayout();
       // HMD配信の身長補正に使う(配信者の目の高さとの比を取る)
       broadcast.setAvatarHeight(next.restPose.height);
+      broadcast.setAvatarEye(measureEyeOffset(next));
       options.onAvatarLoaded?.({
         height: next.restPose.height,
         expressions: next.vrm.expressionManager?.expressions.map((e) => e.expressionName) ?? [],
@@ -531,8 +549,7 @@ export function setupBroadcastPreview(options: {
       if (refSpace) {
         if (!broadcast.calibrated) {
           const viewer = frame.getViewerPose(refSpace);
-          if (viewer) {
-            broadcast.calibrate(viewer);
+          if (viewer && broadcast.tryCalibrate(viewer)) {
             updateXrLayout();
             // パネルも配信者の前方へ出し直す
             panelController.show(peerRoot.position, Math.atan2(
