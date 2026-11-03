@@ -822,6 +822,13 @@ interface ChatItem {
 }
 
 const CHAT_HISTORY_KEY = 'chat-history';
+/**
+ * コメントを受け付けるか。**配信者が明示的にオンにしたときだけ true を書く。**
+ * 設定本体(SETTINGS_KEY)は人数上限などを変えるたびに全項目ごと保存されるため、
+ * そこに残る chat は「選んだ値」と区別できない(既定がオンだった頃の値も混ざる)。
+ * 電気通信事業法まわりの配慮で既定をオフにしたので、選んだ事実だけを別に持つ
+ */
+const CHAT_ENABLED_KEY = 'chat-enabled';
 const CHAT_HISTORY_MAX = 50;
 const CHAT_TEXT_MAX = 200;
 const CHAT_MIN_INTERVAL_MS = 1000;
@@ -881,7 +888,7 @@ const ROOM_NAME_KEY = 'room-name';
 interface RoomSettings {
   /** public: 誰でも視聴できる / invite: 視聴トークンが要る */
   access: 'public' | 'invite';
-  /** 匿名コメントの可否 */
+  /** 匿名コメントの可否。**既定はオフ**(送るのも見るのも不可)。配信者がオンにしたときだけ使える */
   chat: boolean;
   /** 同時接続の上限(null で無制限)。URLが出回ったときの課金の歯止め */
   capacity: number | null;
@@ -908,7 +915,7 @@ function defaultSettings(env: Env): RoomSettings {
   return {
     // 従来の環境変数は「設定を持たないルームの既定値」として残す
     access: env.REQUIRE_VIEWER_TOKEN === '1' ? 'invite' : 'public',
-    chat: true,
+    chat: false,
     capacity: null,
     stopped: false,
     peerMode: DEFAULT_PEER_MODE,
@@ -1165,9 +1172,13 @@ export class Presence extends DurableObject<Env> {
     this.broadcastCount();
     // 満員になったらSFUの購読も断るようKVへ写す
     await this.syncGuard(settings);
-    const history = (await this.ctx.storage.get<ChatItem[]>(CHAT_HISTORY_KEY)) ?? [];
-    pair[1].send(JSON.stringify({ type: 'history', items: history }));
+    // 設定を先に送る(視聴側はコメントの可否を知ってから履歴を受け取る)。
+    // コメントを止めているルームでは履歴も送らない
     pair[1].send(JSON.stringify({ type: 'settings', settings }));
+    if (settings.chat) {
+      const history = (await this.ctx.storage.get<ChatItem[]>(CHAT_HISTORY_KEY)) ?? [];
+      pair[1].send(JSON.stringify({ type: 'history', items: history }));
+    }
     /**
      * 入室証。ここまで来た＝人数の判定を通ったということなので、
      * 以後のSFUリクエストで「入室済み」を示せるようにする
@@ -1430,10 +1441,11 @@ export class Presence extends DurableObject<Env> {
    * (設定を統合する前に作られたルームでも、設定し直さずに済むように)
    */
   private async settings(): Promise<RoomSettings> {
+    const chat = (await this.ctx.storage.get<boolean>(CHAT_ENABLED_KEY)) === true;
     const stored = await this.ctx.storage.get<RoomSettings>(SETTINGS_KEY);
-    if (stored) return { ...defaultSettings(this.env), ...stored };
+    if (stored) return { ...defaultSettings(this.env), ...stored, chat };
     const legacyPeerMode = await this.ctx.storage.get<PeerMode>(PEER_MODE_KEY);
-    const base = defaultSettings(this.env);
+    const base = { ...defaultSettings(this.env), chat };
     return legacyPeerMode ? { ...base, peerMode: legacyPeerMode } : base;
   }
 
@@ -1464,10 +1476,17 @@ export class Presence extends DurableObject<Env> {
 
   /** 設定を更新して保存し、接続中の全員へ配る */
   private async applySettings(patch: Record<string, unknown>): Promise<RoomSettings> {
-    const settings = mergeSettings(await this.settings(), patch);
+    const previous = await this.settings();
+    const settings = mergeSettings(previous, patch);
     await this.ctx.storage.put(SETTINGS_KEY, settings);
+    if (typeof patch.chat === 'boolean') await this.ctx.storage.put(CHAT_ENABLED_KEY, settings.chat);
     await this.syncGuard(settings);
     this.broadcastJson({ type: 'settings', settings });
+    // オンにした瞬間に、接続中の全員へ履歴を配り直す(オフの間は送っていないため)
+    if (settings.chat && !previous.chat) {
+      const history = (await this.ctx.storage.get<ChatItem[]>(CHAT_HISTORY_KEY)) ?? [];
+      this.broadcastJson({ type: 'history', items: history });
+    }
     // 旧クライアント(設定メッセージを知らない版)のために気配の範囲は個別にも配る
     this.broadcastJson({ type: 'peerMode', mode: settings.peerMode });
     return settings;

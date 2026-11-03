@@ -153,6 +153,11 @@
       #chat-row {
         display: none;
       }
+      /* ルーム設定でコメントを止めている間(既定)は、入力欄もコメント欄も出さない */
+      body.chat-off #chat-row,
+      body.chat-off #chat-log {
+        display: none !important;
+      }
       /* 配信停止中オーバーレイ(ステージ中央) */
       #offline-overlay[hidden] {
         display: none !important; /* hidden属性がdisplay:flexに負けないように */
@@ -418,7 +423,8 @@
       }
     </style>
   </head>
-  <body>
+  <!-- コメントは既定でオフ。ルーム設定が届いてオンなら外す -->
+  <body class="chat-off">
     <div id="page">
       <header id="page-header">
         <h1>XRoomCast</h1>

@@ -23,6 +23,8 @@ export class SpatialChat implements ArPanel {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly texture: THREE.CanvasTexture;
   private messages: string[] = [];
+  /** ルーム設定でコメントを止めている間は、AR内にも出さない */
+  private enabled = false;
 
   constructor() {
     this.canvas = document.createElement('canvas');
@@ -97,7 +99,16 @@ export class SpatialChat implements ArPanel {
   show(position: THREE.Vector3, quaternion: THREE.Quaternion): void {
     this.object.position.copy(position);
     this.object.quaternion.copy(quaternion);
-    this.object.visible = true;
+    this.object.visible = this.enabled;
+  }
+
+  /** コメントの可否(ルーム設定)。止めたら表示中のフィードも消して隠す */
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+    if (!enabled) {
+      this.setHistory([]);
+      this.object.visible = false;
+    }
   }
 
   hide(): void {

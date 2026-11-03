@@ -140,7 +140,7 @@ export function setupRoomSettings(options: {
     if (settings.stopped) return '⏸ 緊急停止中(新規の視聴を断っています)';
     const access = settings.access === 'invite' ? '招待された人だけ' : '誰でも視聴できます';
     const capacity = settings.capacity === null ? '人数無制限' : `上限 ${settings.capacity} 人`;
-    const chat = settings.chat ? 'コメントあり' : 'コメント停止中';
+    const chat = settings.chat ? 'コメントあり' : 'コメントなし';
     return `${access} / ${capacity} / ${chat}`;
   }
 

@@ -668,8 +668,8 @@ let admissionToken = '';
 
 /** 気配の公開範囲(サーバーが決める。配信者コンソールから変更できる) */
 let peerMode: 'all' | 'broadcaster' | 'off' = 'all';
-/** コメントを受け付けるか(ルーム設定。既定は許可) */
-let chatAllowed = true;
+/** コメントを受け付けるか(ルーム設定。**既定はオフ**で、配信者がオンにしたときだけ使える) */
+let chatAllowed = false;
 
 function applyPeerMode(mode: string | undefined): void {
   peerMode = mode === 'broadcaster' || mode === 'off' ? mode : 'all';
@@ -683,6 +683,10 @@ function applyPeerMode(mode: string | undefined): void {
 function applyRoomSettings(settings: RoomSettings): void {
   applyPeerMode(settings.peerMode);
   chatAllowed = settings.chat;
+  // 止めている間は送るのも見るのもできない。入力欄もコメント欄も出さず、表示中のものも消す
+  document.body.classList.toggle('chat-off', !chatAllowed);
+  spatialChat.setEnabled(chatAllowed);
+  if (!chatAllowed) chatLog.replaceChildren();
   // 接続中でもコメントだけ止められる。入力欄の状態は接続状態と両方を見る
   setChatEnabled(presenceWs !== null);
 }
@@ -842,10 +846,10 @@ function connectPresence(): void {
       const data = JSON.parse(String(event.data)) as PresenceMessage;
       if (data.type === 'count' && typeof data.count === 'number') {
         presenceCount = data.count;
-      } else if (data.type === 'chat' && typeof data.text === 'string') {
+      } else if (data.type === 'chat' && typeof data.text === 'string' && chatAllowed) {
         appendChat(data.text);
         spatialChat.push(data.text); // AR空間のフィードにも積む
-      } else if (data.type === 'history' && Array.isArray(data.items)) {
+      } else if (data.type === 'history' && Array.isArray(data.items) && chatAllowed) {
         chatLog.replaceChildren();
         for (const item of data.items.slice(-CHAT_VISIBLE_MAX)) appendChat(item.text);
         spatialChat.setHistory(data.items.map((it) => it.text));
