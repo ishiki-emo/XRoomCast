@@ -24,6 +24,7 @@ import { SpatialPanel, type PanelSection } from './spatialUI';
 import { XrPanelController } from './xrPanelController';
 import { HandMenu } from './handMenu';
 import { MicLipSync } from './micLipSync';
+import { MicHud, HUD_LAYER } from './micHud';
 
 const IDLE_AFTER_MS = 5000;
 const IDLE_BLEND_MS = 700;
@@ -135,6 +136,11 @@ export function setupBroadcastPreview(options: {
   let lastPacketAt = 0;
   let localPose: (() => SampledFrame | null) | null = null;
   const micLipSync = new MicLipSync();
+  /** VRの視界の左下のマイク表示と、そこに渡す声の大きさ(リップシンクの母音の重みの合計) */
+  const micHud = new MicHud();
+  scene.add(micHud.object);
+  camera.layers.enable(HUD_LAYER);
+  let micLevel = 0;
   /** リップシンクが口を駆動中か(マイクが止まった瞬間に口を閉じるために持つ) */
   let lipSyncActive = false;
 
@@ -269,6 +275,7 @@ export function setupBroadcastPreview(options: {
     setWristLabel: (text) => panel.setSectionTitle(wristSection, text),
     setMicLabel: (on) => {
       panel.setActive(on ? 'mic-on' : 'mic-off');
+      micHud.setMuted(!on);
       micToggling = false;
       pulseMic(on);
     },
@@ -521,6 +528,7 @@ export function setupBroadcastPreview(options: {
       broadcast.close();
       panelController.hide();
       handMenu.close();
+      micHud.hide();
       menuIntroduced = false;
       scene.background = backgroundColor;
       grid.visible = true;
@@ -731,6 +739,7 @@ export function setupBroadcastPreview(options: {
     if (!firstPerson) return;
     const inside = xrSession !== null && isInside();
     camera.layers.set(0);
+    camera.layers.enable(HUD_LAYER);
     camera.layers.enable(
       inside ? firstPerson.firstPersonOnlyLayer : firstPerson.thirdPersonOnlyLayer,
     );
@@ -827,7 +836,11 @@ export function setupBroadcastPreview(options: {
     if (frame && xrSession) {
       handleSnapTurn(frame);
       const refSpace = renderer.xr.getReferenceSpace();
-      if (refSpace) handleLeftButtons(frame, refSpace);
+      if (refSpace) {
+        handleLeftButtons(frame, refSpace);
+        const viewer = frame.getViewerPose(refSpace);
+        if (viewer) micHud.update(viewer.transform, micLevel, delta);
+      }
       if (refSpace) {
         if (!broadcast.calibrated) {
           const viewer = frame.getViewerPose(refSpace);
@@ -871,6 +884,7 @@ export function setupBroadcastPreview(options: {
       // 口(母音)をリップシンクが所有して毎フレーム直接セットする
       const expressions = avatar.vrm.expressionManager;
       const lipSync = micLipSync.sample(delta);
+      micLevel = lipSync ? Object.values(lipSync).reduce((sum, value) => sum + value, 0) : 0;
       if (expressions && lipSync) {
         lipSyncActive = true;
         for (const [name, value] of Object.entries(lipSync)) expressions.setValue(name, value);
