@@ -27,10 +27,10 @@ const PALM_CLOSE_MS = 400;
 const GRIP_OFFSET = new THREE.Vector3(0, 0.03, -0.08);
 /**
  * コントローラで持つときのパネルの傾き。グリップの向きのままだと、パネルの表(+Z)が水平に手前を向くが、
- * 目は手より上にあるので、上へ50°起こして見上げる向きにする(30°では手前に倒れて見えた。Quest のグリップは
+ * 目は手より上にあるので、上へ70°起こして見上げる向きにする(30°・50°では手前に倒れて見えた。Quest のグリップは
  * 握りの傾きのぶん手前へ倒れているため)
  */
-const GRIP_TILT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), (-50 * Math.PI) / 180);
+const GRIP_TILT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), (-70 * Math.PI) / 180);
 /** 素手で持つときの、手のひらの中心から指先の方向・手のひらの前への出し方(m) */
 const PALM_FORWARD = 0.09;
 const PALM_OUT = 0.03;
