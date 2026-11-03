@@ -530,6 +530,30 @@
               既定値は PICO 4 Ultra で合わせたものです。「戻す」でその値に戻ります
             </details>
           </div>
+          <details id="p-body-settings" class="webcam-settings" hidden>
+            <summary>📏 身長と目線(VR)</summary>
+            <div class="row">
+              <span class="ar-label">リアルの身長</span>
+              <label class="ar-label"><input type="checkbox" id="b-height-auto" /> 自動</label>
+              <input type="range" id="b-height" min="130" max="200" step="1" />
+              <span class="ar-label" id="b-height-value"></span>
+            </div>
+            <div class="row">
+              <span class="ar-label">アバターの身長(頭頂まで): <span id="b-stature">(アバターの読み込み待ち)</span></span>
+            </div>
+            <div class="row">
+              <span class="ar-label">目線の高さ</span>
+              <input type="range" id="b-eye" min="-10" max="10" step="1" />
+              <span class="ar-label" id="b-eye-value"></span>
+            </div>
+            <details class="note">
+              <summary>ⓘ 身長と目線について</summary>
+              ・<strong>リアルの身長を選ぶと</strong>、身長から見積もった立ったときの目の高さとアバターの目の高さで、大きさの比を決めます。位置合わせのときの姿勢や、立っている・座っているに左右されないので、毎回同じ感覚になります(ヘッドセットの床の高さが正しい前提です)<br />
+              ・<strong>自動</strong>は、位置合わせのときの目の高さから比を決めます。床の高さがずれている環境では、こちらの方が接地しやすいです<br />
+              ・<strong>目線の高さ</strong>は、自分に入ったときの視点を上下させます。自動のときは接地はずれません。身長を選んでいるときは、＋にするとアバターが下がる(浮いたときの補正に使えます)<br />
+              ・HMD内の操作パネルの「身長」「目線」からも変えられます。変えると、3秒数えてから位置を合わせ直します
+            </details>
+          </details>
           <details id="p-gesture-settings" class="webcam-settings" hidden>
             <summary>🖐 ジェスチャーと表情(VR・VRChat準拠)</summary>
             <p class="note">

@@ -77,7 +77,7 @@ export function setupBroadcastPreview(options: {
    * アバターを読み込んだとき。頭の高さはWebカメラ配信の頭の位置の基準に、
    * 表情の名前はWebカメラ配信の表情の割り当て先の一覧に使う
    */
-  onAvatarLoaded?: (info: { height: number; expressions: string[] }) => void;
+  onAvatarLoaded?: (info: { height: number; stature: number | null; expressions: string[] }) => void;
 }): PreviewHandle {
   const { canvas, statusEl, room, auth, broadcast } = options;
 
@@ -169,6 +169,20 @@ export function setupBroadcastPreview(options: {
     return offset.length() < 0.3 ? offset : null;
   }
 
+  /**
+   * アバターの身長(足元から頭頂まで、m)。レスト姿勢の形の高さを測る。
+   * リアルの身長を選んだときの比(アバターの身長 ÷ リアルの身長)に使う
+   */
+  function measureStature(target: Avatar): number | null {
+    avatarRoot.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(target.vrm.scene, true);
+    if (box.isEmpty()) return null;
+    const top = avatarRoot.worldToLocal(
+      new THREE.Vector3(avatarRoot.position.x, box.max.y, avatarRoot.position.z),
+    );
+    return top.y > 0.3 ? top.y : null;
+  }
+
   function setStatus(text: string): void {
     statusEl.textContent = text;
   }
@@ -194,8 +208,12 @@ export function setupBroadcastPreview(options: {
       // HMD配信の身長補正に使う(配信者の目の高さとの比を取る)
       broadcast.setAvatarHeight(next.restPose.height);
       broadcast.setAvatarEye(measureEyeOffset(next));
+      const stature = measureStature(next);
+      broadcast.setAvatarStature(stature);
+      updateBodyTitles();
       options.onAvatarLoaded?.({
         height: next.restPose.height,
+        stature,
         expressions: next.vrm.expressionManager?.expressions.map((e) => e.expressionName) ?? [],
       });
       setStatus('プレビュー中');
@@ -306,6 +324,46 @@ export function setupBroadcastPreview(options: {
         },
       },
       {
+        // リアルの身長。選ぶと、身長の比を「アバターの身長 ÷ リアルの身長」で決める(姿勢に左右されない)
+        title: '身長',
+        columns: 4,
+        options: [
+          { label: '−5', value: 'height--5', action: true },
+          { label: '−1', value: 'height--1', action: true },
+          { label: '＋1', value: 'height-1', action: true },
+          { label: '＋5', value: 'height-5', action: true },
+          { label: '自動', value: 'height-auto', action: true },
+        ],
+        initial: '',
+        onSelect: (value) => {
+          const body = broadcast.bodySettings;
+          if (value === 'height-auto') {
+            broadcast.setBodySettings({ ...body, realHeight: null });
+            return;
+          }
+          const base = body.realHeight ?? broadcast.estimatedRealHeight();
+          const step = Number(value.slice('height-'.length)) / 100;
+          broadcast.setBodySettings({ ...body, realHeight: Math.round((base + step) * 100) / 100 });
+        },
+      },
+      {
+        // 目線の高さの微調整。＋で一人称の視点が上がる
+        title: '目線',
+        columns: 3,
+        options: [
+          { label: '−1cm', value: 'eye--1', action: true },
+          { label: '0に戻す', value: 'eye-0', action: true },
+          { label: '＋1cm', value: 'eye-1', action: true },
+        ],
+        initial: '',
+        onSelect: (value) => {
+          const body = broadcast.bodySettings;
+          const eyeAdjust =
+            value === 'eye-0' ? 0 : body.eyeAdjust + Number(value.slice('eye-'.length)) / 100;
+          broadcast.setBodySettings({ ...body, eyeAdjust: Math.round(eyeAdjust * 100) / 100 });
+        },
+      },
+      {
         // 軸ごとに −/＋ を別のボタンにする(1つのボタンで一周させると、戻すのに何回も押す必要があった)
         title: '手首',
         columns: 2,
@@ -373,7 +431,28 @@ export function setupBroadcastPreview(options: {
       },
   ];
   const wristSection = panelSections.findIndex((section) => section.title === '手首');
+  const avatarSection = panelSections.findIndex((section) => section.title === 'アバター');
+  const heightSection = panelSections.findIndex((section) => section.title === '身長');
+  const eyeSection = panelSections.findIndex((section) => section.title === '目線');
   const panel = new SpatialPanel({ title: '配信', sections: panelSections });
+
+  /** 身長・目線の欄の見出しに、いまの値を出す(VRの中からは配信者ページが見えないため) */
+  function updateBodyTitles(): void {
+    const body = broadcast.bodySettings;
+    const stature = broadcast.avatarStature;
+    const avatarText = stature ? `(アバター${Math.round(stature * 100)}cm)` : '';
+    panel.setSectionTitle(
+      heightSection,
+      `身長 ${body.realHeight ? `${Math.round(body.realHeight * 100)}cm` : '自動'} ${avatarText}`,
+    );
+    const eye = Math.round(body.eyeAdjust * 100);
+    panel.setSectionTitle(eyeSection, `目線 ${eye > 0 ? '＋' : eye < 0 ? '−' : '±'}${Math.abs(eye)}cm`);
+  }
+  broadcast.bodyListeners.push(updateBodyTitles);
+  updateBodyTitles();
+  // 合わせ直すまでの秒読みを、アバターの欄の見出しに出す
+  broadcast.onCalibrationCountdown = (seconds) =>
+    panel.setSectionTitle(avatarSection, seconds ? `位置合わせまで ${seconds}…` : 'アバター');
   // 鏡は右前方に出すので、パネルは左前方の手が届く距離へ(向きはshow()が合わせる)
   panel.arPlacement = { position: new THREE.Vector3(0.45, 1.15, 0.7), yaw: 0 };
   const panelController = new XrPanelController(renderer, scene, [panel]);

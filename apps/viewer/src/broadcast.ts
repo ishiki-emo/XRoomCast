@@ -546,6 +546,49 @@ if (!key) {
   setupPreview();
 }
 
+/**
+ * HMD配信の身長と目線(この端末のブラウザに保存)。HMD内のパネルからも変えられ、どちらで変えても表示が揃う
+ */
+function setupBodySettings(hmd: HmdBroadcast): { setStature(height: number | null): void } {
+  const auto = document.getElementById('b-height-auto') as HTMLInputElement;
+  const height = document.getElementById('b-height') as HTMLInputElement;
+  const heightValue = document.getElementById('b-height-value') as HTMLElement;
+  const stature = document.getElementById('b-stature') as HTMLElement;
+  const eye = document.getElementById('b-eye') as HTMLInputElement;
+  const eyeValue = document.getElementById('b-eye-value') as HTMLElement;
+
+  const render = (): void => {
+    const body = hmd.bodySettings;
+    auto.checked = body.realHeight === null;
+    height.disabled = body.realHeight === null;
+    const cm = Math.round((body.realHeight ?? hmd.estimatedRealHeight()) * 100);
+    height.value = String(cm);
+    heightValue.textContent = body.realHeight === null ? '自動' : `${cm}cm`;
+    const eyeCm = Math.round(body.eyeAdjust * 100);
+    eye.value = String(eyeCm);
+    eyeValue.textContent = `${eyeCm > 0 ? '+' : ''}${eyeCm}cm`;
+  };
+  auto.addEventListener('change', () => {
+    hmd.setBodySettings({
+      ...hmd.bodySettings,
+      realHeight: auto.checked ? null : Number(height.value) / 100,
+    });
+  });
+  height.addEventListener('input', () => {
+    hmd.setBodySettings({ ...hmd.bodySettings, realHeight: Number(height.value) / 100 });
+  });
+  eye.addEventListener('input', () => {
+    hmd.setBodySettings({ ...hmd.bodySettings, eyeAdjust: Number(eye.value) / 100 });
+  });
+  hmd.bodyListeners.push(render);
+  render();
+  return {
+    setStature: (value) => {
+      stature.textContent = value ? `${Math.round(value * 100)}cm` : '(アバターの読み込み待ち)';
+    },
+  };
+}
+
 /** マイクの使用の許可だけ取る(マイクはすぐ閉じる)。断られても、配信はマイクなしで続けられる */
 async function requestMicPermission(): Promise<void> {
   try {
@@ -826,6 +869,7 @@ function setupPreview(): void {
   webcamBroadcast.onStatus = (text) => (previewStatus.textContent = text);
   const webcamSettings = setupWebcamSettings(webcamBroadcast);
   const gestureSettings = setupGestureSettings(hmdBroadcast);
+  const bodySettings = setupBodySettings(hmdBroadcast);
 
   const preview = setupBroadcastPreview({
     canvas: document.getElementById('p-canvas') as HTMLCanvasElement,
@@ -833,8 +877,9 @@ function setupPreview(): void {
     room: config.room,
     auth,
     broadcast: hmdBroadcast,
-    onAvatarLoaded: ({ height, expressions }) => {
+    onAvatarLoaded: ({ height, stature, expressions }) => {
       webcamBroadcast.setAvatarHeight(height);
+      bodySettings.setStature(stature);
       webcamSettings.setExpressions(expressions);
       gestureSettings.setExpressions(expressions);
     },
@@ -852,6 +897,7 @@ function setupPreview(): void {
     vrButton.hidden = !vr;
     hmdNote.hidden = !ar && !vr;
     (document.getElementById('p-gesture-settings') as HTMLElement).hidden = !ar && !vr;
+    (document.getElementById('p-body-settings') as HTMLElement).hidden = !ar && !vr;
   });
 
   /** マイクを始める(配信の開始と一緒に。音声とポーズは別経路) */
