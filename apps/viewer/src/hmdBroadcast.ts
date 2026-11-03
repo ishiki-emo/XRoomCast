@@ -210,11 +210,21 @@ export class HmdBroadcast {
 
   /** SFUへパブリッシャーとして接続する */
   async connect(): Promise<void> {
-    await this.publisher.connect();
-    this.expressions.restart();
-    this.lastExpressionAt = performance.now();
-    this.onStatus?.('HMDから配信中');
+    this.connecting = this.publisher.connect().then(() => {
+      this.expressions.restart();
+      this.lastExpressionAt = performance.now();
+      this.onStatus?.('HMDから配信中');
+    });
+    try {
+      await this.connecting;
+    } catch (error) {
+      this.connecting = null;
+      throw error;
+    }
   }
+
+  /** 接続中・接続済みなら、その完了(席の登録まで)。接続していなければ null */
+  connecting: Promise<void> | null = null;
 
   /**
    * 開始時の姿勢を基準にする。
@@ -399,6 +409,7 @@ export class HmdBroadcast {
   }
 
   close(): void {
+    this.connecting = null;
     this.publisher.close();
     this.calibration = null;
     this.onStatus?.('HMD配信を停止しました');

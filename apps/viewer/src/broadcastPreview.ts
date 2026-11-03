@@ -286,12 +286,29 @@ export function setupBroadcastPreview(options: {
 
   async function enterHmd(mode: XrMode): Promise<void> {
     if (xrSession) return;
-    const session = await navigator.xr!.requestSession(
-      mode === 'ar' ? 'immersive-ar' : 'immersive-vr',
-      // hand-tracking は要求しないと素手の関節が取れない(コントローラだけになる)。
-      // body-tracking は Quest の実験機能で、開始時に許可を求められる
-      { optionalFeatures: ['local-floor', 'hand-tracking', 'body-tracking'] },
+    // SFUへの接続(数秒〜十数秒)は、VRに入る準備と並行して始める。VRのセッションがいらないため
+    startedAt = performance.now();
+    firstXrFrameAt = null;
+    const connected = broadcast.connect().then(
+      () => logStartup('配信開始'),
+      (error: unknown) => {
+        setStatus(`HMD配信の接続に失敗しました(VRは続けられます): ${String(error)}`);
+      },
     );
+    let session: XRSession;
+    try {
+      session = await navigator.xr!.requestSession(
+        mode === 'ar' ? 'immersive-ar' : 'immersive-vr',
+        // hand-tracking は要求しないと素手の関節が取れない(コントローラだけになる)。
+        // body-tracking は Quest の実験機能で、開始時に許可を求められる
+        { optionalFeatures: ['local-floor', 'hand-tracking', 'body-tracking'] },
+      );
+    } catch (error) {
+      // VRに入れなかったら、先に始めた接続も閉じる(席だけ取ったままにしない)
+      void connected.then(() => broadcast.close());
+      throw error;
+    }
+    logStartup('VRのセッション開始');
     xrSession = session;
     // パススルーでは背景を消して現実を見せる。VRは暗い背景とグリッドを残す
     scene.background = mode === 'ar' ? null : backgroundColor;
@@ -302,9 +319,6 @@ export function setupBroadcastPreview(options: {
     // 接続は裏で進め、つながるまでは送らないだけにする(sendFrame は接続前なら何もしない)
     renderer.xr.setReferenceSpaceType('local-floor');
     await renderer.xr.setSession(session);
-    broadcast.connect().catch((error: unknown) => {
-      setStatus(`HMD配信の接続に失敗しました(VRは続けられます): ${String(error)}`);
-    });
     // パネルを指していないときのトリガーは位置合わせに使う
     session.addEventListener('select', (event) => {
       if (panelController.pointing) return;
@@ -325,6 +339,21 @@ export function setupBroadcastPreview(options: {
       avatarRoot.visible = true;
       setStatus('HMD配信を終了しました');
     });
+  }
+
+  /**
+   * VRの開始にかかった時間。ボタンを押してから「VRのセッション開始」「最初の絵」「配信開始」までを
+   * コンソールと状態表示に出す(開始が遅いとき、どこで待っているかを見分ける手がかり)
+   */
+  let startedAt = 0;
+  let firstXrFrameAt: number | null = null;
+  const startupSteps: string[] = [];
+  function logStartup(step: string): void {
+    const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
+    console.info(`[hmd] ${step}: ${seconds}秒`);
+    if (step === 'VRのセッション開始') startupSteps.length = 0;
+    startupSteps.push(`${step} ${seconds}秒`);
+    setStatus(`HMD配信: ${startupSteps.join(' → ')}`);
   }
 
   function exitHmd(): void {
@@ -391,6 +420,10 @@ export function setupBroadcastPreview(options: {
     panelController.update();
 
     // HMDで入っている間は自分の姿勢を配信する
+    if (frame && xrSession && firstXrFrameAt === null) {
+      firstXrFrameAt = performance.now();
+      logStartup('最初の絵');
+    }
     if (frame && xrSession) {
       const refSpace = renderer.xr.getReferenceSpace();
       if (refSpace) {

@@ -540,6 +540,16 @@ if (!key) {
   setupPreview();
 }
 
+/** マイクの使用が許可済みか(確かめられないブラウザでは false = 先に許可を取る) */
+async function micPermissionGranted(): Promise<boolean> {
+  try {
+    const status = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+    return status.state === 'granted';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * HMD配信のジェスチャーと表情(VRChat準拠)。ジェスチャーごとに、左右の手それぞれの表情を割り当てる。
  * 割り当てはこの端末のブラウザにだけ保存する(HMDのブラウザで配信するなら、HMDのブラウザで設定する)
@@ -830,18 +840,24 @@ function setupPreview(): void {
 
   const enter = (mode: XrMode, button: HTMLButtonElement): void => {
     button.disabled = true;
-    // HMDに入ると画面のボタンを押せなくなるので、マイクはここで入れておく。
-    // 音声とポーズは別経路で配信されるため同時に成立する
-    setMicLive(true)
-      .catch(() => {
-        previewStatus.textContent = 'マイクを開始できませんでした(そのまま配信します)';
+    // HMDに入ると画面のボタンを押せなくなるので、マイクもここで入れる(音声とポーズは別経路)。
+    // マイクの許可が済んでいれば、マイクの開始(音声の接続)はVRに入るのと並行して進める。
+    // 許可がまだなら、許可の確認がVRの裏に隠れないよう、先にマイクを始めてから入る
+    const startMic = () =>
+      setMicLive(true)
+        .catch(() => {
+          previewStatus.textContent = 'マイクを開始できませんでした(そのまま配信します)';
+        })
+        .then(() => preview.setMicLabel(live));
+    void micPermissionGranted()
+      .then(async (granted) => {
+        const mic = granted ? startMic() : await startMic();
+        await preview.enterHmd(mode);
+        await mic;
+        // ポーズ配信の登録で席が決まってから、マイクの「自動」を自分の席へ合わせ直す
+        await hmdBroadcast.connecting;
+        await realignMicSeat();
       })
-      .then(() => {
-        preview.setMicLabel(live);
-        return preview.enterHmd(mode);
-      })
-      // ポーズ配信の登録で席が決まったので、マイクの「自動」を自分の席へ合わせ直す
-      .then(() => realignMicSeat())
       .catch((error: unknown) => {
         previewStatus.textContent = `HMD配信を開始できませんでした: ${String(error)}`;
       })

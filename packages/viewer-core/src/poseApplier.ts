@@ -338,7 +338,10 @@ export class PoseApplier {
             // スプレッド: 付け根関節のY軸回りで扇状に開く(0.5が自然位置)
             if (j === 0) {
               const factor = SPREAD_FACTORS[fingerIndex - 1]!;
-              const spreadSign = side === 'left' ? 1 : -1;
+              // 開く(spread > 0.5)と人差し指が親指側(+Z)へ、小指が反対側へ振れる向き。
+              // Y軸回りの正の回転は、左手の指先(+X)を -Z へ、右手の指先(-X)を +Z へ回すので、
+              // 左手は負・右手は正にする(以前は逆で、開くほど人差し指が中指に重なっていた)
+              const spreadSign = side === 'left' ? -1 : 1;
               const amount = (spread - 0.5) * 2 * (spread > 0.5 ? SPREAD_OPEN_MAX : SPREAD_CLOSE_MAX);
               _spreadQuat.setFromAxisAngle(Y_AXIS, spreadSign * factor * amount);
               joint.quaternion.premultiply(_spreadQuat);
