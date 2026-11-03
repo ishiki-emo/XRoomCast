@@ -248,7 +248,23 @@ export function setupBroadcastPreview(options: {
         onSelect: (value) => handle.onWristChange?.(value.slice(-1) as 'x' | 'y' | 'z', 15),
       },
       {
+        // 「手で切替」はジェスチャーに割り当てた表情、ほかは選んだ表情に固定(ジェスチャーより優先)
+        title: '表情',
+        columns: 3,
+        options: [
+          { label: '手で切替', value: 'gesture' },
+          { label: '喜', value: 'happy' },
+          { label: '怒', value: 'angry' },
+          { label: '哀', value: 'sad' },
+          { label: '楽', value: 'relaxed' },
+          { label: '驚', value: 'surprised' },
+        ],
+        initial: 'gesture',
+        onSelect: (value) => broadcast.setExpressionOverride(value === 'gesture' ? null : value),
+      },
+      {
         title: 'マイク',
+        columns: 2,
         options: [
           { label: 'ON', value: 'mic-on' },
           { label: 'OFF', value: 'mic-off' },

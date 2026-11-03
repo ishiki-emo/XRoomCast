@@ -12,8 +12,9 @@
  * カメラの映像は推定に使うだけで、どこにも送らない。
  */
 import * as THREE from 'three';
-import type { ExpressionEntry, FingerCurls, Packet, Quat, Vec3 } from '@xroomcast/protocol';
+import type { FingerCurls, Packet, Quat, Vec3 } from '@xroomcast/protocol';
 import type { AuthProvider, SampledFrame } from '@xroomcast/sync';
+import { ExpressionChannel } from './expressionChannel';
 import { OneEuroFilter } from './oneEuroFilter';
 import { PosePublisher } from './posePublisher';
 import {
@@ -41,8 +42,6 @@ import type { TrackingResult, WebcamTracker } from './webcamTracking';
 const SEND_INTERVAL_MS = 1000 / 30;
 /** 指と表情は2パケットに1回(15Hz)。ブリッジと同じ */
 const DETAIL_EVERY = 2;
-/** 辞書と全表情の再送間隔。SFUは一方向なので、途中から見始めた人にも届くよう定期的に送る */
-const KEYFRAME_MS = 5000;
 /** 顔がこれだけ見つからなければ送るのをやめる(視聴側は5秒で待機モーションへ戻る) */
 const FACE_LOST_MS = 1500;
 /** 頭の位置の動きの上限(m)。顔の推定が飛んだときにアバターが大きく動かないように */
@@ -178,14 +177,8 @@ export class WebcamBroadcast {
     left: restHand('left', DEFAULT_HEAD_HEIGHT),
     right: restHand('right', DEFAULT_HEAD_HEIGHT),
   };
-  /**
-   * 送る表情の名前。番号はこの並び順。型の割り当て先(モデル独自の表情など)はここへ足していき、
-   * セッション中は減らさない(消した型の表情も0を送り続けて、視聴側で出たままにしない)
-   */
-  private readonly expressionNames: string[] = [...EXPRESSION_NAMES];
-  private readonly expressions = new Map<string, number>();
-  private readonly sentExpressions = new Map<string, number>();
-  private lastKeyframeAt = -Infinity;
+  /** 送る表情。型の割り当て先(モデル独自の表情など)はここへ足していく(expressionChannel.ts) */
+  private readonly expressions = new ExpressionChannel(EXPRESSION_NAMES);
 
   constructor(room: string, auth: AuthProvider, pid: () => string) {
     this.publisher = new PosePublisher(room, auth, pid, (text) => this.onStatus?.(text));
@@ -286,15 +279,7 @@ export class WebcamBroadcast {
     }));
     this.templateWeights.length = this.templates.length;
     this.templateWeights.fill(0);
-    let added = false;
-    for (const { target } of this.templates) {
-      if (!this.expressionNames.includes(target) && this.expressionNames.length < 255) {
-        this.expressionNames.push(target);
-        added = true;
-      }
-    }
-    // 名前が増えたら、すぐに辞書を送り直す(視聴側が新しい表情を知らないままにならないように)
-    if (added) this.lastKeyframeAt = -Infinity;
+    for (const { target } of this.templates) this.expressions.ensure(target);
 
     const scale = smoothingScale(this.settings.smoothing);
     const set = (filter: OneEuroFilter, [minCutoff, beta]: readonly [number, number]) =>
@@ -345,7 +330,7 @@ export class WebcamBroadcast {
     await this.publisher.connect();
     this.rest = null;
     this.lastFaceAt = performance.now();
-    this.lastKeyframeAt = -Infinity;
+    this.expressions.restart();
     this.detections = 0;
     this.lastRateAt = performance.now();
     this.onStatus?.('Webカメラから配信中(正面を向いてください)');
@@ -490,14 +475,13 @@ export class WebcamBroadcast {
       this.templateWeights[i] = weight;
       values.set(target, Math.max(values.get(target) ?? 0, weight));
     });
+    const names = this.expressions.expressionNames;
     const filtered = this.expressionFilter.filter(
-      this.expressionNames.map((name) => values.get(name) ?? 0),
+      names.map((name) => values.get(name) ?? 0),
       time,
       _values,
     );
-    this.expressionNames.forEach((name, i) => {
-      this.expressions.set(name, Math.min(1, Math.max(0, filtered[i]!)));
-    });
+    names.forEach((name, i) => this.expressions.set(name, filtered[i]!));
   }
 
   private send(now: number): void {
@@ -525,14 +509,7 @@ export class WebcamBroadcast {
         leftSpread: this.hands.left.spread,
         rightSpread: this.hands.right.spread,
       };
-      const keyframe = now - this.lastKeyframeAt >= KEYFRAME_MS;
-      if (keyframe) {
-        this.lastKeyframeAt = now;
-        packet.dictionary = this.expressionNames.map((name, id) => ({ id, name }));
-        this.sentExpressions.clear();
-      }
-      const changed = this.changedExpressions();
-      if (changed.length > 0) packet.expressions = changed;
+      this.expressions.attachTo(packet, now);
     }
     this.publisher.send(packet, now);
   }
@@ -559,21 +536,8 @@ export class WebcamBroadcast {
         leftSpread: this.hands.left.spread,
         rightSpread: this.hands.right.spread,
       },
-      expressions: this.expressions,
+      expressions: this.expressions.current,
     };
-  }
-
-  /** 前回送った値から変わった表情だけ(視聴側は受け取った値を保持する) */
-  private changedExpressions(): ExpressionEntry[] {
-    const entries: ExpressionEntry[] = [];
-    this.expressionNames.forEach((name, id) => {
-      const value = this.expressions.get(name) ?? 0;
-      const sent = this.sentExpressions.get(name);
-      if (sent !== undefined && Math.abs(sent - value) < 1 / 255) return;
-      this.sentExpressions.set(name, value);
-      entries.push({ id, value });
-    });
-    return entries;
   }
 
   stop(): void {

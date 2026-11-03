@@ -32,6 +32,8 @@ export interface PanelOption {
 export interface PanelSection {
   title: string;
   options: PanelOption[];
+  /** 1行に並べるボタンの数(既定1)。短いラベルのボタンが多い欄を詰めて並べる */
+  columns?: number;
   initial: string;
   onSelect: (value: string) => void;
 }
@@ -81,16 +83,20 @@ export class SpatialPanel implements ArPanel {
     spec.sections.forEach((section, sectionIndex) => {
       this.sectionTitleY.push(y);
       y += SECTION_TITLE_H;
-      section.options.forEach((option) => {
+      const columns = Math.max(1, section.columns ?? 1);
+      const width = (CANVAS_W - PAD * 2 - BUTTON_GAP * (columns - 1)) / columns;
+      section.options.forEach((option, i) => {
+        const column = i % columns;
         this.buttons.push({
-          x: PAD,
+          x: PAD + column * (width + BUTTON_GAP),
           y,
-          w: CANVAS_W - PAD * 2,
+          w: width,
           h: BUTTON_H,
           option,
           section: sectionIndex,
         });
-        y += BUTTON_H + BUTTON_GAP;
+        // 行の最後のボタン(か、欄の最後)で次の行へ
+        if (column === columns - 1 || i === section.options.length - 1) y += BUTTON_H + BUTTON_GAP;
       });
       y += SECTION_GAP - BUTTON_GAP;
     });
@@ -148,8 +154,17 @@ export class SpatialPanel implements ArPanel {
         ctx.stroke();
       }
       ctx.fillStyle = isActive ? '#bff0cf' : '#eeeeee';
-      ctx.font = '28px sans-serif';
-      ctx.fillText((isActive ? '● ' : '') + b.option.label, b.x + 22, b.y + b.h / 2);
+      const label = (isActive ? '● ' : '') + b.option.label;
+      if (b.w < CANVAS_W - PAD * 2) {
+        // 並べたボタンは幅が狭いので、文字を小さくして中央に置く
+        ctx.font = '25px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(label, b.x + b.w / 2, b.y + b.h / 2);
+        ctx.textAlign = 'left';
+      } else {
+        ctx.font = '28px sans-serif';
+        ctx.fillText(label, b.x + 22, b.y + b.h / 2);
+      }
     });
     this.texture.needsUpdate = true;
   }

@@ -12,6 +12,11 @@
  * ボディトラッキングが使える端末(Quest)では、腰・胸・足も体セクションで送る
  * (bodyTracking.ts)。視聴者側は頭からの腰の推定をやめ、送られた体をそのまま使う。
  *
+ * 手の形と表情は VRChat 準拠のハンドジェスチャーで決める(vrGestures.ts / gestureExpressions.ts)。
+ * コントローラはグリップ・トリガー・親指からジェスチャーを判定して指の形を作り、
+ * 素手は指をそのまま送りつつ、指の形から判定したジェスチャーを表情の切り替えに使う。
+ * 操作パネルで選んだ表情は、ジェスチャーより優先する。
+ *
  * SFUへの接続と送信は posePublisher.ts(Webカメラ配信と共有)。
  */
 import * as THREE from 'three';
@@ -24,19 +29,36 @@ import {
 } from '@xroomcast/protocol';
 import type { AuthProvider } from '@xroomcast/sync';
 import { readBody, type BodyFrame } from './bodyTracking';
+import { ExpressionChannel } from './expressionChannel';
+import {
+  GestureExpressionMixer,
+  type GestureExpressionSettings,
+} from './gestureExpressions';
 import { HandReader, WRIST_TO_HAND } from './handTracking';
 import { PosePublisher } from './posePublisher';
+import {
+  GESTURE,
+  GestureStabilizer,
+  gestureFromController,
+  gestureFromCurls,
+  gesturePose,
+  readController,
+  type GestureReading,
+} from './vrGestures';
 
 const SEND_INTERVAL_MS = 1000 / 30;
 /** 指は2パケットに1回(15Hz)。ブリッジと同じ頻度で、視聴者側も保持で滑らかに見える */
 const FINGER_EVERY = 2;
 
 /**
- * 素手でないときの指。
- * 視聴者は最後に届いた指を保持し続けるため、素手からコントローラへ
- * 持ち替えたら必ず上書きする(しないと最後の手の形で固まる)
+ * コントローラの指の形を、ジェスチャーの形へ寄せていく割合(1フレームあたり。30Hz で約0.1秒)。
+ * ジェスチャーが変わった瞬間に指がパッと切り替わると不自然に見えるため
  */
-const CONTROLLER_CURLS: FingerCurls = [0.3, 0.45, 0.5, 0.5, 0.5];
+const CURL_FOLLOW = 0.35;
+/** ジェスチャーが切り替わるまでに続けて同じ判定が要るフレーム数(コントローラは入力が明確なので短く) */
+const CONTROLLER_GESTURE_FRAMES = 2;
+const HAND_GESTURE_FRAMES = 4;
+const NEUTRAL: GestureReading = { gesture: GESTURE.neutral, weight: 0 };
 /** 手が取れず体側に下ろしているとき(待機モーションと同じ軽い曲げ) */
 const RELAXED_CURLS: FingerCurls = [0.11, 0.16, 0.16, 0.16, 0.18];
 
@@ -127,6 +149,41 @@ export class HmdBroadcast {
   /** 表示中のアバターの頭の高さ(m)。身長補正に使う */
   private avatarHeight: number | null = null;
   private readonly handReader = new HandReader();
+  private readonly gestureMixer = new GestureExpressionMixer();
+  private readonly expressions = new ExpressionChannel(this.gestureMixer.expressionNames());
+  private readonly stabilizers = {
+    controller: {
+      left: new GestureStabilizer(CONTROLLER_GESTURE_FRAMES),
+      right: new GestureStabilizer(CONTROLLER_GESTURE_FRAMES),
+    },
+    hand: {
+      left: new GestureStabilizer(HAND_GESTURE_FRAMES),
+      right: new GestureStabilizer(HAND_GESTURE_FRAMES),
+    },
+  };
+  /** いま送っているコントローラの指(ジェスチャーの形へなめらかに寄せる) */
+  private readonly controllerCurls: Record<'left' | 'right', FingerCurls> = {
+    left: [...RELAXED_CURLS] as FingerCurls,
+    right: [...RELAXED_CURLS] as FingerCurls,
+  };
+  private readonly controllerSpread = { left: 0.5, right: 0.5 };
+  private lastExpressionAt = 0;
+
+  /** ジェスチャーへの表情の割り当て(配信者ページで変える) */
+  get gestureSettings(): Readonly<GestureExpressionSettings> {
+    return this.gestureMixer.currentSettings;
+  }
+
+  setGestureSettings(settings: GestureExpressionSettings): void {
+    this.gestureMixer.setSettings(settings);
+    for (const name of this.gestureMixer.expressionNames()) this.expressions.ensure(name);
+  }
+
+  /** 操作パネルで選んだ表情(null でジェスチャーに戻す) */
+  setExpressionOverride(expression: string | null): void {
+    this.gestureMixer.setOverride(expression);
+    if (expression) this.expressions.ensure(expression);
+  }
 
   /** アバターが切り替わったら教える(次のキャリブレーションから反映される) */
   setAvatarHeight(height: number): void {
@@ -154,6 +211,8 @@ export class HmdBroadcast {
   /** SFUへパブリッシャーとして接続する */
   async connect(): Promise<void> {
     await this.publisher.connect();
+    this.expressions.restart();
+    this.lastExpressionAt = performance.now();
     this.onStatus?.('HMDから配信中');
   }
 
@@ -258,6 +317,7 @@ export class HmdBroadcast {
       right: RELAXED_CURLS,
     };
     const spread = { left: 0.5, right: 0.5 };
+    const gestures: Record<'left' | 'right', GestureReading> = { left: NEUTRAL, right: NEUTRAL };
     for (const source of session.inputSources) {
       const side = source.handedness;
       if (side !== 'left' && side !== 'right') continue;
@@ -272,6 +332,12 @@ export class HmdBroadcast {
         hands[side] = this.toNode(reading.wrist.transform, null, WRIST_TO_HAND[side]);
         curls[side] = reading.curls;
         spread[side] = reading.spread;
+        // 素手は指をそのまま送り、指の形から読んだジェスチャーは表情にだけ使う
+        const fromHand = gestureFromCurls(reading.curls);
+        gestures[side] = {
+          gesture: this.stabilizers.hand[side].update(fromHand.gesture),
+          weight: fromHand.weight,
+        };
         continue;
       }
 
@@ -281,8 +347,28 @@ export class HmdBroadcast {
       if (!pose) continue;
       _grip.copy(GRIP_TO_HAND[side]).multiply(WRIST_OFFSET[side]);
       hands[side] = this.toNode(pose.transform, null, _grip);
-      curls[side] = CONTROLLER_CURLS;
+      // コントローラは、グリップ・トリガー・親指から VRChat のジェスチャーを読んで指の形を作る。
+      // 視聴者は最後に届いた指を保持し続けるので、素手から持ち替えたときもここで必ず上書きされる
+      const input = source.gamepad ? readController(source.gamepad) : null;
+      if (input) {
+        const read = gestureFromController(input);
+        gestures[side] = {
+          gesture: this.stabilizers.controller[side].update(read.gesture),
+          weight: read.weight,
+        };
+        const target = gesturePose(gestures[side], input);
+        const current = this.controllerCurls[side];
+        for (let f = 0; f < 5; f++) current[f] = current[f]! + (target.curls[f]! - current[f]!) * CURL_FOLLOW;
+        this.controllerSpread[side] += (target.spread - this.controllerSpread[side]) * CURL_FOLLOW;
+      }
+      curls[side] = [...this.controllerCurls[side]] as FingerCurls;
+      spread[side] = this.controllerSpread[side];
     }
+
+    // 表情: パネルで選んだ表情か、ジェスチャーに割り当てた表情
+    const expressionValues = this.gestureMixer.update(gestures, (now - this.lastExpressionAt) / 1000);
+    this.lastExpressionAt = now;
+    for (const [name, value] of expressionValues) this.expressions.set(name, value);
 
     // コントローラが片方でも取れないときは、体側に下ろした位置で埋める
     const fallback = (sign: number): PoseNode => ({
@@ -307,6 +393,7 @@ export class HmdBroadcast {
         leftSpread: spread.left,
         rightSpread: spread.right,
       };
+      this.expressions.attachTo(packet, now);
     }
     this.publisher.send(packet, now);
   }

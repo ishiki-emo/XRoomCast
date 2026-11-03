@@ -13,9 +13,44 @@ import { readConfig, sameOriginWebSocketUrl, type RoomSettings } from './config'
 import { setupRoomSettings } from './roomSettings';
 import { setupStageConsole } from './stageConsole';
 import { withRoom } from '@xroomcast/sync';
+import { PRESET_EXPRESSIONS, defaultGestureSettings } from './gestureExpressions';
 import { DEFAULT_WRIST_OFFSET, HmdBroadcast, setWristOffset } from './hmdBroadcast';
+import { GESTURE_INFO } from './vrGestures';
 import { RECORD_SECONDS, WebcamBroadcast } from './webcamBroadcast';
 import type { PeerState } from '@xroomcast/viewer-core';
+
+// 表情の候補(Webカメラの表情登録とHMDのジェスチャーで共有)。ページの初期化はモジュールの読み込み中に
+// 走る(下の setupPreview)ので、そこから使う定数はここで先に用意しておく
+/** 割り当て先にしない表情(口・まばたき・視線は推定や他の仕組みで動かすため) */
+const RESERVED_EXPRESSIONS = new Set([
+  'aa',
+  'ih',
+  'ou',
+  'ee',
+  'oh',
+  'blink',
+  'blinkLeft',
+  'blinkRight',
+  'lookUp',
+  'lookDown',
+  'lookLeft',
+  'lookRight',
+  'neutral',
+]);
+const EXPRESSION_LABELS: Record<string, string> = {
+  happy: 'happy(喜)',
+  angry: 'angry(怒)',
+  sad: 'sad(哀)',
+  relaxed: 'relaxed(楽)',
+  surprised: 'surprised(驚)',
+};
+const expressionLabel = (name: string) => EXPRESSION_LABELS[name] ?? name;
+
+/** アバターの表情から、割り当て先に選べるもの(アバターが未読み込みなら標準の5つ) */
+function usableExpressions(names: readonly string[]): string[] {
+  const usable = names.filter((name) => !RESERVED_EXPRESSIONS.has(name));
+  return usable.length > 0 ? usable : [...PRESET_EXPRESSIONS];
+}
 
 const CF_STUN_URL = 'stun:stun.cloudflare.com:3478';
 const TRACK_NAME = 'mic';
@@ -506,6 +541,62 @@ if (!key) {
 }
 
 /**
+ * HMD配信のジェスチャーと表情(VRChat準拠)。ジェスチャーごとに、左右の手それぞれの表情を割り当てる。
+ * 割り当てはこの端末のブラウザにだけ保存する(HMDのブラウザで配信するなら、HMDのブラウザで設定する)
+ */
+function setupGestureSettings(hmd: HmdBroadcast): { setExpressions(names: string[]): void } {
+  const table = document.getElementById('g-table') as HTMLTableSectionElement;
+  const reset = document.getElementById('g-reset') as HTMLButtonElement;
+  let expressions: string[] = [...PRESET_EXPRESSIONS];
+
+  const render = (): void => {
+    const settings = hmd.gestureSettings;
+    table.replaceChildren(
+      ...GESTURE_INFO.map(({ gesture, label, howTo }) => {
+        const row = document.createElement('tr');
+        const name = document.createElement('td');
+        name.textContent = label;
+        name.title = `コントローラ: ${howTo}`;
+        row.append(name);
+        for (const side of ['left', 'right'] as const) {
+          const cell = document.createElement('td');
+          const select = document.createElement('select');
+          const current = settings[side][gesture] ?? '';
+          // アバターに無い表情が割り当てられていても、消さずに選択肢に残す
+          const names = current && !expressions.includes(current) ? [...expressions, current] : expressions;
+          select.append(
+            new Option('(なし)', '', false, current === ''),
+            ...names.map((n) => new Option(expressionLabel(n), n, false, n === current)),
+          );
+          select.addEventListener('change', () => {
+            const next = {
+              left: { ...hmd.gestureSettings.left },
+              right: { ...hmd.gestureSettings.right },
+            };
+            next[side][gesture] = select.value || null;
+            hmd.setGestureSettings(next);
+          });
+          cell.append(select);
+          row.append(cell);
+        }
+        return row;
+      }),
+    );
+  };
+  reset.addEventListener('click', () => {
+    hmd.setGestureSettings(defaultGestureSettings());
+    render();
+  });
+  render();
+  return {
+    setExpressions: (names) => {
+      expressions = usableExpressions(names);
+      render();
+    },
+  };
+}
+
+/**
  * Webカメラ配信の個人設定(このブラウザにだけ保存)。滑らかさ・手の推定のオン/オフ・
  * 普通の顔の登録・表情の型の登録(この顔 → VRMのこの表情)・書き出しと読み込み
  */
@@ -524,41 +615,14 @@ function setupWebcamSettings(webcam: WebcamBroadcast): { setExpressions(names: s
   const importButton = document.getElementById('w-import') as HTMLButtonElement;
   const importFile = document.getElementById('w-import-file') as HTMLInputElement;
 
-  /** 型の割り当て先にしない表情(口・まばたき・視線は推定や他の仕組みで動かすため) */
-  const RESERVED = new Set([
-    'aa',
-    'ih',
-    'ou',
-    'ee',
-    'oh',
-    'blink',
-    'blinkLeft',
-    'blinkRight',
-    'lookUp',
-    'lookDown',
-    'lookLeft',
-    'lookRight',
-    'neutral',
-  ]);
-  const PRESETS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
-  const LABELS: Record<string, string> = {
-    happy: 'happy(喜)',
-    angry: 'angry(怒)',
-    sad: 'sad(哀)',
-    relaxed: 'relaxed(楽)',
-    surprised: 'surprised(驚)',
-  };
-  const label = (name: string) => LABELS[name] ?? name;
-
+  const label = expressionLabel;
   const setExpressions = (names: string[]): void => {
-    const usable = names.filter((name) => !RESERVED.has(name));
-    const options = usable.length > 0 ? usable : PRESETS;
     const previous = target.value;
     target.replaceChildren(
-      ...options.map((name) => new Option(label(name), name, false, name === previous)),
+      ...usableExpressions(names).map((name) => new Option(label(name), name, false, name === previous)),
     );
   };
-  setExpressions(PRESETS);
+  setExpressions([]);
 
   const meters: HTMLElement[] = [];
   const renderTemplates = (): void => {
@@ -735,6 +799,7 @@ function setupPreview(): void {
   const webcamBroadcast = new WebcamBroadcast(config.room, auth, currentPid);
   webcamBroadcast.onStatus = (text) => (previewStatus.textContent = text);
   const webcamSettings = setupWebcamSettings(webcamBroadcast);
+  const gestureSettings = setupGestureSettings(hmdBroadcast);
 
   const preview = setupBroadcastPreview({
     canvas: document.getElementById('p-canvas') as HTMLCanvasElement,
@@ -745,6 +810,7 @@ function setupPreview(): void {
     onAvatarLoaded: ({ height, expressions }) => {
       webcamBroadcast.setAvatarHeight(height);
       webcamSettings.setExpressions(expressions);
+      gestureSettings.setExpressions(expressions);
     },
   });
   onMicTrack = (track) => preview.setMicTrack(track);
@@ -759,6 +825,7 @@ function setupPreview(): void {
     arButton.hidden = !ar;
     vrButton.hidden = !vr;
     hmdNote.hidden = !ar && !vr;
+    (document.getElementById('p-gesture-settings') as HTMLElement).hidden = !ar && !vr;
   });
 
   const enter = (mode: XrMode, button: HTMLButtonElement): void => {
