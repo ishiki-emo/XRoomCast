@@ -37,10 +37,15 @@ export function setupAvatarConsole(options: {
   auth: AuthProvider;
   /** 「自動(自分の席)」の解決。自分の配信元が居なければnullを返す */
   resolveOwnSlot?: () => Promise<number | null>;
+  /**
+   * 自分の配信元がまだ居ないときに仮に使う席(空いていれば席0、埋まっていればnull)。
+   * 一人配信なら配信開始で席0になるので、開始前のアバター設定がそのまま当たる
+   */
+  resolveVacantSlot?: () => Promise<number | null>;
   /** 操作対象の席が変わったとき(鏡のプレビューが追従する)。nullは未確定 */
   onSeatChanged?: (slot: number | null) => void;
 }): void {
-  const { room, auth, resolveOwnSlot, onSeatChanged } = options;
+  const { room, auth, resolveOwnSlot, resolveVacantSlot, onSeatChanged } = options;
 
   const statusEl = document.getElementById('a-status') as HTMLDivElement;
   const fileInput = document.getElementById('a-file') as HTMLInputElement;
@@ -57,6 +62,8 @@ export function setupAvatarConsole(options: {
   let slotChoice: 'auto' | number = slotSelect && slotSelect.value !== 'auto' ? Number(slotSelect.value) || 0 : 'auto';
   /** 「自動」の解決結果(自分の配信元が居なければnull) */
   let autoSlot: number | null = null;
+  /** 「自動」が未解決のときの仮の席(resolveVacantSlot の結果) */
+  let vacantSlot: number | null = null;
   /** 席番号 → 配信中のVRMキー */
   let currentKeys: Record<string, string> = {};
   let defaultKey: string | null = null;
@@ -65,7 +72,13 @@ export function setupAvatarConsole(options: {
 
   /** いま操作対象になっている席番号(自動が未解決ならnull) */
   function effectiveSlot(): number | null {
-    return slotChoice === 'auto' ? autoSlot : slotChoice;
+    return slotChoice === 'auto' ? (autoSlot ?? vacantSlot) : slotChoice;
+  }
+
+  /** 「自動」を解決し直す。自分の配信元が居なければ、仮の席も引く */
+  async function resolveAuto(): Promise<void> {
+    autoSlot = resolveOwnSlot ? await resolveOwnSlot() : null;
+    vacantSlot = autoSlot === null && resolveVacantSlot ? await resolveVacantSlot() : null;
   }
 
   /** 操作対象の席の変化を外へ知らせる(同じ値の連打は抑える) */
@@ -159,7 +172,8 @@ export function setupAvatarConsole(options: {
   /** 席の表記(「自動」は解決結果も添える) */
   function seatLabel(): string {
     if (slotChoice === 'auto') {
-      return autoSlot === null ? '自分の席(未確定)' : `自分の席(席${autoSlot})`;
+      if (autoSlot !== null) return `自分の席(席${autoSlot})`;
+      return vacantSlot === null ? '自分の席(未確定)' : `席${vacantSlot}(配信開始前のため仮)`;
     }
     return `席${slotChoice}`;
   }
@@ -169,7 +183,7 @@ export function setupAvatarConsole(options: {
     const slot = effectiveSlot();
     if (slot === null) {
       setStatus(
-        '自分の席が未確定です(ブリッジ/HMD配信を開始すると決まります。先に選ぶ場合は席番号を手動で)',
+        '自分の席が未確定で、席0はほかの配信者が使用中です(ブリッジ/HMD配信を開始すると決まります。先に選ぶ場合は席番号を手動で)',
       );
       return;
     }
@@ -186,13 +200,12 @@ export function setupAvatarConsole(options: {
 
   async function refresh(): Promise<void> {
     try {
-      const [listed, current, resolved] = await Promise.all([
+      const [listed, current] = await Promise.all([
         callJson('/api/vrm/list') as Promise<ListResponse>,
         callJson('/api/avatar') as Promise<AvatarResponse>,
-        resolveOwnSlot ? resolveOwnSlot() : Promise.resolve(null),
+        resolveAuto(),
       ]);
       defaultKey = listed.defaultKey ?? null;
-      autoSlot = resolved;
       currentKeys = {};
       // 旧サーバーは avatar(席0)だけを返す
       if (current.avatar?.key) currentKeys['0'] = current.avatar.key;
@@ -211,13 +224,13 @@ export function setupAvatarConsole(options: {
     setBusy(true);
     try {
       let slot = effectiveSlot();
-      if (slot === null && resolveOwnSlot) {
-        autoSlot = await resolveOwnSlot();
+      if (slot === null) {
+        await resolveAuto();
         slot = effectiveSlot();
       }
       if (slot === null) {
         setStatus(
-          '自分の席が見つかりません。ブリッジ/HMD配信を開始するか、席番号を手動で選んでください',
+          '自分の席が未確定で、席0はほかの配信者が使用中です。ブリッジ/HMD配信を開始するか、席番号を手動で選んでください',
           'error',
         );
         return;
@@ -253,7 +266,7 @@ export function setupAvatarConsole(options: {
   }
 
   /** 進捗を出したいので fetch ではなく XHR を使う(fetchは上りの進捗を取れない) */
-  async function upload(file: File): Promise<void> {
+  async function upload(file: File): Promise<{ key?: string; name?: string }> {
     // XHRのヘッダは同期的に積むため、資格情報は open の前に解決しておく
     const authHeaders = await auth.headers();
     return new Promise((resolve, reject) => {
@@ -271,7 +284,11 @@ export function setupAvatarConsole(options: {
       };
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) {
-          resolve();
+          try {
+            resolve(JSON.parse(xhr.responseText) as { key?: string; name?: string });
+          } catch {
+            resolve({});
+          }
           return;
         }
         let message = `アップロードに失敗 (${xhr.status})`;
@@ -301,10 +318,15 @@ export function setupAvatarConsole(options: {
     progressEl.hidden = false;
     progressEl.value = 0;
     upload(file)
-      .then(async () => {
-        setStatus(`「${file.name}」をアップロードしました`, 'live');
+      .then(async (uploaded) => {
         fileInput.value = '';
-        await refresh();
+        // 上げたらそのまま切り替える(「アップロード → 一覧で切り替え」の二段階で迷わせない)
+        if (uploaded.key) {
+          await switchTo(uploaded.key, uploaded.name ?? file.name);
+        } else {
+          setStatus(`「${file.name}」をアップロードしました`, 'live');
+          await refresh();
+        }
       })
       .catch((error: unknown) => {
         setStatus(`アップロードに失敗: ${String(error)}`, 'error');
@@ -350,8 +372,7 @@ export function setupAvatarConsole(options: {
   slotSelect?.addEventListener('change', () => {
     if (slotSelect.value === 'auto') {
       slotChoice = 'auto';
-      void (resolveOwnSlot ? resolveOwnSlot() : Promise.resolve(null)).then((resolved) => {
-        autoSlot = resolved;
+      void resolveAuto().then(() => {
         render(lastItems);
         reportCurrent();
         reportSeat();
