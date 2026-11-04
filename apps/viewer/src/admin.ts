@@ -12,6 +12,7 @@
  */
 import qrcode from 'qrcode-generator';
 import type { RoomSettings, StageState } from './config';
+import { eyejackUrl } from './eyejack';
 
 interface RoomStatus {
   room: string;
@@ -229,7 +230,11 @@ async function renderLinks(room: RoomStatus, panel: HTMLElement): Promise<void> 
     const links = await api<{ watch: string; broadcast: string }>(
       `/api/admin/rooms/links?room=${encodeURIComponent(room.room)}`,
     );
-    panel.replaceChildren(linkBlock('視聴URL(視聴者に配る)', links.watch, false));
+    panel.replaceChildren(
+      linkBlock('視聴URL(視聴者に配る)', links.watch, false),
+      // iOS の Safari は AR 非対応なので、AR で見せたいときはこちらを配る(中身は同じ視聴URL)
+      linkBlock('iPhone・iPad の AR 用(EyeJack X 経由)', eyejackUrl(links.watch), false),
+    );
     // 配信者URLは配信を操作できる鍵なので、押したときだけ出す
     const reveal = el('button', 'danger', '配信者URLを表示する(配信者だけに渡す鍵)');
     reveal.addEventListener('click', () => {

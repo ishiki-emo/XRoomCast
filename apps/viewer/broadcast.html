@@ -502,7 +502,8 @@
         padding: 4px 10px;
       }
       /* 視聴URLのQR。会場掲示用に全画面へ拡大できる */
-      #s-qr img {
+      #s-qr img,
+      #s-eyejack-qr img {
         display: block;
         width: 108px;
         height: 108px;
@@ -1007,11 +1008,22 @@
               <div id="s-qr" aria-label="視聴URLのQRコード"></div>
               <button class="small" id="s-qr-big">大きく表示(会場掲示用)</button>
             </div>
+            <h3>iPhone・iPad の AR 用(EyeJack X 経由)</h3>
+            <div class="row">
+              <input id="s-eyejack-url" type="text" readonly placeholder="読み込み中..." style="flex: 1; min-width: 14em" />
+              <button class="small primary" id="s-eyejack-copy">コピー</button>
+            </div>
+            <div class="row">
+              <div id="s-eyejack-qr" aria-label="EyeJack X 経由の視聴URLのQRコード"></div>
+              <button class="small" id="s-eyejack-qr-big">大きく表示(会場掲示用)</button>
+            </div>
             <details class="note">
               <summary>ⓘ 視聴URLについて</summary>
               ・このURLを渡せば視聴できます。<strong>会場ではQRを掲示すると案内が楽です</strong><br />
               ・「招待された人だけ」に設定している場合、<strong>このURLを経由した人だけが視聴できます</strong><br />
-              ・視聴URLと配信者URLは別の鍵です。<strong>視聴URLを渡しても配信は操作されません</strong>
+              ・視聴URLと配信者URLは別の鍵です。<strong>視聴URLを渡しても配信は操作されません</strong><br />
+              ・iPhone・iPad の Safari は AR に対応していないため、<strong>AR で見てほしいときは EyeJack X 経由のURL・QR</strong>を渡します(アプリのインストールは不要)。
+              中身は同じ視聴URLです。PC や Android で開いても、そのまま見られます
             </details>
 
             <h3>Questでこのページを開く</h3>

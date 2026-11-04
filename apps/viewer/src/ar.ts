@@ -21,6 +21,7 @@ import {
 } from './depthOcclusion';
 import type { ArPanel } from './spatialUI';
 import { TouchAR } from './touchAR';
+import { eyejackUrl, isAppleMobile } from './eyejack';
 
 export interface ArElements {
   button: HTMLButtonElement;
@@ -247,7 +248,18 @@ export class ArController {
 
   private async init(): Promise<void> {
     const supported = await navigator.xr?.isSessionSupported('immersive-ar').catch(() => false);
-    if (!supported) return;
+    if (!supported) {
+      // iPhone・iPad の Safari は AR 非対応。EyeJack X 経由で同じページを開き直してもらう
+      // (EyeJack X の中では WebXR が使えるので、こちらへは来ない)
+      if (isAppleMobile()) {
+        this.elements.button.textContent = '📱 ARで見る(EyeJack X)';
+        this.elements.button.hidden = false;
+        this.elements.button.addEventListener('click', () => {
+          location.href = eyejackUrl(location.href);
+        });
+      }
+      return;
+    }
     this.elements.button.hidden = false;
     this.elements.button.addEventListener('click', () => void this.start());
     this.elements.exitButton.addEventListener('click', () => void this.session?.end());

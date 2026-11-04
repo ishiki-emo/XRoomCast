@@ -9,6 +9,7 @@
 import qrcode from 'qrcode-generator';
 import { withRoom, type AuthProvider } from '@xroomcast/sync';
 import type { RoomSettings } from './config';
+import { eyejackUrl } from './eyejack';
 
 /**
  * QRを作る。型番0(自動選択)。
@@ -39,6 +40,10 @@ export function setupRoomSettings(options: {
   const watchOpenButton = document.getElementById('s-watch-open') as HTMLButtonElement;
   const qrEl = document.getElementById('s-qr') as HTMLDivElement;
   const qrBigButton = document.getElementById('s-qr-big') as HTMLButtonElement;
+  const eyejackInput = document.getElementById('s-eyejack-url') as HTMLInputElement;
+  const eyejackCopyButton = document.getElementById('s-eyejack-copy') as HTMLButtonElement;
+  const eyejackQrEl = document.getElementById('s-eyejack-qr') as HTMLDivElement;
+  const eyejackQrBigButton = document.getElementById('s-eyejack-qr-big') as HTMLButtonElement;
   const qrStage = document.getElementById('qr-stage') as HTMLDivElement;
   const qrStageImage = document.getElementById('qr-stage-image') as HTMLDivElement;
   const qrStageUrl = document.getElementById('qr-stage-url') as HTMLDivElement;
@@ -71,6 +76,12 @@ export function setupRoomSettings(options: {
     qrBigButton.disabled = !available;
     qrEl.innerHTML = available ? qrImageTag(watchUrl, 3) : '';
     watchUrlShown = available ? watchUrl : null;
+    const eyejack = available ? eyejackUrl(watchUrl) : '';
+    eyejackInput.value = eyejack;
+    eyejackInput.placeholder = available ? '' : watchUrlInput.placeholder;
+    eyejackCopyButton.disabled = !available;
+    eyejackQrBigButton.disabled = !available;
+    eyejackQrEl.innerHTML = available ? qrImageTag(eyejack, 3) : '';
   }
 
   /**
@@ -114,18 +125,24 @@ export function setupRoomSettings(options: {
     if (event.key === 'Escape') closeQrStage();
   });
 
-  watchCopyButton.addEventListener('click', () => {
-    const value = watchUrlInput.value;
+  function copyFrom(input: HTMLInputElement, button: HTMLButtonElement): void {
+    const value = input.value;
     if (!value) return;
     // クリップボードAPIが使えない環境(古いブラウザ・非HTTPS)では選択に留める
     void navigator.clipboard?.writeText(value).then(
       () => {
-        watchCopyButton.textContent = 'コピーしました';
-        window.setTimeout(() => (watchCopyButton.textContent = 'コピー'), 1500);
+        button.textContent = 'コピーしました';
+        window.setTimeout(() => (button.textContent = 'コピー'), 1500);
       },
-      () => watchUrlInput.select(),
+      () => input.select(),
     );
-    if (!navigator.clipboard) watchUrlInput.select();
+    if (!navigator.clipboard) input.select();
+  }
+  watchCopyButton.addEventListener('click', () => copyFrom(watchUrlInput, watchCopyButton));
+  eyejackCopyButton.addEventListener('click', () => copyFrom(eyejackInput, eyejackCopyButton));
+  eyejackQrBigButton.addEventListener('click', () => {
+    const value = eyejackInput.value;
+    if (value) openQrStage(qrImageTag(value, 8), 'iPhone・iPad で AR(EyeJack X)', value, false);
   });
   watchOpenButton.addEventListener('click', () => {
     if (watchUrlInput.value) window.open(watchUrlInput.value, '_blank', 'noopener');
