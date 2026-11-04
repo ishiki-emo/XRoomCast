@@ -330,6 +330,11 @@ const arController = new ArController(
   (arActive) => {
     scenery.setARMode(arActive);
     arModeActive = arActive;
+    // 位置調整・撮影モードのまま抜けたら、次のARは素の状態から始める
+    if (!arActive) {
+      closeNudge();
+      setPhotoMode(false);
+    }
     for (const unit of units.values()) unit.setShadowARActive(arActive);
     // ステージはPC表示でも出す(配信の見た目そのものなので)
     refreshStage();
@@ -432,6 +437,119 @@ settingsToggle.addEventListener('click', () => {
   arControls.hidden = !open;
   settingsToggle.classList.toggle('active', open);
   settingsToggle.textContent = open ? '✕ 閉じる' : '⚙ 設定';
+});
+
+/** 設定パネルを閉じる(位置調整・撮影モードに入るとき、視界を空けるため) */
+function closeSettings(): void {
+  arControls.hidden = true;
+  settingsToggle.classList.remove('active');
+  settingsToggle.textContent = '⚙ 設定';
+}
+
+// ---- 位置の微調整(床に立たせたまま前後左右へずらす・足元を軸に回す) ----
+const nudgePad = document.getElementById('ar-nudge') as HTMLElement;
+/** 1回押したときの移動量(m)。ミニ表示では同じ見た目の動きになるよう縮める */
+const NUDGE_STEP_M = 0.01;
+const NUDGE_STEP_RAD = THREE.MathUtils.degToRad(1);
+/** 長押しで連続して動かす間隔と、速くなるまでの時間 */
+const NUDGE_REPEAT_DELAY_MS = 350;
+const NUDGE_REPEAT_MS = 40;
+const NUDGE_FAST_AFTER_MS = 1200;
+let nudgeTimer: number | null = null;
+
+function openNudge(): void {
+  closeSettings();
+  settingsToggle.hidden = true;
+  nudgePad.hidden = false;
+  arController.showHint('▲▼◀▶ で1cmずつ、⟲⟳ で1°ずつ(長押しで連続)');
+}
+
+function closeNudge(): void {
+  stopNudgeRepeat();
+  nudgePad.hidden = true;
+  settingsToggle.hidden = false;
+}
+
+function stopNudgeRepeat(): void {
+  if (nudgeTimer !== null) window.clearTimeout(nudgeTimer);
+  nudgeTimer = null;
+}
+
+/** 1歩ぶん動かす。fast は長押しを続けたとき(5倍で動く) */
+function nudgeOnce(button: HTMLButtonElement, fast: boolean): void {
+  const gain = fast ? 5 : 1;
+  let moved: boolean;
+  if (button.dataset.rotate) {
+    moved = arController.rotateBy(Number(button.dataset.rotate) * NUDGE_STEP_RAD * gain);
+  } else {
+    const [right, forward] = (button.dataset.nudge ?? '0,0').split(',').map(Number);
+    const step = NUDGE_STEP_M * roomSpace.scale.x * gain;
+    moved = arController.nudge(right! * step, forward! * step);
+  }
+  if (!moved) arController.showHint('先にアバターを置いてください');
+}
+
+for (const button of nudgePad.querySelectorAll<HTMLButtonElement>('[data-nudge],[data-rotate]')) {
+  button.addEventListener('beforexrselect', (event) => event.preventDefault());
+  button.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    stopNudgeRepeat();
+    nudgeOnce(button, false);
+    const startedAt = performance.now();
+    const repeat = (): void => {
+      nudgeOnce(button, performance.now() - startedAt > NUDGE_FAST_AFTER_MS);
+      nudgeTimer = window.setTimeout(repeat, NUDGE_REPEAT_MS);
+    };
+    nudgeTimer = window.setTimeout(repeat, NUDGE_REPEAT_DELAY_MS);
+  });
+  for (const type of ['pointerup', 'pointercancel', 'pointerleave'] as const) {
+    button.addEventListener(type, stopNudgeRepeat);
+  }
+}
+
+const nudgeOpenButton = document.getElementById('ar-nudge-open') as HTMLButtonElement;
+nudgeOpenButton.addEventListener('beforexrselect', (event) => event.preventDefault());
+nudgeOpenButton.addEventListener('click', openNudge);
+const nudgeDoneButton = document.getElementById('ar-nudge-done') as HTMLButtonElement;
+nudgeDoneButton.addEventListener('beforexrselect', (event) => event.preventDefault());
+nudgeDoneButton.addEventListener('click', () => {
+  closeNudge();
+  arController.showHint('位置を決めました');
+});
+
+// ---- 撮影モード(画面のボタンと案内を隠し、端末のスクリーンショットで撮れるようにする) ----
+// カメラ映像は端末が直接描いていてページからは読めないため、写真そのものは
+// 端末の機能で撮ってもらう(iPad は上のボタン+音量を上げるボタン)
+const arOverlay = document.getElementById('ar-overlay') as HTMLElement;
+const photoLayer = document.getElementById('ar-photo-layer') as HTMLElement;
+/** 戻り方の案内を出しておく時間 */
+const PHOTO_INTRO_MS = 2500;
+let photoIntroTimer: number | null = null;
+
+function setPhotoMode(on: boolean): void {
+  if (photoIntroTimer !== null) window.clearTimeout(photoIntroTimer);
+  photoIntroTimer = null;
+  photoLayer.hidden = !on;
+  arOverlay.classList.toggle('photo', on);
+  arOverlay.classList.toggle('photo-intro', on);
+  if (!on) return;
+  closeSettings();
+  closeNudge();
+  arController.showHint('ボタンを隠します。画面を触ると戻ります');
+  photoIntroTimer = window.setTimeout(() => {
+    photoIntroTimer = null;
+    arOverlay.classList.remove('photo-intro');
+  }, PHOTO_INTRO_MS);
+}
+
+const photoOpenButton = document.getElementById('ar-photo-open') as HTMLButtonElement;
+photoOpenButton.addEventListener('beforexrselect', (event) => event.preventDefault());
+photoOpenButton.addEventListener('click', () => setPhotoMode(true));
+// 触ったら戻る。XRのselect(=アバターの設置)にはしない
+photoLayer.addEventListener('beforexrselect', (event) => event.preventDefault());
+photoLayer.addEventListener('pointerup', () => {
+  setPhotoMode(false);
+  arController.showHint('撮影モードを終えました');
 });
 
 syncSizeUi(roomSpace.scale.x);

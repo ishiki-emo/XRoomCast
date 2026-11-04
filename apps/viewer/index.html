@@ -327,6 +327,68 @@
         border-color: #5c9c72;
         color: #d7f5e2;
       }
+      #ar-nudge {
+        position: absolute;
+        bottom: 88px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 3;
+        pointer-events: auto;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border-radius: 22px;
+        background: rgba(0, 0, 0, 0.6);
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-touch-callout: none;
+      }
+      #ar-nudge[hidden] {
+        display: none;
+      }
+      #ar-nudge .nudge-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 56px);
+        grid-auto-rows: 52px;
+        gap: 6px;
+      }
+      #ar-nudge .nudge-grid .ar-chip {
+        padding: 0;
+        font-size: 20px;
+        touch-action: none;
+      }
+      #ar-nudge .nudge-rot {
+        color: #ffd27a;
+      }
+      #ar-nudge .nudge-center {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        color: #bbb;
+        font-size: 11px;
+        line-height: 1.3;
+      }
+      /* 撮影モード: 画面のボタンや案内を全部隠し、カメラ映像とアバターだけにする */
+      #ar-overlay.photo > *:not(#ar-photo-layer) {
+        display: none !important;
+      }
+      /* 入った直後だけ、戻り方の案内を残す */
+      #ar-overlay.photo.photo-intro > #ar-hint {
+        display: block !important;
+      }
+      #ar-photo-layer {
+        position: absolute;
+        inset: 0;
+        z-index: 10;
+        pointer-events: auto;
+        touch-action: none;
+      }
+      #ar-photo-layer[hidden] {
+        display: none;
+      }
 
       /* ---- 視聴モード(?watch=1): ページレイアウト+16:9ステージ ---- */
       body.watch {
@@ -487,6 +549,7 @@
           <button class="ar-chip" data-size="life">等身大</button>
           <button class="ar-chip" data-size="mini">ミニ 1/10</button>
           <button class="ar-chip" id="ar-replace">置き直す</button>
+          <button class="ar-chip" id="ar-nudge-open">位置調整</button>
           <!-- ボケの原因切り分け用。実際の描画解像度をヒント欄に出す -->
           <button class="ar-chip" id="ar-resolution">解像度</button>
         </div>
@@ -511,7 +574,28 @@
           <button class="ar-chip" data-peers="on">表示</button>
           <button class="ar-chip" data-peers="off">隠す</button>
         </div>
+        <div class="ar-group">
+          <span class="ar-label">撮影</span>
+          <button class="ar-chip" id="ar-photo-open">📷 撮影モード(ボタンを隠す)</button>
+        </div>
       </div>
+      <!-- 位置の微調整: 床に立たせたまま、画面から見た前後左右へずらす・足元を軸に回す -->
+      <div id="ar-nudge" hidden>
+        <div class="nudge-grid">
+          <button class="ar-chip nudge-rot" data-rotate="1">⟲</button>
+          <button class="ar-chip" data-nudge="0,1">▲</button>
+          <button class="ar-chip nudge-rot" data-rotate="-1">⟳</button>
+          <button class="ar-chip" data-nudge="-1,0">◀</button>
+          <span class="nudge-center">前後左右<br />回転</span>
+          <button class="ar-chip" data-nudge="1,0">▶</button>
+          <span></span>
+          <button class="ar-chip" data-nudge="0,-1">▼</button>
+          <span></span>
+        </div>
+        <button class="ar-chip" id="ar-nudge-done">完了</button>
+      </div>
+      <!-- 撮影モード中だけ出る、全面の透明な層。触ると元に戻る -->
+      <div id="ar-photo-layer" hidden></div>
       <button id="ar-settings-toggle" class="ar-chip">⚙ 設定</button>
       <button id="ar-exit">AR終了</button>
     </div>

@@ -118,6 +118,8 @@ export class ArController {
   /** rAFフレームでキャッシュした床ヒット位置と視点位置(select時に使用) */
   private latestHit: THREE.Vector3 | null = null;
   private readonly latestViewer = new THREE.Vector3();
+  /** 視点の向き(位置の微調整で「画面から見た前後左右」を決めるのに使う) */
+  private readonly latestViewerQuat = new THREE.Quaternion();
 
   // ---- つかみ状態 ----
   private readonly grips: THREE.XRGripSpace[];
@@ -546,6 +548,8 @@ export class ArController {
         viewer.transform.position.y,
         viewer.transform.position.z,
       );
+      const o = viewer.transform.orientation;
+      this.latestViewerQuat.set(o.x, o.y, o.z, o.w);
     }
 
     if (this.hitTestSource && this.refSpace) {
@@ -922,6 +926,32 @@ export class ArController {
       `キャンバス CSS ${canvas.clientWidth}x${canvas.clientHeight} / 実 ${canvas.width}x${canvas.height}`,
       `比 ${ratio} / 倍率 ${this.framebufferScale.toFixed(2)}`,
     ].join(' / ');
+  }
+
+  /**
+   * 置いたアバターを、床に立たせたまま水平にずらす(位置の微調整)。
+   * 前後左右は**いま画面から見た向き**で決める(どこから見ても押した方へ動く)。
+   * 置く前は何もせず false を返す
+   */
+  nudge(right: number, forward: number): boolean {
+    if (!this.session || !this.placed) return false;
+    // 視点の前方を水平面へ倒す(真下を向いていても前後が決まるよう、上方向も見る)
+    _v1.set(0, 0, -1).applyQuaternion(this.latestViewerQuat);
+    _v1.y = 0;
+    if (_v1.lengthSq() < 1e-4) _v1.set(0, 1, 0).applyQuaternion(this.latestViewerQuat).setY(0);
+    if (_v1.lengthSq() < 1e-6) return false;
+    _v1.normalize();
+    _v2.crossVectors(_v1, UP_AXIS);
+    this.roomSpace.position.addScaledVector(_v1, forward).addScaledVector(_v2, right);
+    return true;
+  }
+
+  /** 置いたアバターを足元を軸に回す(位置の微調整)。置く前は false */
+  rotateBy(radians: number): boolean {
+    if (!this.session || !this.placed) return false;
+    _q1.setFromAxisAngle(UP_AXIS, radians);
+    this.roomSpace.quaternion.premultiply(_q1);
+    return true;
   }
 
   /** AR中のヒント表示を差し替える(AR外では何もしない) */
