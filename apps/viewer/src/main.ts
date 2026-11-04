@@ -418,7 +418,10 @@ setStageEnabled(stageEnabled);
 
 const replaceButton = document.getElementById('ar-replace') as HTMLButtonElement;
 replaceButton.addEventListener('beforexrselect', (event) => event.preventDefault());
-replaceButton.addEventListener('click', () => arController.requestPlacement());
+replaceButton.addEventListener('click', () => {
+  closeSettings();
+  arController.requestPlacement();
+});
 
 /**
  * 解像度の診断。AR中はコンソールを見られないので、実測値をヒント欄へ出す。
@@ -427,23 +430,35 @@ replaceButton.addEventListener('click', () => arController.requestPlacement());
  */
 const resolutionButton = document.getElementById('ar-resolution') as HTMLButtonElement;
 resolutionButton.addEventListener('beforexrselect', (event) => event.preventDefault());
-resolutionButton.addEventListener('click', () => arController.showHint(arController.resolutionReport));
-
-// 設定パネルの開閉(項目が増えて視界を塞ぐため、既定は閉じておく)
-const settingsToggle = document.getElementById('ar-settings-toggle') as HTMLButtonElement;
-settingsToggle.addEventListener('beforexrselect', (event) => event.preventDefault());
-settingsToggle.addEventListener('click', () => {
-  const open = arControls.hidden;
-  arControls.hidden = !open;
-  settingsToggle.classList.toggle('active', open);
-  settingsToggle.textContent = open ? '✕ 閉じる' : '⚙ 設定';
+resolutionButton.addEventListener('click', () => {
+  closeSettings();
+  arController.showHint(arController.resolutionReport);
 });
 
-/** 設定パネルを閉じる(位置調整・撮影モードに入るとき、視界を空けるため) */
+// 上端のアイコンで開く設定の小窓。開けるのは一度に1つで、同じアイコンをもう一度押すと閉じる
+const arOverlay = document.getElementById('ar-overlay') as HTMLElement;
+const popButtons = [...document.querySelectorAll<HTMLButtonElement>('#ar-topbar [data-pop]')];
+const pops = [...arControls.querySelectorAll<HTMLElement>('.ar-pop')];
+
+function openPop(name: string | null): void {
+  for (const pop of pops) pop.hidden = pop.dataset.pop !== name;
+  for (const button of popButtons) button.classList.toggle('active', button.dataset.pop === name);
+  // 小窓が案内と重なるので、開いている間は案内を引っ込める
+  arOverlay.classList.toggle('pop-open', name !== null);
+}
+
+for (const button of popButtons) {
+  button.addEventListener('beforexrselect', (event) => event.preventDefault());
+  button.addEventListener('click', () => {
+    openPop(button.classList.contains('active') ? null : (button.dataset.pop ?? null));
+  });
+}
+// 小窓の外(アバターを触る面)に触れたら閉じる
+document.getElementById('ar-touch')!.addEventListener('pointerdown', () => openPop(null));
+
+/** 設定の小窓を閉じる(位置調整・撮影モードに入るとき、視界を空けるため) */
 function closeSettings(): void {
-  arControls.hidden = true;
-  settingsToggle.classList.remove('active');
-  settingsToggle.textContent = '⚙ 設定';
+  openPop(null);
 }
 
 // ---- 位置の微調整(床に立たせたまま前後左右へずらす・足元を軸に回す) ----
@@ -457,9 +472,12 @@ const NUDGE_REPEAT_MS = 40;
 const NUDGE_FAST_AFTER_MS = 1200;
 let nudgeTimer: number | null = null;
 
+/** 位置調整のパッドはシャッターと同じ場所に出すので、その間シャッターは隠す */
+const photoOpenButton = document.getElementById('ar-photo-open') as HTMLButtonElement;
+
 function openNudge(): void {
   closeSettings();
-  settingsToggle.hidden = true;
+  photoOpenButton.hidden = true;
   nudgePad.hidden = false;
   arController.showHint('▲▼◀▶ で1cmずつ、⟲⟳ で1°ずつ(長押しで連続)');
 }
@@ -467,7 +485,7 @@ function openNudge(): void {
 function closeNudge(): void {
   stopNudgeRepeat();
   nudgePad.hidden = true;
-  settingsToggle.hidden = false;
+  photoOpenButton.hidden = false;
 }
 
 function stopNudgeRepeat(): void {
@@ -520,7 +538,6 @@ nudgeDoneButton.addEventListener('click', () => {
 // ---- 撮影モード(画面のボタンと案内を隠し、端末のスクリーンショットで撮れるようにする) ----
 // カメラ映像は端末が直接描いていてページからは読めないため、写真そのものは
 // 端末の機能で撮ってもらう(iPad は上のボタン+音量を上げるボタン)
-const arOverlay = document.getElementById('ar-overlay') as HTMLElement;
 const photoLayer = document.getElementById('ar-photo-layer') as HTMLElement;
 /** 戻り方の案内を出しておく時間 */
 const PHOTO_INTRO_MS = 2500;
@@ -542,7 +559,6 @@ function setPhotoMode(on: boolean): void {
   }, PHOTO_INTRO_MS);
 }
 
-const photoOpenButton = document.getElementById('ar-photo-open') as HTMLButtonElement;
 photoOpenButton.addEventListener('beforexrselect', (event) => event.preventDefault());
 photoOpenButton.addEventListener('click', () => setPhotoMode(true));
 // 触ったら戻る。XRのselect(=アバターの設置)にはしない

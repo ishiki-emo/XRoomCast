@@ -848,7 +848,7 @@ export class ArController {
     this.roomSpace.quaternion.setFromAxisAngle(UP_AXIS, Math.atan2(p.x - x, p.z - z));
     this.placed = true;
     this.reticle.visible = false;
-    this.elements.hint.textContent = '正面に置きました(設定の「置き直す」で移動できます)';
+    this.elements.hint.textContent = '正面に置きました(上の「アバター」→「置き直す」で移動できます)';
   }
 
   private place(): void {
