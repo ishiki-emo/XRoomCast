@@ -137,7 +137,7 @@ async function resolveMicSlot(): Promise<number> {
 }
 
 function micLiveStatus(): string {
-  return `🔴 音声配信中(席${activeMicSlot}${micSeatNote}。このタブを閉じると停止します)`;
+  return `音声配信中(席${activeMicSlot}${micSeatNote}。このタブを閉じると停止します)`;
 }
 
 /**
